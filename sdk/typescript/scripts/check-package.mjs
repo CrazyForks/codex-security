@@ -285,7 +285,10 @@ function textPayloads(bytes) {
   };
   for (let depth = 0; depth < 8 && pending.length > 0; depth += 1) {
     const decoded = pending.flatMap((value) => {
-      const unescaped = unescape(value).replaceAll(/\\+[nrt]|\r\n?/giu, "\n");
+      const unescaped = unescape(value).replaceAll(
+        /(?:\\+r\\+n|\\+[nrt]|[\t\r\n\f\v])+/giu,
+        "\n",
+      );
       const decodedPercent = boundedMatches(
         value,
         /(?:%[0-9a-f]{2})+/giu,
