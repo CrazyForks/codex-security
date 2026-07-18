@@ -271,6 +271,9 @@ function textPayloads(bytes) {
           /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]{4,}[ \t]*\r?\n[ \t]*)+[a-z0-9+/_-]{2,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
         ...unescaped.matchAll(
+          /(?<![a-z0-9+/_-])[a-z0-9+/_-]{1,3}[ \t]*\r?\n[ \t]*[a-z0-9+/_-]{5,}={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
+        ...unescaped.matchAll(
           /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]+[ \t]*\r?\n[ \t]*){2,}[a-z0-9+/_-]+={0,2}(?![a-z0-9+/_=-])/giu,
         ),
       ]
@@ -397,13 +400,27 @@ function pngTextPayloads(bytes, file) {
   let ended = false;
   while (offset + 12 <= bytes.length) {
     const length = bytes.readUInt32BE(offset);
-    const type = bytes.subarray(offset + 4, offset + 8).toString("ascii");
+    const typeBytes = bytes.subarray(offset + 4, offset + 8);
+    if (
+      typeBytes.some(
+        (byte) =>
+          !(byte >= 0x41 && byte <= 0x5a) && !(byte >= 0x61 && byte <= 0x7a),
+      )
+    ) {
+      throw new Error(
+        `npm tarball contains an invalid PNG chunk type: ${file}.`,
+      );
+    }
+    const type = typeBytes.toString("ascii");
     const end = offset + 8 + length;
     if (end + 4 > bytes.length) {
       throw new Error(`npm tarball contains a truncated PNG: ${file}.`);
     }
     const data = bytes.subarray(offset + 8, end);
     if (type === "IHDR") {
+      if (data.byteLength !== 13) {
+        throw new Error(`npm tarball contains invalid PNG metadata: ${file}.`);
+      }
       header = data;
     } else if (type === "acTL" || type === "fcTL" || type === "fdAT") {
       throw new Error(`npm tarball contains animated PNG data: ${file}.`);
@@ -445,23 +462,13 @@ function pngTextPayloads(bytes, file) {
       texts.push(
         ...textPayloads(compression === 1 ? zlibPayload(text, file) : text),
       );
-    } else if (
-      ![
-        "IEND",
-        "PLTE",
-        "tRNS",
-        "gAMA",
-        "cHRM",
-        "sRGB",
-        "sBIT",
-        "pHYs",
-        "tIME",
-        "bKGD",
-        "hIST",
-        "sPLT",
-        "tEXt",
-      ].includes(type)
-    ) {
+    } else if (["IEND", "gAMA", "cHRM", "pHYs"].includes(type)) {
+      const expectedLength =
+        type === "IEND" ? 0 : type === "gAMA" ? 4 : type === "cHRM" ? 32 : 9;
+      if (data.byteLength !== expectedLength) {
+        throw new Error(`npm tarball contains invalid PNG metadata: ${file}.`);
+      }
+    } else {
       throw new Error(
         `npm tarball contains an unsupported PNG chunk: ${file}.`,
       );
