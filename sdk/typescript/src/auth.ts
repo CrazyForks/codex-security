@@ -92,7 +92,6 @@ export class CodexLoginHandle {
       };
       this.#child.once("close", complete);
       this.#child.once("exit", (exitCode) => {
-        if (process.platform !== "win32") return;
         fallback = setTimeout(() => {
           this.#child.stdout.destroy();
           this.#child.stderr.destroy();

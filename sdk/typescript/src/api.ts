@@ -892,12 +892,12 @@ async function scanPrompt(
     );
   }
   return [
-    `Use the installed $codex-security:${skillName} skill at ${skillPath}.`,
+    `Use the installed $codex-security:${skillName} skill at ${promptData(skillPath)}.`,
     "Run this Codex Security scan non-interactively.",
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
-    `Use ${JSON.stringify(python)} as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.`,
-    `Repository root: ${repository}`,
-    `Use this exact scan directory for all scan output: ${scanDir}`,
+    `Use ${promptData(python)} as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.`,
+    `Repository root: ${promptData(repository)}`,
+    `Use this exact scan directory for all scan output: ${promptData(scanDir)}`,
     targetInstruction(target),
     "Complete and seal the canonical JSON contract before returning.",
   ].join("\n");
@@ -913,14 +913,18 @@ function targetInstruction(target: NormalizedTarget): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths")
-    return `Scan target paths (JSON array): ${JSON.stringify(target.paths)
-      .replaceAll("\u0085", "\\u0085")
-      .replaceAll("\u2028", "\\u2028")
-      .replaceAll("\u2029", "\\u2029")}`;
+    return `Scan target paths (JSON array): ${promptData(target.paths)}`;
   if (target.kind === "refs") {
-    return `Scan target: Git diff from ${target.baseRef} to ${target.headRef}.`;
+    return `Scan target: Git diff from ${promptData(target.baseRef ?? target.base)} to ${promptData(target.headRef ?? target.head)}.`;
   }
-  return `Scan target: staged and unstaged working-tree changes against ${target.baseRef}.`;
+  return `Scan target: staged and unstaged working-tree changes against ${promptData(target.baseRef ?? target.base)}.`;
+}
+
+function promptData(value: string | readonly string[] | undefined): string {
+  return JSON.stringify(value ?? null)
+    .replaceAll("\u0085", "\\u0085")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
 }
 
 async function collectResult(
