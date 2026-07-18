@@ -258,15 +258,23 @@ function textPayloads(bytes) {
   for (let depth = 0; depth < 8 && pending.length > 0; depth += 1) {
     const decoded = pending.flatMap((value) => {
       const unescaped = unescape(value);
+      const decodedPercent = [
+        ...value.matchAll(/(?:%[0-9a-f]{2})+/giu),
+      ].flatMap(([encoded]) =>
+        textViews(Buffer.from(encoded.replaceAll("%", ""), "hex")),
+      );
       const decodedBase64 = [
         ...unescaped.matchAll(
           /(?<![a-z0-9+/_-])[a-z0-9+/_-]{6,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
+        ...unescaped.matchAll(
+          /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]{4,}[ \t]*\r?\n[ \t]*)+[a-z0-9+/_-]{2,}={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
       ]
-        .map(([encoded]) => encoded)
+        .map(([encoded]) => encoded.replaceAll(/\s/gu, ""))
         .filter((encoded) => encoded.length % 4 !== 1)
         .flatMap((encoded) => textViews(Buffer.from(encoded, "base64")));
-      return [unescaped, ...decodedBase64];
+      return [unescaped, ...decodedPercent, ...decodedBase64];
     });
     pending = decoded.filter((value) => {
       if (payloads.has(value)) return false;
