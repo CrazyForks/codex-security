@@ -270,6 +270,9 @@ function textPayloads(bytes) {
         ...unescaped.matchAll(
           /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]{4,}[ \t]*\r?\n[ \t]*)+[a-z0-9+/_-]{2,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
+        ...unescaped.matchAll(
+          /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]+[ \t]*\r?\n[ \t]*){2,}[a-z0-9+/_-]+={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
       ]
         .map(([encoded]) => encoded.replaceAll(/\s/gu, ""))
         .filter((encoded) => encoded.length % 4 !== 1)
@@ -441,6 +444,26 @@ function pngTextPayloads(bytes, file) {
       const text = data.subarray(translatedEnd + 1);
       texts.push(
         ...textPayloads(compression === 1 ? zlibPayload(text, file) : text),
+      );
+    } else if (
+      ![
+        "IEND",
+        "PLTE",
+        "tRNS",
+        "gAMA",
+        "cHRM",
+        "sRGB",
+        "sBIT",
+        "pHYs",
+        "tIME",
+        "bKGD",
+        "hIST",
+        "sPLT",
+        "tEXt",
+      ].includes(type)
+    ) {
+      throw new Error(
+        `npm tarball contains an unsupported PNG chunk: ${file}.`,
       );
     }
     offset = end + 4;
