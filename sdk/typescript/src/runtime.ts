@@ -121,14 +121,21 @@ export async function validateOutputDir(
           `Scan output directory must be empty: ${path}`,
         );
       }
-      return await realpath(path);
+      const canonical = await realpath(path);
+      requireModelSafeOutputDir(canonical);
+      return canonical;
     }
 
     let parent = dirname(path);
     while (true) {
       try {
         if ((await stat(parent)).isDirectory()) {
-          return resolve(await realpath(parent), relative(parent, path));
+          const canonical = resolve(
+            await realpath(parent),
+            relative(parent, path),
+          );
+          requireModelSafeOutputDir(canonical);
+          return canonical;
         }
         break;
       } catch (error) {
