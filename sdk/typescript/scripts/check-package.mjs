@@ -10,6 +10,7 @@ if (archive === undefined || args.length !== 1) {
 }
 
 const archiveBytes = gunzipSync(readFileSync(archive));
+const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
 const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
 function tar(args, encoding = "buffer") {
   const result = spawnSync("tar", ["--ignore-zeros", ...args], {
@@ -211,7 +212,7 @@ if (/^[^d-]/mu.test(listing)) {
 }
 
 const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
+  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
@@ -228,7 +229,10 @@ for (const file of files) {
 }
 
 function brotliPayload(bytes, file) {
-  const result = brotliDecompressSync(bytes, { info: true });
+  const result = brotliDecompressSync(bytes, {
+    info: true,
+    maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
+  });
   if (result.engine.bytesWritten !== bytes.length) {
     throw new Error(`npm tarball contains trailing Brotli data: ${file}.`);
   }
@@ -238,7 +242,7 @@ function brotliPayload(bytes, file) {
 function zlibPayload(bytes, file) {
   const result = inflateSync(bytes, {
     info: true,
-    maxOutputLength: archiveBytes.byteLength + 1024,
+    maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
   });
   if (result.engine.bytesWritten !== bytes.length) {
     throw new Error(`npm tarball contains trailing zlib data: ${file}.`);
@@ -252,6 +256,7 @@ function pngTextPayloads(bytes, file) {
     throw new Error(`npm tarball contains an invalid PNG: ${file}.`);
   }
   const texts = [];
+  const imageData = [];
   let offset = signature.length;
   let ended = false;
   while (offset + 12 <= bytes.length) {
@@ -262,7 +267,9 @@ function pngTextPayloads(bytes, file) {
       throw new Error(`npm tarball contains a truncated PNG: ${file}.`);
     }
     const data = bytes.subarray(offset + 8, end);
-    if (type === "zTXt") {
+    if (type === "IDAT") {
+      imageData.push(data);
+    } else if (type === "zTXt") {
       const keywordEnd = data.indexOf(0);
       if (keywordEnd < 0 || data[keywordEnd + 1] !== 0) {
         throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
@@ -275,8 +282,17 @@ function pngTextPayloads(bytes, file) {
       if (profileEnd < 0 || data[profileEnd + 1] !== 0) {
         throw new Error(`npm tarball contains invalid PNG profile: ${file}.`);
       }
+      const profile = zlibPayload(data.subarray(profileEnd + 2), file);
       texts.push(
-        zlibPayload(data.subarray(profileEnd + 2), file).toString("utf8"),
+        profile.toString("utf8"),
+        new TextDecoder("utf-16be").decode(profile),
+        new TextDecoder("utf-16le").decode(profile),
+      );
+    } else if (type === "eXIf") {
+      texts.push(
+        data.toString("utf8"),
+        new TextDecoder("utf-16be").decode(data),
+        new TextDecoder("utf-16le").decode(data),
       );
     } else if (type === "iTXt") {
       const keywordEnd = data.indexOf(0);
@@ -307,6 +323,14 @@ function pngTextPayloads(bytes, file) {
   if (!ended || offset !== bytes.length) {
     throw new Error(
       `npm tarball contains trailing or truncated PNG data: ${file}.`,
+    );
+  }
+  if (imageData.length > 0) {
+    const pixels = zlibPayload(Buffer.concat(imageData), file);
+    texts.push(
+      pixels.toString("utf8"),
+      new TextDecoder("utf-16be").decode(pixels),
+      new TextDecoder("utf-16le").decode(pixels),
     );
   }
   return texts;

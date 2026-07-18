@@ -39,6 +39,7 @@ const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRY_SIZE = 128 * 1024 * 1024;
 const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
+const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
   let value = index;
   for (let bit = 0; bit < 8; bit += 1) {
@@ -102,6 +103,7 @@ export async function validateOutputDir(
   if (outputDirectory === undefined) {
     return null;
   }
+  requireModelSafeOutputDir(outputDirectory);
   const path = resolve(expandHome(outputDirectory));
   try {
     const metadata = await lstat(path).catch((error: unknown) => {
@@ -148,12 +150,21 @@ export async function validateOutputDir(
   }
 }
 
+export function requireModelSafeOutputDir(path: string): void {
+  if (MODEL_UNSAFE_PATH.test(path)) {
+    throw new OutputDirectoryError(
+      "Scan output directory must not contain control or line-separator characters.",
+    );
+  }
+}
+
 export async function prepareOutputDir(
   outputDirectory: string | undefined,
   repositoryName: string,
   temporaryRoot: string = tmpdir(),
   validateLocation?: (path: string) => void,
 ): Promise<string> {
+  if (outputDirectory === undefined) requireModelSafeOutputDir(temporaryRoot);
   const path = await validateOutputDir(outputDirectory);
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
