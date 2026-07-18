@@ -427,9 +427,16 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
             ):
                 continue
 
-            preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary and not directly_requested:
-                continue
+            if (
+                directly_requested
+                and path.suffix.lower() not in TEXT_CODE_EXTENSIONS
+                and path.name not in EXCLUDED_FILENAMES
+            ):
+                preview = ""
+            else:
+                preview, is_binary = preview_for(path, args.preview_bytes)
+                if is_binary and not directly_requested:
+                    continue
             rows_by_path.setdefault(
                 rel.as_posix(),
                 {"path": rel.as_posix(), "area": area, "preview": preview},

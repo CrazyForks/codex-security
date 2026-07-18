@@ -229,29 +229,33 @@ for (const file of files) {
 }
 
 function textPayloads(bytes) {
-  const views = [
-    bytes.toString("utf8"),
-    new TextDecoder("utf-16be").decode(bytes),
-    new TextDecoder("utf-16le").decode(bytes),
-    new TextDecoder("utf-16be").decode(bytes.subarray(1)),
-    new TextDecoder("utf-16le").decode(bytes.subarray(1)),
+  const textViews = (value) => [
+    value.toString("utf8"),
+    new TextDecoder("utf-16be").decode(value),
+    new TextDecoder("utf-16le").decode(value),
+    new TextDecoder("utf-16be").decode(value.subarray(1)),
+    new TextDecoder("utf-16le").decode(value.subarray(1)),
   ];
+  const views = textViews(bytes);
   const unescape = (value) =>
     value
       .replace(
-        /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/giu,
+        /\\+u\{([0-9a-f]{1,6})\}|\\+u([0-9a-f]{4})|\\+x([0-9a-f]{2})/giu,
         (_match, codePoint, unicode, hex) =>
           String.fromCodePoint(
             Number.parseInt(codePoint ?? unicode ?? hex, 16),
           ),
       )
+      .replace(/\\+([0-3][0-7]{0,2}|[4-7][0-7]?)/gu, (_match, octal) =>
+        String.fromCodePoint(Number.parseInt(octal, 8)),
+      )
       .replace(/(?:%[0-9a-f]{2})+/giu, (encoded) =>
         Buffer.from(encoded.replaceAll("%", ""), "hex").toString("utf8"),
       )
-      .replaceAll("\\/", "/");
+      .replace(/\\+\//gu, "/");
   const payloads = new Set(views);
   let pending = views;
-  for (let depth = 0; depth < 4 && pending.length > 0; depth += 1) {
+  for (let depth = 0; depth < 8 && pending.length > 0; depth += 1) {
     const decoded = pending.flatMap((value) => {
       const unescaped = unescape(value);
       const decodedBase64 = [
@@ -261,7 +265,7 @@ function textPayloads(bytes) {
       ]
         .map(([encoded]) => encoded)
         .filter((encoded) => encoded.length % 4 !== 1)
-        .map((encoded) => Buffer.from(encoded, "base64").toString("utf8"));
+        .flatMap((encoded) => textViews(Buffer.from(encoded, "base64")));
       return [unescaped, ...decodedBase64];
     });
     pending = decoded.filter((value) => {
@@ -269,6 +273,9 @@ function textPayloads(bytes) {
       payloads.add(value);
       return true;
     });
+  }
+  if (pending.length > 0) {
+    throw new Error("npm tarball contains excessively nested encoded content.");
   }
   return [...payloads];
 }
