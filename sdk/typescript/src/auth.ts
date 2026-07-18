@@ -52,6 +52,7 @@ export class CodexLoginHandle {
     this.#child = spawn(command.command, [...command.prefixArgs, ...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       windowsHide: true,
     });
     this.#child.stdout.setEncoding("utf8");
@@ -93,6 +94,7 @@ export class CodexLoginHandle {
       this.#child.once("close", complete);
       this.#child.once("exit", (exitCode) => {
         fallback = setTimeout(() => {
+          this.#terminateProcessTree();
           this.#child.stdout.destroy();
           this.#child.stderr.destroy();
           complete(exitCode);
@@ -136,8 +138,20 @@ export class CodexLoginHandle {
   public cancel(): void {
     if (this.#child.exitCode === null) {
       this.#canceled = true;
-      this.#child.kill("SIGTERM");
+      this.#terminateProcessTree();
     }
+  }
+
+  #terminateProcessTree(): void {
+    if (process.platform !== "win32" && this.#child.pid !== undefined) {
+      try {
+        process.kill(-this.#child.pid, "SIGTERM");
+        return;
+      } catch {
+        // The child or its process group may have already exited.
+      }
+    }
+    this.#child.kill("SIGTERM");
   }
 
   #notifyInstructions(): void {

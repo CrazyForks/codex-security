@@ -652,7 +652,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {
         codexOverrides: {
-          profile: "locked",
+          profile: "inherited",
           shell_environment_policy: {
             inherit: "none",
             exclude: ["OPENAI_*", "CUSTOM_SECRET"],
@@ -661,6 +661,8 @@ describe("CodexSecurity orchestration", () => {
           },
           profiles: {
             locked: {
+              model: "locked-model",
+              model_reasoning_effort: "low",
               shell_environment_policy: {
                 inherit: "none",
                 exclude: ["PROFILE_SECRET"],
@@ -670,6 +672,10 @@ describe("CodexSecurity orchestration", () => {
                   CODEX_SECURITY_SCAN_DIR: "/wrong/scan",
                 },
               },
+            },
+            inherited: {
+              model: "inherited-model",
+              model_reasoning_effort: "high",
             },
           },
         },
@@ -756,11 +762,13 @@ describe("CodexSecurity orchestration", () => {
         "CODEX_SECURITY_PLUGIN_ROOT",
       ],
     });
-    const profilePolicy = (
+    const profiles = (
       (codexOptions as CodexOptions | null)?.config as {
         profiles?: Record<
           string,
           {
+            model?: string;
+            model_reasoning_effort?: string;
             shell_environment_policy?: {
               inherit?: string;
               exclude?: string[];
@@ -770,7 +778,15 @@ describe("CodexSecurity orchestration", () => {
           }
         >;
       }
-    ).profiles?.["locked"]?.shell_environment_policy;
+    ).profiles;
+    expect(profiles).toMatchObject({
+      locked: { model: "locked-model", model_reasoning_effort: "low" },
+      inherited: { model: "inherited-model", model_reasoning_effort: "high" },
+    });
+    expect(profiles?.["inherited"]).not.toHaveProperty(
+      "shell_environment_policy",
+    );
+    const profilePolicy = profiles?.["locked"]?.shell_environment_policy;
     expect(profilePolicy).toMatchObject({
       inherit: "none",
       exclude: ["PROFILE_SECRET"],

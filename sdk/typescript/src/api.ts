@@ -371,20 +371,20 @@ export class CodexSecurity {
       const configuredProfiles = this.config.codexOverrides?.["profiles"];
       const profilePolicies = isCodexConfigObject(configuredProfiles)
         ? Object.fromEntries(
-            Object.entries(configuredProfiles).flatMap(([name, profile]) =>
-              isCodexConfigObject(profile)
+            Object.entries(configuredProfiles).map(([name, profile]) =>
+              isCodexConfigObject(profile) &&
+              isCodexConfigObject(profile["shell_environment_policy"])
                 ? [
-                    [
-                      name,
-                      {
-                        shell_environment_policy: shellEnvironmentPolicy(
-                          profile["shell_environment_policy"],
-                          runtimePaths,
-                        ),
-                      },
-                    ],
+                    name,
+                    {
+                      ...profile,
+                      shell_environment_policy: shellEnvironmentPolicy(
+                        profile["shell_environment_policy"],
+                        runtimePaths,
+                      ),
+                    },
                   ]
-                : [],
+                : [name, profile],
             ),
           )
         : {};
