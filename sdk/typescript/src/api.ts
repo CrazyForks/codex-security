@@ -327,11 +327,8 @@ export class CodexSecurity {
 
       const prompt = await scanPrompt(
         runtime.plugin.installedRoot,
-        repo,
         normalized,
         mode,
-        scanDir,
-        python,
       );
       checkOpen();
       const expectation: ScanExpectation = {
@@ -363,10 +360,16 @@ export class CodexSecurity {
       await validateScanOutput();
       checkOpen();
 
-      const environment = pluginExecutionEnvironment(
-        python,
-        withoutApiKeys(runtime.environment),
-      );
+      const environment = {
+        ...pluginExecutionEnvironment(
+          python,
+          withoutApiKeys(runtime.environment),
+        ),
+        CODEX_SECURITY_REPOSITORY: repo,
+        CODEX_SECURITY_SCAN_DIR: scanDir,
+        CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
+        CODEX_SECURITY_TARGET_PATHS_JSON: JSON.stringify(normalized.paths),
+      };
       const codex = this.#dependencies.createCodex({
         env: definedEnvironment(environment),
         config: { sandbox_workspace_write: { writable_roots: [scanDir] } },
@@ -877,11 +880,8 @@ export class ScanHandle {
 
 async function scanPrompt(
   pluginRoot: string,
-  repository: string,
   target: NormalizedTarget,
   mode: ScanMode,
-  scanDir: string,
-  python: string,
 ): Promise<string> {
   const skillName = skillNameFor(target, mode);
   const skillPath = join(pluginRoot, "skills", skillName, "SKILL.md");
@@ -892,12 +892,13 @@ async function scanPrompt(
     );
   }
   return [
-    `Use the installed $codex-security:${skillName} skill at ${promptData(skillPath)}.`,
+    `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
-    `Use ${promptData(python)} as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.`,
-    `Repository root: ${promptData(repository)}`,
-    `Use this exact scan directory for all scan output: ${promptData(scanDir)}`,
+    'Use "$PYTHON" as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.',
+    'Repository root: "$CODEX_SECURITY_REPOSITORY"',
+    'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
+    "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target),
     "Complete and seal the canonical JSON contract before returning.",
   ].join("\n");
@@ -913,18 +914,11 @@ function targetInstruction(target: NormalizedTarget): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths")
-    return `Scan target paths (JSON array): ${promptData(target.paths)}`;
+    return "Scan target paths: decode CODEX_SECURITY_TARGET_PATHS_JSON before passing each scope to a plugin helper.";
   if (target.kind === "refs") {
-    return `Scan target: Git diff from ${promptData(target.baseRef ?? target.base)} to ${promptData(target.headRef ?? target.head)}.`;
+    return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }
-  return `Scan target: staged and unstaged working-tree changes against ${promptData(target.baseRef ?? target.base)}.`;
-}
-
-function promptData(value: string | readonly string[] | undefined): string {
-  return JSON.stringify(value ?? null)
-    .replaceAll("\u0085", "\\u0085")
-    .replaceAll("\u2028", "\\u2028")
-    .replaceAll("\u2029", "\\u2029");
+  return `Scan target: staged and unstaged working-tree changes against ${target.base}.`;
 }
 
 async function collectResult(

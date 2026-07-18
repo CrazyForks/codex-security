@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 
 const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
@@ -211,7 +211,7 @@ if (/^[^d-]/mu.test(listing)) {
 }
 
 const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[/?#@%\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'`(</])go\/[a-z0-9_-]+)/iu;
+  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
@@ -235,6 +235,71 @@ function brotliPayload(bytes, file) {
   return result.buffer.toString("utf8");
 }
 
+function pngTextPayloads(bytes, file) {
+  const signature = Buffer.from("89504e470d0a1a0a", "hex");
+  if (!bytes.subarray(0, signature.length).equals(signature)) {
+    throw new Error(`npm tarball contains an invalid PNG: ${file}.`);
+  }
+  const texts = [];
+  let offset = signature.length;
+  let ended = false;
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.subarray(offset + 4, offset + 8).toString("ascii");
+    const end = offset + 8 + length;
+    if (end + 4 > bytes.length) {
+      throw new Error(`npm tarball contains a truncated PNG: ${file}.`);
+    }
+    const data = bytes.subarray(offset + 8, end);
+    if (type === "zTXt") {
+      const keywordEnd = data.indexOf(0);
+      if (keywordEnd < 0 || data[keywordEnd + 1] !== 0) {
+        throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
+      }
+      texts.push(
+        inflateSync(data.subarray(keywordEnd + 2), {
+          maxOutputLength: archiveBytes.byteLength + 1024,
+        }).toString("utf8"),
+      );
+    } else if (type === "iTXt") {
+      const keywordEnd = data.indexOf(0);
+      const compression = data[keywordEnd + 1];
+      if (
+        keywordEnd < 0 ||
+        (compression !== 0 && compression !== 1) ||
+        data[keywordEnd + 2] !== 0
+      ) {
+        throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
+      }
+      const languageEnd = data.indexOf(0, keywordEnd + 3);
+      const translatedEnd = data.indexOf(0, languageEnd + 1);
+      if (languageEnd < 0 || translatedEnd < 0) {
+        throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
+      }
+      const text = data.subarray(translatedEnd + 1);
+      texts.push(
+        (compression === 1
+          ? inflateSync(text, {
+              maxOutputLength: archiveBytes.byteLength + 1024,
+            })
+          : text
+        ).toString("utf8"),
+      );
+    }
+    offset = end + 4;
+    if (type === "IEND") {
+      ended = true;
+      break;
+    }
+  }
+  if (!ended || offset !== bytes.length) {
+    throw new Error(
+      `npm tarball contains trailing or truncated PNG data: ${file}.`,
+    );
+  }
+  return texts;
+}
+
 for (const file of compressedFiles) {
   payloads.push(brotliPayload(tar(["-xOf", archive, file]), file));
 }
@@ -244,6 +309,11 @@ for (const parts of compressedParts.values()) {
     parts.map(({ file }) => tar(["-xOf", archive, file])),
   );
   payloads.push(brotliPayload(bytes, parts[0].file));
+}
+for (const file of files) {
+  if (/\.png$/iu.test(file)) {
+    payloads.push(...pngTextPayloads(tar(["-xOf", archive, file]), file));
+  }
 }
 
 for (const contents of payloads) {
