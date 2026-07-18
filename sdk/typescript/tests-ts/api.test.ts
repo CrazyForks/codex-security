@@ -663,7 +663,11 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
     });
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
-      sandbox_workspace_write: { writable_roots: [scanDir] },
+      sandbox_workspace_write: {
+        writable_roots: [scanDir],
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+      },
       shell_environment_policy: {
         set: {
           PYTHON: "/managed/python",
@@ -767,9 +771,15 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
-    await expect(client.turn(repository, { target: paths })).rejects.toThrow(
-      "prompt captured",
-    );
+    const previousUmask =
+      process.platform === "win32" ? null : process.umask(0o777);
+    try {
+      await expect(client.turn(repository, { target: paths })).rejects.toThrow(
+        "prompt captured",
+      );
+    } finally {
+      if (previousUmask !== null) process.umask(previousUmask);
+    }
     const environment = (codexOptions as CodexOptions | null)?.env;
     expect(environment).toMatchObject({
       PYTHON: python,

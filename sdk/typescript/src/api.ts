@@ -1,6 +1,6 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
@@ -407,7 +407,11 @@ export class CodexSecurity {
       const codex = this.#dependencies.createCodex({
         env: definedEnvironment(environment),
         config: {
-          sandbox_workspace_write: { writable_roots: [scanDir] },
+          sandbox_workspace_write: {
+            writable_roots: [scanDir],
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+          },
           shell_environment_policy: shellEnvironmentPolicy(
             this.config.codexOverrides?.["shell_environment_policy"],
             runtimePaths,
@@ -469,6 +473,7 @@ export class CodexSecurity {
           mode: 0o400,
           signal: controller.signal,
         });
+        await chmod(targetPathsFile, 0o400);
         checkOpen();
       }
       const { events } = await thread.runStreamed(prompt, {

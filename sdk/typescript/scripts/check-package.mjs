@@ -249,20 +249,28 @@ function textPayloads(bytes) {
         Buffer.from(encoded.replaceAll("%", ""), "hex").toString("utf8"),
       )
       .replaceAll("\\/", "/");
-  const unescaped = views.map(unescape);
-  const decodedBase64 = unescaped.flatMap((value) =>
-    [
-      ...value.matchAll(
-        /(?<![a-z0-9+/_-])[a-z0-9+/_-]{6,}={0,2}(?![a-z0-9+/_=-])/giu,
-      ),
-    ]
-      .map(([encoded]) => encoded)
-      .filter((encoded) => encoded.length % 4 !== 1)
-      .map((encoded) =>
-        unescape(Buffer.from(encoded, "base64").toString("utf8")),
-      ),
-  );
-  return [...views, ...unescaped, ...decodedBase64];
+  const payloads = new Set(views);
+  let pending = views;
+  for (let depth = 0; depth < 4 && pending.length > 0; depth += 1) {
+    const decoded = pending.flatMap((value) => {
+      const unescaped = unescape(value);
+      const decodedBase64 = [
+        ...unescaped.matchAll(
+          /(?<![a-z0-9+/_-])[a-z0-9+/_-]{6,}={0,2}(?![a-z0-9+/_=-])/giu,
+        ),
+      ]
+        .map(([encoded]) => encoded)
+        .filter((encoded) => encoded.length % 4 !== 1)
+        .map((encoded) => Buffer.from(encoded, "base64").toString("utf8"));
+      return [unescaped, ...decodedBase64];
+    });
+    pending = decoded.filter((value) => {
+      if (payloads.has(value)) return false;
+      payloads.add(value);
+      return true;
+    });
+  }
+  return [...payloads];
 }
 
 function brotliPayload(bytes, file) {
