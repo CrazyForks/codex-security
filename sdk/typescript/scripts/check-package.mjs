@@ -12,6 +12,7 @@ if (archive === undefined || args.length !== 1) {
 
 const archiveBytes = gunzipSync(readFileSync(archive));
 const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
+const MAX_ENCODED_CANDIDATES = 16_384;
 const PUBLIC_LOGO_SHA256 =
   "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
 const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
@@ -258,31 +259,60 @@ function textPayloads(bytes) {
       .replace(/\\+\//gu, "/");
   const payloads = new Set(views);
   let pending = views;
+  let candidateCount = 0;
+  let decodedBytes = 0;
+  const seenCandidates = new Set();
+  const boundedMatches = (value, pattern) => {
+    const matches = [];
+    for (const [match] of value.matchAll(pattern)) {
+      const candidate = match.replaceAll(/\s/gu, "");
+      if (seenCandidates.has(candidate)) continue;
+      seenCandidates.add(candidate);
+      candidateCount += 1;
+      if (candidateCount > MAX_ENCODED_CANDIDATES) {
+        throw new Error("npm tarball exceeds the encoded-content budget.");
+      }
+      matches.push(match);
+    }
+    return matches;
+  };
+  const decodedViews = (bytes) => {
+    decodedBytes += bytes.byteLength;
+    if (decodedBytes > MAX_EXPANDED_ASSET_BYTES) {
+      throw new Error("npm tarball exceeds the encoded-content budget.");
+    }
+    return textViews(bytes);
+  };
   for (let depth = 0; depth < 8 && pending.length > 0; depth += 1) {
     const decoded = pending.flatMap((value) => {
-      const unescaped = unescape(value).replaceAll(/\r\n?/gu, "\n");
-      const decodedPercent = [
-        ...value.matchAll(/(?:%[0-9a-f]{2})+/giu),
-      ].flatMap(([encoded]) =>
-        textViews(Buffer.from(encoded.replaceAll("%", ""), "hex")),
+      const unescaped = unescape(value).replaceAll(/\\+[nrt]|\r\n?/giu, "\n");
+      const decodedPercent = boundedMatches(
+        value,
+        /(?:%[0-9a-f]{2})+/giu,
+      ).flatMap((encoded) =>
+        decodedViews(Buffer.from(encoded.replaceAll("%", ""), "hex")),
       );
       const decodedBase64 = [
-        ...unescaped.matchAll(
+        ...boundedMatches(
+          unescaped,
           /(?<![a-z0-9+/_-])[a-z0-9+/_-]{6,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
-        ...unescaped.matchAll(
+        ...boundedMatches(
+          unescaped,
           /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]{4,}[ \t]*\r?\n[ \t]*)+[a-z0-9+/_-]{1,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
-        ...unescaped.matchAll(
+        ...boundedMatches(
+          unescaped,
           /(?<![a-z0-9+/_-])[a-z0-9+/_-]{1,3}[ \t]*\r?\n[ \t]*[a-z0-9+/_-]{3,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
-        ...unescaped.matchAll(
+        ...boundedMatches(
+          unescaped,
           /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]+[ \t]*\r?\n[ \t]*){2,}[a-z0-9+/_-]+={0,2}(?![a-z0-9+/_=-])/giu,
         ),
       ]
-        .map(([encoded]) => encoded.replaceAll(/\s/gu, ""))
+        .map((encoded) => encoded.replaceAll(/\s/gu, ""))
         .filter((encoded) => encoded.length % 4 !== 1)
-        .flatMap((encoded) => textViews(Buffer.from(encoded, "base64")));
+        .flatMap((encoded) => decodedViews(Buffer.from(encoded, "base64")));
       return [unescaped, ...decodedPercent, ...decodedBase64];
     });
     pending = decoded.filter((value) => {

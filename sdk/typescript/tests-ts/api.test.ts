@@ -1,4 +1,5 @@
 import {
+  copyFile,
   cp,
   mkdir,
   mkdtemp,
@@ -759,6 +760,7 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, `repository${injected}`);
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
+    const capturedTargetPathsFile = join(root, "captured-target-paths.json");
     const python = `/managed/python${injected}`;
     const paths =
       process.platform === "win32"
@@ -829,6 +831,12 @@ describe("CodexSecurity orchestration", () => {
               id: null,
               async runStreamed(input: string) {
                 prompt = input;
+                const pathsFile =
+                  options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+                if (typeof pathsFile !== "string") {
+                  throw new Error("missing target paths file");
+                }
+                await copyFile(pathsFile, capturedTargetPathsFile);
                 throw new Error("prompt captured");
               },
             }),
@@ -872,11 +880,12 @@ describe("CodexSecurity orchestration", () => {
       .replaceAll("\u0085", "\\u0085")
       .replaceAll("\u2028", "\\u2028")
       .replaceAll("\u2029", "\\u2029");
-    expect(await readFile(targetPathsFile, "utf8")).toBe(
+    expect(existsSync(targetPathsFile)).toBe(false);
+    expect(await readFile(capturedTargetPathsFile, "utf8")).toBe(
       `${serializedPaths}\n`,
     );
     if (process.platform !== "win32") {
-      expect((await stat(targetPathsFile)).mode & 0o777).toBe(0o400);
+      expect((await stat(capturedTargetPathsFile)).mode & 0o777).toBe(0o400);
     }
     const shellPolicy = (
       (codexOptions as CodexOptions | null)?.config as {
@@ -1009,6 +1018,7 @@ describe("CodexSecurity orchestration", () => {
             PATH: process.env["PATH"],
             HOME: process.env["HOME"],
             ...shellPolicy?.set,
+            CODEX_SECURITY_TARGET_PATHS_FILE: capturedTargetPathsFile,
           },
           encoding: "utf8",
         },
@@ -1030,7 +1040,7 @@ describe("CodexSecurity orchestration", () => {
         "--repo",
         repository,
         "--scopes-file",
-        targetPathsFile,
+        capturedTargetPathsFile,
         "--out",
         rankInput,
       ],
@@ -1059,7 +1069,7 @@ describe("CodexSecurity orchestration", () => {
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
         "bind-repo-scopes",
         "--scopes-file",
-        targetPathsFile,
+        capturedTargetPathsFile,
         "--manifest",
         manifest,
         "--coverage",
@@ -1073,6 +1083,49 @@ describe("CodexSecurity orchestration", () => {
     expect(JSON.parse(await readFile(coverage, "utf8")).includePaths).toEqual(
       paths,
     );
+    await client.close();
+  });
+
+  test("removes scoped target files after a scan settles", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir);
+    await writeFile(join(repository, "target.ts"), "export {};\n");
+    let targetPathsFile: string | null = null;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              const path = options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+              if (typeof path !== "string") {
+                throw new Error("missing target paths file");
+              }
+              targetPathsFile = path;
+              expect(existsSync(path)).toBe(true);
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    const handle = await client.turn(repository, { target: ["target.ts"] });
+    await handle.settled();
+    expect(targetPathsFile).not.toBeNull();
+    expect(existsSync(targetPathsFile!)).toBe(false);
     await client.close();
   });
 

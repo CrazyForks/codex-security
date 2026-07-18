@@ -75,7 +75,12 @@ export class CodexLoginHandle {
         });
         reject(error);
       });
-      this.#child.once("close", (exitCode) => {
+      let fallback: ReturnType<typeof setTimeout> | undefined;
+      let completed = false;
+      const complete = (exitCode: number | null): void => {
+        if (completed) return;
+        completed = true;
+        if (fallback !== undefined) clearTimeout(fallback);
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
@@ -85,6 +90,15 @@ export class CodexLoginHandle {
         this.#settleInstructionWaiters(result);
         if (result.success) onSuccess();
         resolve(result);
+      };
+      this.#child.once("close", complete);
+      this.#child.once("exit", (exitCode) => {
+        if (process.platform !== "win32") return;
+        fallback = setTimeout(() => {
+          this.#child.stdout.destroy();
+          this.#child.stderr.destroy();
+          complete(exitCode);
+        }, 1_000);
       });
     });
   }

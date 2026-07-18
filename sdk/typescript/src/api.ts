@@ -1,6 +1,6 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
@@ -189,6 +189,7 @@ export class CodexSecurity {
     this.#preparations.add(preparation);
     let scanDir = "";
     let handedOff = false;
+    let targetPathsFile: string | null = null;
     const target = options.target ?? "repository";
     const mode = options.mode ?? "standard";
     try {
@@ -363,7 +364,7 @@ export class CodexSecurity {
       await validateScanOutput();
       checkOpen();
 
-      const targetPathsFile =
+      targetPathsFile =
         normalized.kind === "paths"
           ? join(runtime.codexHome, `target-paths-${randomUUID()}.json`)
           : null;
@@ -493,9 +494,13 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
         replayEvents,
-        onSettled: () => {
-          removeExternalAbort();
-          this.#handles.delete(handle);
+        onSettled: async () => {
+          try {
+            await removeTargetPathsFile(targetPathsFile);
+          } finally {
+            removeExternalAbort();
+            this.#handles.delete(handle);
+          }
         },
       });
       this.#handles.add(handle);
@@ -512,8 +517,14 @@ export class CodexSecurity {
       throw error;
     } finally {
       this.#preparations.delete(preparation);
-      markPreparationSettled();
-      if (!handedOff) removeExternalAbort();
+      try {
+        if (!handedOff) {
+          await removeTargetPathsFile(targetPathsFile);
+        }
+      } finally {
+        if (!handedOff) removeExternalAbort();
+        markPreparationSettled();
+      }
     }
   }
 
@@ -787,6 +798,17 @@ export async function initialCredentialsAvailable(
   return await importer(ambientHome, isolatedHome);
 }
 
+async function removeTargetPathsFile(path: string | null): Promise<void> {
+  if (path === null) return;
+  try {
+    await rm(path, { force: true });
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+    await chmod(path, 0o600);
+    await rm(path, { force: true });
+  }
+}
+
 interface ScanHandleOptions {
   thread: CodexThreadLike;
   events: AsyncGenerator<ScanEvent>;
@@ -795,7 +817,7 @@ interface ScanHandleOptions {
   pluginRoot: string;
   expectation: ScanExpectation;
   replayEvents?: boolean;
-  onSettled: () => void;
+  onSettled: () => void | Promise<void>;
 }
 
 export class ScanHandle {
@@ -939,7 +961,7 @@ export class ScanHandle {
       this.#eventLog.finish(error);
       throw error;
     } finally {
-      options.onSettled();
+      await options.onSettled();
     }
   }
 }
