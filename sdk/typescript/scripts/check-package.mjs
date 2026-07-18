@@ -33,6 +33,28 @@ function tar(args, encoding = "buffer") {
   return result.stdout;
 }
 
+for (let offset = 0; offset + 512 <= archiveBytes.byteLength; ) {
+  const header = archiveBytes.subarray(offset, offset + 512);
+  if (header.every((byte) => byte === 0)) {
+    offset += 512;
+    continue;
+  }
+  const name = header.subarray(0, 100).toString("utf8").split("\0", 1)[0];
+  const sizeField = header
+    .subarray(124, 136)
+    .toString("ascii")
+    .split("\0", 1)[0]
+    .trim();
+  if (!/^[0-7]*$/u.test(sizeField)) {
+    throw new Error("npm tarball contains an invalid tar entry.");
+  }
+  if (name.endsWith("/") && header[156] !== 0x35) {
+    throw new Error("npm tarball contains an invalid tar entry.");
+  }
+  const size = Number.parseInt(sizeField || "0", 8);
+  offset += 512 + Math.ceil(size / 512) * 512;
+}
+
 const entries = tar(["-tzf", archive], "utf8").split(/\r?\n/u).filter(Boolean);
 const files = new Set(entries);
 if (files.size !== entries.length) {
