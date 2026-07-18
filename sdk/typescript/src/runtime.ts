@@ -171,7 +171,10 @@ export async function prepareOutputDir(
   temporaryRoot: string = tmpdir(),
   validateLocation?: (path: string) => void,
 ): Promise<string> {
-  if (outputDirectory === undefined) requireModelSafeOutputDir(temporaryRoot);
+  if (outputDirectory === undefined) {
+    requireModelSafeOutputDir(temporaryRoot);
+    requireModelSafeOutputDir(await realpath(temporaryRoot));
+  }
   const path = await validateOutputDir(outputDirectory);
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
@@ -225,6 +228,7 @@ export async function validatePreparedOutputDir(
 ): Promise<string> {
   const before = await lstat(path);
   const canonical = await realpath(path);
+  requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   const entries = await readdir(canonical);
   const current = await lstat(path);

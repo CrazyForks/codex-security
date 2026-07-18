@@ -450,6 +450,13 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(
         validateOutputDir(join(safeLinkedParent, "existing")),
       ).rejects.toThrow("control or line-separator");
+      await expect(
+        prepareOutputDir(undefined, "repo", safeLinkedParent),
+      ).rejects.toThrow("control or line-separator");
+      await expect(createIsolatedHome(safeLinkedParent)).rejects.toThrow(
+        "control or line-separator",
+      );
+      expect(await readdir(unsafeCanonicalParent)).toEqual(["existing"]);
 
       const restrictedRoot = join(root, "restricted-root");
       await mkdir(restrictedRoot);
