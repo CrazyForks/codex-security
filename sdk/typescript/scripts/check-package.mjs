@@ -216,6 +216,15 @@ if (/^[^d-]/mu.test(listing)) {
     "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
   );
 }
+const listingLines = listing.split(/\r?\n/u).filter(Boolean);
+if (
+  listingLines.length !== entries.length ||
+  listingLines.some(
+    (line, index) => line.startsWith("-") && entries[index].endsWith("/"),
+  )
+) {
+  throw new Error("npm tarball contains an invalid tar entry.");
+}
 
 const internalMarker =
   /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
