@@ -1,6 +1,6 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { Codex, type CodexOptions } from "@openai/codex-sdk";
@@ -360,19 +360,43 @@ export class CodexSecurity {
       await validateScanOutput();
       checkOpen();
 
+      const runtimePaths = {
+        PYTHON: python,
+        CODEX_SECURITY_REPOSITORY: repo,
+        CODEX_SECURITY_SCAN_DIR: scanDir,
+        CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
+      };
+      const configuredShellPolicy =
+        this.config.codexOverrides?.["shell_environment_policy"];
+      const includeOnly =
+        isRecord(configuredShellPolicy) &&
+        Array.isArray(configuredShellPolicy["include_only"])
+          ? configuredShellPolicy["include_only"].filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [];
       const environment = {
         ...pluginExecutionEnvironment(
           python,
           withoutApiKeys(runtime.environment),
         ),
-        CODEX_SECURITY_REPOSITORY: repo,
-        CODEX_SECURITY_SCAN_DIR: scanDir,
-        CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
-        CODEX_SECURITY_TARGET_PATHS_JSON: JSON.stringify(normalized.paths),
+        ...runtimePaths,
       };
       const codex = this.#dependencies.createCodex({
         env: definedEnvironment(environment),
-        config: { sandbox_workspace_write: { writable_roots: [scanDir] } },
+        config: {
+          sandbox_workspace_write: { writable_roots: [scanDir] },
+          shell_environment_policy: {
+            set: runtimePaths,
+            ...(includeOnly.length > 0
+              ? {
+                  include_only: [
+                    ...new Set([...includeOnly, ...Object.keys(runtimePaths)]),
+                  ],
+                }
+              : {}),
+          },
+        },
       });
       const thread = codex.startThread({
         workingDirectory: scanDir,
@@ -413,6 +437,14 @@ export class CodexSecurity {
       await requireUnchangedRuntimeHome();
       await validateScanOutput();
       checkOpen();
+      if (normalized.kind === "paths") {
+        await writeFile(
+          join(scanDir, "target-paths.json"),
+          `${JSON.stringify(normalized.paths)}\n`,
+          { flag: "wx", mode: 0o600, signal: controller.signal },
+        );
+        checkOpen();
+      }
       const { events } = await thread.runStreamed(prompt, {
         signal: controller.signal,
       });
@@ -914,7 +946,7 @@ function targetInstruction(target: NormalizedTarget): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths")
-    return "Scan target paths: decode CODEX_SECURITY_TARGET_PATHS_JSON before passing each scope to a plugin helper.";
+    return 'Scan target paths: read "$CODEX_SECURITY_SCAN_DIR/target-paths.json" as a JSON array before passing each scope to a plugin helper.';
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }

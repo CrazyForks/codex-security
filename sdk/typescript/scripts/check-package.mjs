@@ -235,6 +235,17 @@ function brotliPayload(bytes, file) {
   return result.buffer.toString("utf8");
 }
 
+function zlibPayload(bytes, file) {
+  const result = inflateSync(bytes, {
+    info: true,
+    maxOutputLength: archiveBytes.byteLength + 1024,
+  });
+  if (result.engine.bytesWritten !== bytes.length) {
+    throw new Error(`npm tarball contains trailing zlib data: ${file}.`);
+  }
+  return result.buffer;
+}
+
 function pngTextPayloads(bytes, file) {
   const signature = Buffer.from("89504e470d0a1a0a", "hex");
   if (!bytes.subarray(0, signature.length).equals(signature)) {
@@ -257,9 +268,15 @@ function pngTextPayloads(bytes, file) {
         throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
       }
       texts.push(
-        inflateSync(data.subarray(keywordEnd + 2), {
-          maxOutputLength: archiveBytes.byteLength + 1024,
-        }).toString("utf8"),
+        zlibPayload(data.subarray(keywordEnd + 2), file).toString("utf8"),
+      );
+    } else if (type === "iCCP") {
+      const profileEnd = data.indexOf(0);
+      if (profileEnd < 0 || data[profileEnd + 1] !== 0) {
+        throw new Error(`npm tarball contains invalid PNG profile: ${file}.`);
+      }
+      texts.push(
+        zlibPayload(data.subarray(profileEnd + 2), file).toString("utf8"),
       );
     } else if (type === "iTXt") {
       const keywordEnd = data.indexOf(0);
@@ -278,12 +295,7 @@ function pngTextPayloads(bytes, file) {
       }
       const text = data.subarray(translatedEnd + 1);
       texts.push(
-        (compression === 1
-          ? inflateSync(text, {
-              maxOutputLength: archiveBytes.byteLength + 1024,
-            })
-          : text
-        ).toString("utf8"),
+        (compression === 1 ? zlibPayload(text, file) : text).toString("utf8"),
       );
     }
     offset = end + 4;
