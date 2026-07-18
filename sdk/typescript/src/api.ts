@@ -476,6 +476,9 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
         checkOpen();
       }
+      await requireUnchangedRuntimeHome();
+      await validateScanOutput();
+      checkOpen();
       const { events } = await thread.runStreamed(prompt, {
         signal: controller.signal,
       });

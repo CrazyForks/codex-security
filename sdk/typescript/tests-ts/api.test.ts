@@ -10,13 +10,14 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   AuthenticationRequiredError,
   CodexSecurity,
@@ -559,6 +560,71 @@ describe("CodexSecurity orchestration", () => {
       expect(existsSync(join(outside, "target-paths.json"))).toBe(false);
     } finally {
       JSON.stringify = stringify;
+      await client.close();
+    }
+  });
+
+  test("revalidates a retargeted scan directory after writing scoped paths", async () => {
+    if (process.platform === "win32") return;
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const output = join(root, "scan");
+    const outside = join(root, "outside");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(output);
+    await mkdir(outside);
+    await writeFile(join(repository, "target.ts"), "export {};\n");
+    let runStarted = false;
+    let swapped = false;
+    const originalChmod = fsPromises.chmod;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      chmod: async (...args: Parameters<typeof originalChmod>) => {
+        const result = await originalChmod(...args);
+        if (
+          !swapped &&
+          String(args[0]).startsWith(join(codexHome, "target-paths-"))
+        ) {
+          swapped = true;
+          renameSync(output, `${output}.moved`);
+          symlinkSync(outside, output);
+        }
+        return result;
+      },
+    }));
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => output,
+        repositoryRevision: async () => null,
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              runStarted = true;
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    try {
+      await expect(
+        client.turn(repository, { target: ["target.ts"], outputDir: output }),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      expect(swapped).toBe(true);
+      expect(runStarted).toBe(false);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        chmod: originalChmod,
+      }));
       await client.close();
     }
   });
