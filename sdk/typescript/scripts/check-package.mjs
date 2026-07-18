@@ -40,6 +40,8 @@ for (let offset = 0; offset + 512 <= archiveBytes.byteLength; ) {
     continue;
   }
   const name = header.subarray(0, 100).toString("utf8").split("\0", 1)[0];
+  const prefix = header.subarray(345, 500).toString("utf8").split("\0", 1)[0];
+  const path = prefix === "" ? name : `${prefix}/${name}`;
   const sizeField = header
     .subarray(124, 136)
     .toString("ascii")
@@ -48,7 +50,7 @@ for (let offset = 0; offset + 512 <= archiveBytes.byteLength; ) {
   if (!/^[0-7]*$/u.test(sizeField)) {
     throw new Error("npm tarball contains an invalid tar entry.");
   }
-  if (name.endsWith("/") && header[156] !== 0x35) {
+  if (path.endsWith("/") && header[156] !== 0x35) {
     throw new Error("npm tarball contains an invalid tar entry.");
   }
   const size = Number.parseInt(sizeField || "0", 8);
