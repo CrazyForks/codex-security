@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
 const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
@@ -11,6 +12,8 @@ if (archive === undefined || args.length !== 1) {
 
 const archiveBytes = gunzipSync(readFileSync(archive));
 const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
+const PUBLIC_LOGO_SHA256 =
+  "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
 const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
 function tar(args, encoding = "buffer") {
   const result = spawnSync("tar", ["--ignore-zeros", ...args], {
@@ -257,7 +260,7 @@ function textPayloads(bytes) {
   let pending = views;
   for (let depth = 0; depth < 8 && pending.length > 0; depth += 1) {
     const decoded = pending.flatMap((value) => {
-      const unescaped = unescape(value);
+      const unescaped = unescape(value).replaceAll(/\r\n?/gu, "\n");
       const decodedPercent = [
         ...value.matchAll(/(?:%[0-9a-f]{2})+/giu),
       ].flatMap(([encoded]) =>
@@ -305,189 +308,6 @@ function brotliPayload(bytes, file) {
   return result.buffer;
 }
 
-function zlibPayload(bytes, file) {
-  const result = inflateSync(bytes, {
-    info: true,
-    maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
-  });
-  if (result.engine.bytesWritten !== bytes.length) {
-    throw new Error(`npm tarball contains trailing zlib data: ${file}.`);
-  }
-  return result.buffer;
-}
-
-function unfilterPngPixels(pixels, header, file) {
-  if (header === null || header.byteLength !== 13) {
-    throw new Error(`npm tarball contains an invalid PNG header: ${file}.`);
-  }
-  const width = header.readUInt32BE(0);
-  const height = header.readUInt32BE(4);
-  const bitDepth = header[8];
-  const colorType = header[9];
-  const channels = new Map([
-    [0, 1],
-    [2, 3],
-    [3, 1],
-    [4, 2],
-    [6, 4],
-  ]).get(colorType);
-  const rowBytes = Math.ceil((width * (channels ?? 0) * bitDepth) / 8);
-  const expectedLength = (rowBytes + 1) * height;
-  if (
-    width === 0 ||
-    height === 0 ||
-    channels === undefined ||
-    ![1, 2, 4, 8, 16].includes(bitDepth) ||
-    header[10] !== 0 ||
-    header[11] !== 0 ||
-    header[12] !== 0 ||
-    !Number.isSafeInteger(expectedLength) ||
-    expectedLength > MAX_EXPANDED_ASSET_BYTES ||
-    pixels.byteLength !== expectedLength
-  ) {
-    throw new Error(`npm tarball contains unsupported PNG pixels: ${file}.`);
-  }
-
-  const bytesPerPixel = Math.max(1, Math.ceil((channels * bitDepth) / 8));
-  const decoded = Buffer.alloc(rowBytes * height);
-  for (let row = 0; row < height; row += 1) {
-    const source = row * (rowBytes + 1);
-    const target = row * rowBytes;
-    const filter = pixels[source];
-    if (filter > 4) {
-      throw new Error(`npm tarball contains an invalid PNG filter: ${file}.`);
-    }
-    for (let column = 0; column < rowBytes; column += 1) {
-      const left =
-        column >= bytesPerPixel ? decoded[target + column - bytesPerPixel] : 0;
-      const up = row > 0 ? decoded[target + column - rowBytes] : 0;
-      const upLeft =
-        row > 0 && column >= bytesPerPixel
-          ? decoded[target + column - rowBytes - bytesPerPixel]
-          : 0;
-      let predictor = 0;
-      if (filter === 1) predictor = left;
-      else if (filter === 2) predictor = up;
-      else if (filter === 3) predictor = Math.floor((left + up) / 2);
-      else if (filter === 4) {
-        const estimate = left + up - upLeft;
-        const leftDistance = Math.abs(estimate - left);
-        const upDistance = Math.abs(estimate - up);
-        const upLeftDistance = Math.abs(estimate - upLeft);
-        predictor =
-          leftDistance <= upDistance && leftDistance <= upLeftDistance
-            ? left
-            : upDistance <= upLeftDistance
-              ? up
-              : upLeft;
-      }
-      decoded[target + column] =
-        (pixels[source + column + 1] + predictor) & 0xff;
-    }
-  }
-  return decoded;
-}
-
-function pngTextPayloads(bytes, file) {
-  const signature = Buffer.from("89504e470d0a1a0a", "hex");
-  if (!bytes.subarray(0, signature.length).equals(signature)) {
-    throw new Error(`npm tarball contains an invalid PNG: ${file}.`);
-  }
-  const texts = textPayloads(bytes);
-  const imageData = [];
-  let header = null;
-  let offset = signature.length;
-  let ended = false;
-  while (offset + 12 <= bytes.length) {
-    const length = bytes.readUInt32BE(offset);
-    const typeBytes = bytes.subarray(offset + 4, offset + 8);
-    if (
-      typeBytes.some(
-        (byte) =>
-          !(byte >= 0x41 && byte <= 0x5a) && !(byte >= 0x61 && byte <= 0x7a),
-      )
-    ) {
-      throw new Error(
-        `npm tarball contains an invalid PNG chunk type: ${file}.`,
-      );
-    }
-    const type = typeBytes.toString("ascii");
-    const end = offset + 8 + length;
-    if (end + 4 > bytes.length) {
-      throw new Error(`npm tarball contains a truncated PNG: ${file}.`);
-    }
-    const data = bytes.subarray(offset + 8, end);
-    let crc = 0xffffffff;
-    for (const byte of bytes.subarray(offset + 4, end)) {
-      crc ^= byte;
-      for (let bit = 0; bit < 8; bit += 1) {
-        crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-      }
-    }
-    if ((crc ^ 0xffffffff) >>> 0 !== bytes.readUInt32BE(end)) {
-      throw new Error(`npm tarball contains an invalid PNG checksum: ${file}.`);
-    }
-    if (type === "IHDR") {
-      if (data.byteLength !== 13) {
-        throw new Error(`npm tarball contains invalid PNG metadata: ${file}.`);
-      }
-      header = data;
-    } else if (type === "acTL" || type === "fcTL" || type === "fdAT") {
-      throw new Error(`npm tarball contains animated PNG data: ${file}.`);
-    } else if (type === "IDAT") {
-      imageData.push(data);
-    } else if (type === "eXIf") {
-      texts.push(...textPayloads(data));
-    } else if (type === "iTXt") {
-      const keywordEnd = data.indexOf(0);
-      const compression = data[keywordEnd + 1];
-      if (
-        keywordEnd < 0 ||
-        (compression !== 0 && compression !== 1) ||
-        data[keywordEnd + 2] !== 0
-      ) {
-        throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
-      }
-      const languageEnd = data.indexOf(0, keywordEnd + 3);
-      const translatedEnd = data.indexOf(0, languageEnd + 1);
-      if (languageEnd < 0 || translatedEnd < 0) {
-        throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
-      }
-      const text = data.subarray(translatedEnd + 1);
-      texts.push(
-        ...textPayloads(compression === 1 ? zlibPayload(text, file) : text),
-      );
-    } else if (["IEND", "gAMA", "cHRM", "pHYs"].includes(type)) {
-      const expectedLength =
-        type === "IEND" ? 0 : type === "gAMA" ? 4 : type === "cHRM" ? 32 : 9;
-      if (data.byteLength !== expectedLength) {
-        throw new Error(`npm tarball contains invalid PNG metadata: ${file}.`);
-      }
-    } else {
-      throw new Error(
-        `npm tarball contains an unsupported PNG chunk: ${file}.`,
-      );
-    }
-    offset = end + 4;
-    if (type === "IEND") {
-      ended = true;
-      break;
-    }
-  }
-  if (!ended || offset !== bytes.length) {
-    throw new Error(
-      `npm tarball contains trailing or truncated PNG data: ${file}.`,
-    );
-  }
-  if (header === null || imageData.length === 0) {
-    throw new Error(`npm tarball contains invalid PNG image data: ${file}.`);
-  }
-  const pixels = zlibPayload(Buffer.concat(imageData), file);
-  texts.push(...textPayloads(pixels));
-  texts.push(...textPayloads(unfilterPngPixels(pixels, header, file)));
-  return texts;
-}
-
 for (const file of compressedFiles) {
   payloads.push(
     ...textPayloads(brotliPayload(tar(["-xOf", archive, file]), file)),
@@ -502,7 +322,12 @@ for (const parts of compressedParts.values()) {
 }
 for (const file of files) {
   if (/\.png$/iu.test(file)) {
-    payloads.push(...pngTextPayloads(tar(["-xOf", archive, file]), file));
+    const digest = createHash("sha256")
+      .update(tar(["-xOf", archive, file]))
+      .digest("hex");
+    if (digest !== PUBLIC_LOGO_SHA256) {
+      throw new Error(`npm tarball contains an unexpected PNG asset: ${file}.`);
+    }
   }
 }
 
