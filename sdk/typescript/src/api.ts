@@ -368,15 +368,26 @@ export class CodexSecurity {
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
       };
-      const configuredShellPolicy =
-        this.config.codexOverrides?.["shell_environment_policy"];
-      const includeOnly =
-        isRecord(configuredShellPolicy) &&
-        Array.isArray(configuredShellPolicy["include_only"])
-          ? configuredShellPolicy["include_only"].filter(
-              (value): value is string => typeof value === "string",
-            )
-          : [];
+      const configuredProfiles = this.config.codexOverrides?.["profiles"];
+      const profilePolicies = isCodexConfigObject(configuredProfiles)
+        ? Object.fromEntries(
+            Object.entries(configuredProfiles).flatMap(([name, profile]) =>
+              isCodexConfigObject(profile)
+                ? [
+                    [
+                      name,
+                      {
+                        shell_environment_policy: shellEnvironmentPolicy(
+                          profile["shell_environment_policy"],
+                          runtimePaths,
+                        ),
+                      },
+                    ],
+                  ]
+                : [],
+            ),
+          )
+        : {};
       const environment = {
         ...pluginExecutionEnvironment(
           python,
@@ -388,16 +399,13 @@ export class CodexSecurity {
         env: definedEnvironment(environment),
         config: {
           sandbox_workspace_write: { writable_roots: [scanDir] },
-          shell_environment_policy: {
-            set: runtimePaths,
-            ...(includeOnly.length > 0
-              ? {
-                  include_only: [
-                    ...new Set([...includeOnly, ...Object.keys(runtimePaths)]),
-                  ],
-                }
-              : {}),
-          },
+          shell_environment_policy: shellEnvironmentPolicy(
+            this.config.codexOverrides?.["shell_environment_policy"],
+            runtimePaths,
+          ),
+          ...(Object.keys(profilePolicies).length > 0
+            ? { profiles: profilePolicies }
+            : {}),
         },
       });
       const thread = codex.startThread({
@@ -1064,6 +1072,39 @@ function environmentApiKey(environment: ProcessEnvironment): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCodexConfigObject(
+  value: unknown,
+): value is NonNullable<CodexOptions["config"]> {
+  return isRecord(value);
+}
+
+function shellEnvironmentPolicy(
+  policy: unknown,
+  runtimePaths: Record<string, string>,
+): NonNullable<CodexOptions["config"]> {
+  const configured = isCodexConfigObject(policy) ? policy : {};
+  const configuredSet = isCodexConfigObject(configured["set"])
+    ? configured["set"]
+    : {};
+  const includeOnly = configured["include_only"];
+  return {
+    ...configured,
+    set: { ...configuredSet, ...runtimePaths },
+    ...(Array.isArray(includeOnly)
+      ? {
+          include_only: [
+            ...new Set([
+              ...includeOnly.filter(
+                (value): value is string => typeof value === "string",
+              ),
+              ...Object.keys(runtimePaths),
+            ]),
+          ],
+        }
+      : {}),
+  };
 }
 
 function forwardAbort(

@@ -273,8 +273,8 @@ def path_is_excluded(path: Path) -> bool:
     return path.name.endswith((".min.js", ".map"))
 
 
-def resolve_scope(repo: Path, scope: str) -> Path:
-    scope_path = Path(scope)
+def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
+    scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
     scope_path = scope_path.resolve()
@@ -405,7 +405,7 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
 
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
-        scope_abs = resolve_scope(repo, scope)
+        scope_abs = resolve_scope(repo, scope, expand_user=not explicit_scopes)
         scope_rel = scope_abs.relative_to(repo)
         area = args.area or scope_rel.as_posix()
         candidates = (scope_abs,) if scope_abs.is_file() else scope_abs.rglob("*")

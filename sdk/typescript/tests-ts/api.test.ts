@@ -652,9 +652,25 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {
         codexOverrides: {
+          profile: "locked",
           shell_environment_policy: {
-            inherit: "core",
+            inherit: "none",
+            exclude: ["OPENAI_*", "CUSTOM_SECRET"],
             include_only: ["PATH", "HOME"],
+            set: { CUSTOM_REQUIRED: "top-level", PYTHON: "/wrong/python" },
+          },
+          profiles: {
+            locked: {
+              shell_environment_policy: {
+                inherit: "none",
+                exclude: ["PROFILE_SECRET"],
+                include_only: [],
+                set: {
+                  PROFILE_REQUIRED: "profile-level",
+                  CODEX_SECURITY_SCAN_DIR: "/wrong/scan",
+                },
+              },
+            },
           },
         },
       },
@@ -703,13 +719,29 @@ describe("CodexSecurity orchestration", () => {
     const shellPolicy = (
       (codexOptions as CodexOptions | null)?.config as {
         shell_environment_policy?: {
+          inherit?: string;
+          exclude?: string[];
           set?: Record<string, string>;
           include_only?: string[];
         };
+        profiles?: Record<
+          string,
+          {
+            shell_environment_policy?: {
+              inherit?: string;
+              exclude?: string[];
+              set?: Record<string, string>;
+              include_only?: string[];
+            };
+          }
+        >;
       }
     ).shell_environment_policy;
     expect(shellPolicy).toMatchObject({
+      inherit: "none",
+      exclude: ["OPENAI_*", "CUSTOM_SECRET"],
       set: {
+        CUSTOM_REQUIRED: "top-level",
         PYTHON: python,
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
@@ -718,6 +750,38 @@ describe("CodexSecurity orchestration", () => {
       include_only: [
         "PATH",
         "HOME",
+        "PYTHON",
+        "CODEX_SECURITY_REPOSITORY",
+        "CODEX_SECURITY_SCAN_DIR",
+        "CODEX_SECURITY_PLUGIN_ROOT",
+      ],
+    });
+    const profilePolicy = (
+      (codexOptions as CodexOptions | null)?.config as {
+        profiles?: Record<
+          string,
+          {
+            shell_environment_policy?: {
+              inherit?: string;
+              exclude?: string[];
+              set?: Record<string, string>;
+              include_only?: string[];
+            };
+          }
+        >;
+      }
+    ).profiles?.["locked"]?.shell_environment_policy;
+    expect(profilePolicy).toMatchObject({
+      inherit: "none",
+      exclude: ["PROFILE_SECRET"],
+      set: {
+        PROFILE_REQUIRED: "profile-level",
+        PYTHON: python,
+        CODEX_SECURITY_REPOSITORY: repository,
+        CODEX_SECURITY_SCAN_DIR: scanDir,
+        CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+      },
+      include_only: [
         "PYTHON",
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
