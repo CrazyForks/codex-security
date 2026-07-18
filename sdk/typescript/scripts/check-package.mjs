@@ -10,9 +10,11 @@ if (archive === undefined || args.length !== 1) {
   throw new Error("Usage: node scripts/check-package.mjs <npm-tarball>");
 }
 
-const archiveBytes = gunzipSync(readFileSync(archive));
 const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
 const MAX_ENCODED_CANDIDATES = 16_384;
+const archiveBytes = gunzipSync(readFileSync(archive), {
+  maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
+});
 const PUBLIC_LOGO_SHA256 =
   "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
 const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
