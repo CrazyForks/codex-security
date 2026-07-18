@@ -404,9 +404,14 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     if explicit_scopes:
         scopes = load_scopes_file(Path(args.scopes_file).expanduser())
 
+    resolved_scopes = [
+        resolve_scope(repo, scope, expand_user=not explicit_scopes) for scope in scopes
+    ]
+    directly_requested_files = {
+        scope_abs for scope_abs in resolved_scopes if explicit_scopes and scope_abs.is_file()
+    }
     rows_by_path: dict[str, JsonRow] = {}
-    for scope in scopes:
-        scope_abs = resolve_scope(repo, scope, expand_user=not explicit_scopes)
+    for scope_abs in resolved_scopes:
         scope_rel = scope_abs.relative_to(repo)
         area = args.area or scope_rel.as_posix()
         candidates = (scope_abs,) if scope_abs.is_file() else scope_abs.rglob("*")
@@ -417,7 +422,7 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
             except OSError:
                 continue
             rel = path.relative_to(repo)
-            directly_requested = explicit_scopes and scope_abs.is_file()
+            directly_requested = path in directly_requested_files
             excluded_path = (
                 path.relative_to(scope_abs if scope_abs.is_dir() else scope_abs.parent)
                 if explicit_scopes
