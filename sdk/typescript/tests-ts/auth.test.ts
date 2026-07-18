@@ -158,48 +158,51 @@ describe("Codex authentication process boundary", () => {
     },
   );
 
-  test.skipIf(process.platform === "win32")(
-    "terminates inherited-pipe descendants after the login child exits",
-    async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tree-"));
-      temporaryDirectories.push(root);
-      const pidFile = join(root, "descendant.pid");
-      const started = Date.now();
-      const handle = new CodexLoginHandle(
-        {
-          command: "/bin/sh",
-          prefixArgs: [
-            "-c",
-            'sleep 100000 & printf \'%s\\n\' "$!" > "$1"; exit 0',
-            "--",
-            pidFile,
-          ],
-        },
-        ["login"],
-        process.env,
-        () => {},
-      );
-      await expect(handle.wait()).resolves.toMatchObject({ success: true });
-      expect(Date.now() - started).toBeLessThan(2_500);
-      const descendant = Number((await readFile(pidFile, "utf8")).trim());
-      expect(Number.isSafeInteger(descendant)).toBe(true);
-      let alive = true;
-      try {
-        for (let attempt = 0; attempt < 100; attempt += 1) {
-          try {
-            process.kill(descendant, 0);
-          } catch {
-            alive = false;
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 10));
+  test("terminates inherited-pipe descendants after the login child exits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tree-"));
+    temporaryDirectories.push(root);
+    const pidFile = join(root, "descendant.pid");
+    const script = join(root, "login.mjs");
+    await writeFile(
+      script,
+      `
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+  stdio: ["ignore", "inherit", "inherit"],
+  windowsHide: true,
+});
+writeFileSync(process.argv[2], String(descendant.pid));
+process.exit(0);
+`,
+    );
+    const started = Date.now();
+    const handle = new CodexLoginHandle(
+      { command: process.execPath, prefixArgs: [script, pidFile] },
+      ["login"],
+      process.env,
+      () => {},
+    );
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+    expect(Date.now() - started).toBeLessThan(12_000);
+    const descendant = Number((await readFile(pidFile, "utf8")).trim());
+    expect(Number.isSafeInteger(descendant)).toBe(true);
+    let alive = true;
+    try {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          process.kill(descendant, 0);
+        } catch {
+          alive = false;
+          break;
         }
-        expect(alive).toBe(false);
-      } finally {
-        if (alive) process.kill(descendant, "SIGKILL");
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
-    },
-  );
+      expect(alive).toBe(false);
+    } finally {
+      if (alive) process.kill(descendant, "SIGKILL");
+    }
+  });
 
   test("does not report a canceled interactive login as successful", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-cancel-"));

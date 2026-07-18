@@ -1,5 +1,10 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { isIP } from "node:net";
+import { join } from "node:path";
 import {
   PluginBootstrapError,
   UnsupportedCodexSdkCapabilityError,
@@ -95,9 +100,12 @@ export class CodexLoginHandle {
       this.#child.once("exit", (exitCode) => {
         fallback = setTimeout(() => {
           this.#terminateProcessTree();
-          this.#child.stdout.destroy();
-          this.#child.stderr.destroy();
-          complete(exitCode);
+          fallback = setTimeout(() => {
+            this.#terminateProcessTree("SIGKILL");
+            this.#child.stdout.destroy();
+            this.#child.stderr.destroy();
+            complete(exitCode);
+          }, 1_000);
         }, 1_000);
       });
     });
@@ -142,16 +150,53 @@ export class CodexLoginHandle {
     }
   }
 
-  #terminateProcessTree(): void {
+  #terminateProcessTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): void {
+    if (process.platform === "win32" && this.#child.pid !== undefined) {
+      const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
+      const taskkill = join(systemRoot, "System32", "taskkill.exe");
+      const targets =
+        this.#child.exitCode === null
+          ? [this.#child.pid]
+          : spawnSync(
+              join(
+                systemRoot,
+                "System32",
+                "WindowsPowerShell",
+                "v1.0",
+                "powershell.exe",
+              ),
+              [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                `Get-CimInstance Win32_Process -Filter 'ParentProcessId = ${this.#child.pid}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessId`,
+              ],
+              {
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"],
+                timeout: 5_000,
+                windowsHide: true,
+              },
+            ).stdout?.match(/\d+/g) ?? [];
+      for (const target of targets) {
+        spawnSync(taskkill, ["/F", "/T", "/PID", String(target)], {
+          stdio: "ignore",
+          timeout: 5_000,
+          windowsHide: true,
+        });
+      }
+      return;
+    }
     if (process.platform !== "win32" && this.#child.pid !== undefined) {
       try {
-        process.kill(-this.#child.pid, "SIGTERM");
+        process.kill(-this.#child.pid, signal);
         return;
       } catch {
         // The child or its process group may have already exited.
       }
     }
-    this.#child.kill("SIGTERM");
+    this.#child.kill(signal);
   }
 
   #notifyInstructions(): void {

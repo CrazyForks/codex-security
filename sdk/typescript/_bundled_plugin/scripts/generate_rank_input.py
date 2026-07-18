@@ -428,7 +428,7 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
                 continue
 
             preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary:
+            if is_binary and not directly_requested:
                 continue
             rows_by_path.setdefault(
                 rel.as_posix(),
