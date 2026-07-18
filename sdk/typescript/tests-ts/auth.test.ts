@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -129,79 +129,6 @@ describe("Codex authentication process boundary", () => {
     expect(handle.verificationUrl).toBe("https://127.auth.example.test/device");
     expect(handle.userCode).toBe("8356-V2EGR");
     expect(succeeded).toBe(true);
-  });
-
-  test.skipIf(process.platform === "win32")(
-    "drains inherited stderr before resolving interactive login",
-    async () => {
-      const handle = new CodexLoginHandle(
-        {
-          command: "/bin/sh",
-          prefixArgs: [
-            "-c",
-            "(sleep 0.05; printf '%s\\n' 'network timeout while authenticating' >&2) & exit 1",
-            "--",
-          ],
-        },
-        ["login"],
-        process.env,
-        () => {},
-      );
-      await expect(handle.waitForInstructions()).rejects.toThrow(
-        "network timeout while authenticating",
-      );
-      await expect(handle.wait()).resolves.toMatchObject({
-        success: false,
-        exitCode: 1,
-        stderr: expect.stringContaining("network timeout while authenticating"),
-      });
-    },
-  );
-
-  test("terminates inherited-pipe descendants after the login child exits", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tree-"));
-    temporaryDirectories.push(root);
-    const pidFile = join(root, "descendant.pid");
-    const script = join(root, "login.mjs");
-    await writeFile(
-      script,
-      `
-import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
-const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
-  stdio: ["ignore", "inherit", "inherit"],
-  windowsHide: true,
-});
-writeFileSync(process.argv[2], String(descendant.pid));
-process.exit(0);
-`,
-    );
-    const started = Date.now();
-    const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script, pidFile] },
-      ["login"],
-      process.env,
-      () => {},
-    );
-    await expect(handle.wait()).resolves.toMatchObject({ success: true });
-    expect(Date.now() - started).toBeLessThan(12_000);
-    const descendant = Number((await readFile(pidFile, "utf8")).trim());
-    expect(Number.isSafeInteger(descendant)).toBe(true);
-    let alive = true;
-    try {
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        try {
-          process.kill(descendant, 0);
-        } catch {
-          alive = false;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      expect(alive).toBe(false);
-    } finally {
-      if (alive) process.kill(descendant, "SIGKILL");
-    }
   });
 
   test("does not report a canceled interactive login as successful", async () => {

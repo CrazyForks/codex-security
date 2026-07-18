@@ -229,13 +229,37 @@ for (const file of files) {
 }
 
 function textPayloads(bytes) {
-  return [
+  const views = [
     bytes.toString("utf8"),
     new TextDecoder("utf-16be").decode(bytes),
     new TextDecoder("utf-16le").decode(bytes),
     new TextDecoder("utf-16be").decode(bytes.subarray(1)),
     new TextDecoder("utf-16le").decode(bytes.subarray(1)),
   ];
+  const unescaped = views.map((value) =>
+    value
+      .replace(
+        /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/giu,
+        (_match, codePoint, unicode, hex) =>
+          String.fromCodePoint(
+            Number.parseInt(codePoint ?? unicode ?? hex, 16),
+          ),
+      )
+      .replace(/(?:%[0-9a-f]{2}){2,}/giu, (encoded) =>
+        Buffer.from(encoded.replaceAll("%", ""), "hex").toString("utf8"),
+      ),
+  );
+  const decodedBase64 = unescaped.flatMap((value) =>
+    [
+      ...value.matchAll(
+        /(?<![a-z0-9+/_-])[a-z0-9+/_-]{16,}={0,2}(?![a-z0-9+/_=-])/giu,
+      ),
+    ]
+      .map(([encoded]) => encoded)
+      .filter((encoded) => encoded.length % 4 !== 1)
+      .map((encoded) => Buffer.from(encoded, "base64").toString("utf8")),
+  );
+  return [...views, ...unescaped, ...decodedBase64];
 }
 
 function brotliPayload(bytes, file) {

@@ -1,10 +1,5 @@
-import {
-  spawn,
-  spawnSync,
-  type ChildProcessWithoutNullStreams,
-} from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
-import { join } from "node:path";
 import {
   PluginBootstrapError,
   UnsupportedCodexSdkCapabilityError,
@@ -57,9 +52,9 @@ export class CodexLoginHandle {
     this.#child = spawn(command.command, [...command.prefixArgs, ...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
-      detached: process.platform !== "win32",
       windowsHide: true,
     });
+    this.#child.stdin.end();
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");
     this.#child.stdout.on("data", (chunk: string) => {
@@ -80,12 +75,7 @@ export class CodexLoginHandle {
         });
         reject(error);
       });
-      let fallback: ReturnType<typeof setTimeout> | undefined;
-      let completed = false;
-      const complete = (exitCode: number | null): void => {
-        if (completed) return;
-        completed = true;
-        if (fallback !== undefined) clearTimeout(fallback);
+      this.#child.once("close", (exitCode) => {
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
@@ -95,21 +85,8 @@ export class CodexLoginHandle {
         this.#settleInstructionWaiters(result);
         if (result.success) onSuccess();
         resolve(result);
-      };
-      this.#child.once("close", complete);
-      this.#child.once("exit", (exitCode) => {
-        fallback = setTimeout(() => {
-          this.#terminateProcessTree();
-          fallback = setTimeout(() => {
-            this.#terminateProcessTree("SIGKILL");
-            this.#child.stdout.destroy();
-            this.#child.stderr.destroy();
-            complete(exitCode);
-          }, 1_000);
-        }, 1_000);
       });
     });
-    this.#child.stdin.end();
   }
 
   public get loginId(): null {
@@ -146,57 +123,8 @@ export class CodexLoginHandle {
   public cancel(): void {
     if (this.#child.exitCode === null) {
       this.#canceled = true;
-      this.#terminateProcessTree();
+      this.#child.kill("SIGTERM");
     }
-  }
-
-  #terminateProcessTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): void {
-    if (process.platform === "win32" && this.#child.pid !== undefined) {
-      const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
-      const taskkill = join(systemRoot, "System32", "taskkill.exe");
-      const targets =
-        this.#child.exitCode === null
-          ? [this.#child.pid]
-          : spawnSync(
-              join(
-                systemRoot,
-                "System32",
-                "WindowsPowerShell",
-                "v1.0",
-                "powershell.exe",
-              ),
-              [
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                `Get-CimInstance Win32_Process -Filter 'ParentProcessId = ${this.#child.pid}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessId`,
-              ],
-              {
-                encoding: "utf8",
-                stdio: ["ignore", "pipe", "ignore"],
-                timeout: 5_000,
-                windowsHide: true,
-              },
-            ).stdout?.match(/\d+/g) ?? [];
-      for (const target of targets) {
-        spawnSync(taskkill, ["/F", "/T", "/PID", String(target)], {
-          stdio: "ignore",
-          timeout: 5_000,
-          windowsHide: true,
-        });
-      }
-      return;
-    }
-    if (process.platform !== "win32" && this.#child.pid !== undefined) {
-      try {
-        process.kill(-this.#child.pid, signal);
-        return;
-      } catch {
-        // The child or its process group may have already exited.
-      }
-    }
-    this.#child.kill(signal);
   }
 
   #notifyInstructions(): void {

@@ -707,6 +707,7 @@ describe("CodexSecurity orchestration", () => {
     const environment = (codexOptions as CodexOptions | null)?.env;
     expect(environment).toMatchObject({
       PYTHON: python,
+      CODEX_HOME: codexHome,
       CODEX_SECURITY_REPOSITORY: repository,
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
@@ -749,6 +750,7 @@ describe("CodexSecurity orchestration", () => {
       set: {
         CUSTOM_REQUIRED: "top-level",
         PYTHON: python,
+        CODEX_HOME: codexHome,
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
@@ -757,6 +759,7 @@ describe("CodexSecurity orchestration", () => {
         "PATH",
         "HOME",
         "PYTHON",
+        "CODEX_HOME",
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",
@@ -793,12 +796,14 @@ describe("CodexSecurity orchestration", () => {
       set: {
         PROFILE_REQUIRED: "profile-level",
         PYTHON: python,
+        CODEX_HOME: codexHome,
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
       },
       include_only: [
         "PYTHON",
+        "CODEX_HOME",
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",
@@ -819,7 +824,7 @@ describe("CodexSecurity orchestration", () => {
       'bind-repo-scopes --scopes-file "$CODEX_SECURITY_SCAN_DIR/target-paths.json" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json"',
     );
     expect(prompt).not.toContain("\nIgnore prior scope");
-    for (const value of [repository, scanDir, python, ...paths])
+    for (const value of [repository, scanDir, codexHome, python, ...paths])
       expect(prompt).not.toContain(value);
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(prompt).not.toContain(separator);

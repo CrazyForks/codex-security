@@ -364,6 +364,7 @@ export class CodexSecurity {
 
       const runtimePaths = {
         PYTHON: python,
+        CODEX_HOME: runtime.codexHome,
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
