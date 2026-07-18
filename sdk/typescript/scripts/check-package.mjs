@@ -236,7 +236,7 @@ function textPayloads(bytes) {
     new TextDecoder("utf-16be").decode(bytes.subarray(1)),
     new TextDecoder("utf-16le").decode(bytes.subarray(1)),
   ];
-  const unescaped = views.map((value) =>
+  const unescape = (value) =>
     value
       .replace(
         /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/giu,
@@ -245,19 +245,22 @@ function textPayloads(bytes) {
             Number.parseInt(codePoint ?? unicode ?? hex, 16),
           ),
       )
-      .replace(/(?:%[0-9a-f]{2}){2,}/giu, (encoded) =>
+      .replace(/(?:%[0-9a-f]{2})+/giu, (encoded) =>
         Buffer.from(encoded.replaceAll("%", ""), "hex").toString("utf8"),
-      ),
-  );
+      )
+      .replaceAll("\\/", "/");
+  const unescaped = views.map(unescape);
   const decodedBase64 = unescaped.flatMap((value) =>
     [
       ...value.matchAll(
-        /(?<![a-z0-9+/_-])[a-z0-9+/_-]{16,}={0,2}(?![a-z0-9+/_=-])/giu,
+        /(?<![a-z0-9+/_-])[a-z0-9+/_-]{6,}={0,2}(?![a-z0-9+/_=-])/giu,
       ),
     ]
       .map(([encoded]) => encoded)
       .filter((encoded) => encoded.length % 4 !== 1)
-      .map((encoded) => Buffer.from(encoded, "base64").toString("utf8")),
+      .map((encoded) =>
+        unescape(Buffer.from(encoded, "base64").toString("utf8")),
+      ),
   );
   return [...views, ...unescaped, ...decodedBase64];
 }

@@ -1,6 +1,7 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
 import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { Codex, type CodexOptions } from "@openai/codex-sdk";
@@ -362,12 +363,19 @@ export class CodexSecurity {
       await validateScanOutput();
       checkOpen();
 
+      const targetPathsFile =
+        normalized.kind === "paths"
+          ? join(runtime.codexHome, `target-paths-${randomUUID()}.json`)
+          : null;
       const runtimePaths = {
         PYTHON: python,
         CODEX_HOME: runtime.codexHome,
         CODEX_SECURITY_REPOSITORY: repo,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.installedRoot,
+        ...(targetPathsFile === null
+          ? {}
+          : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
       };
       const configuredProfiles = this.config.codexOverrides?.["profiles"];
       const profilePolicies = isCodexConfigObject(configuredProfiles)
@@ -445,19 +453,22 @@ export class CodexSecurity {
           );
         }
       }
+      const serializedPaths =
+        normalized.kind === "paths"
+          ? JSON.stringify(normalized.paths)
+              .replaceAll("\u0085", "\\u0085")
+              .replaceAll("\u2028", "\\u2028")
+              .replaceAll("\u2029", "\\u2029")
+          : null;
       await requireUnchangedRuntimeHome();
       await validateScanOutput();
       checkOpen();
-      if (normalized.kind === "paths") {
-        const serializedPaths = JSON.stringify(normalized.paths)
-          .replaceAll("\u0085", "\\u0085")
-          .replaceAll("\u2028", "\\u2028")
-          .replaceAll("\u2029", "\\u2029");
-        await writeFile(
-          join(scanDir, "target-paths.json"),
-          `${serializedPaths}\n`,
-          { flag: "wx", mode: 0o600, signal: controller.signal },
-        );
+      if (serializedPaths !== null && targetPathsFile !== null) {
+        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
+          flag: "wx",
+          mode: 0o400,
+          signal: controller.signal,
+        });
         checkOpen();
       }
       const { events } = await thread.runStreamed(prompt, {
@@ -961,7 +972,7 @@ function targetInstruction(target: NormalizedTarget): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths")
-    return 'Scan target paths: generate the combined inventory once with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_SCAN_DIR/target-paths.json" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/rank_input.jsonl". Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_SCAN_DIR/target-paths.json" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print or evaluate target-paths.json.';
+    return 'Scan target paths: generate the combined inventory once with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/rank_input.jsonl". Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }

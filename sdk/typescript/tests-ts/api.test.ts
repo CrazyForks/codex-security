@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { existsSync, renameSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -497,6 +498,71 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("revalidates a retargeted scan directory before writing scoped paths", async () => {
+    if (process.platform === "win32") return;
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const output = join(root, "scan");
+    const outside = join(root, "outside");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(output);
+    await mkdir(outside);
+    await writeFile(join(repository, "target.ts"), "export {};\n");
+    let runStarted = false;
+    let swapped = false;
+    const stringify = JSON.stringify;
+    JSON.stringify = ((value: unknown, ...args: unknown[]) => {
+      const serialized = Reflect.apply(stringify, JSON, [
+        value,
+        ...args,
+      ]) as string;
+      if (
+        !swapped &&
+        Array.isArray(value) &&
+        value.length === 1 &&
+        value[0] === "target.ts"
+      ) {
+        swapped = true;
+        renameSync(output, `${output}.moved`);
+        symlinkSync(outside, output);
+      }
+      return serialized;
+    }) as typeof JSON.stringify;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => output,
+        repositoryRevision: async () => null,
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              runStarted = true;
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    try {
+      await expect(
+        client.turn(repository, { target: ["target.ts"], outputDir: output }),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      expect(swapped).toBe(true);
+      expect(runStarted).toBe(false);
+      expect(existsSync(join(outside, "target-paths.json"))).toBe(false);
+    } finally {
+      JSON.stringify = stringify;
+      await client.close();
+    }
+  });
+
   test("rejects a runtime home retargeted during scan preparation", async () => {
     if (process.platform === "win32") return;
     const root = await temporaryDirectory();
@@ -713,6 +779,16 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
     });
     expect(environment).not.toHaveProperty("CODEX_SECURITY_TARGET_PATHS_JSON");
+    const targetPathsFile = environment?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+    expect(typeof targetPathsFile).toBe("string");
+    if (typeof targetPathsFile !== "string")
+      throw new Error("missing target paths file");
+    expect(targetPathsFile.startsWith(join(codexHome, "target-paths-"))).toBe(
+      true,
+    );
+    expect(targetPathsFile.startsWith(join(scanDir, "target-paths-"))).toBe(
+      false,
+    );
     expect(Buffer.byteLength(JSON.stringify(paths))).toBeGreaterThan(
       128 * 1024,
     );
@@ -720,9 +796,12 @@ describe("CodexSecurity orchestration", () => {
       .replaceAll("\u0085", "\\u0085")
       .replaceAll("\u2028", "\\u2028")
       .replaceAll("\u2029", "\\u2029");
-    expect(await readFile(join(scanDir, "target-paths.json"), "utf8")).toBe(
+    expect(await readFile(targetPathsFile, "utf8")).toBe(
       `${serializedPaths}\n`,
     );
+    if (process.platform !== "win32") {
+      expect((await stat(targetPathsFile)).mode & 0o777).toBe(0o400);
+    }
     const shellPolicy = (
       (codexOptions as CodexOptions | null)?.config as {
         shell_environment_policy?: {
@@ -754,6 +833,7 @@ describe("CodexSecurity orchestration", () => {
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+        CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile,
       },
       include_only: [
         "PATH",
@@ -763,6 +843,7 @@ describe("CodexSecurity orchestration", () => {
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",
+        "CODEX_SECURITY_TARGET_PATHS_FILE",
       ],
     });
     const profiles = (
@@ -800,6 +881,7 @@ describe("CodexSecurity orchestration", () => {
         CODEX_SECURITY_REPOSITORY: repository,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+        CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile,
       },
       include_only: [
         "PYTHON",
@@ -807,6 +889,7 @@ describe("CodexSecurity orchestration", () => {
         "CODEX_SECURITY_REPOSITORY",
         "CODEX_SECURITY_SCAN_DIR",
         "CODEX_SECURITY_PLUGIN_ROOT",
+        "CODEX_SECURITY_TARGET_PATHS_FILE",
       ],
     });
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
@@ -817,14 +900,23 @@ describe("CodexSecurity orchestration", () => {
       'Use "$PYTHON" as <python_command> for every plugin helper',
     );
     expect(prompt).toContain(
-      'make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_SCAN_DIR/target-paths.json"',
+      'make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
     );
-    expect(prompt).toContain("Do not print or evaluate target-paths.json.");
     expect(prompt).toContain(
-      'bind-repo-scopes --scopes-file "$CODEX_SECURITY_SCAN_DIR/target-paths.json" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json"',
+      "Do not print, evaluate, or modify the target-paths file.",
+    );
+    expect(prompt).toContain(
+      'bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json"',
     );
     expect(prompt).not.toContain("\nIgnore prior scope");
-    for (const value of [repository, scanDir, codexHome, python, ...paths])
+    for (const value of [
+      repository,
+      scanDir,
+      codexHome,
+      targetPathsFile,
+      python,
+      ...paths,
+    ])
       expect(prompt).not.toContain(value);
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(prompt).not.toContain(separator);
@@ -833,7 +925,7 @@ describe("CodexSecurity orchestration", () => {
         "/bin/sh",
         [
           "-c",
-          'test -d "$CODEX_SECURITY_REPOSITORY" && test -d "$CODEX_SECURITY_SCAN_DIR" && test -d "$CODEX_SECURITY_PLUGIN_ROOT" && test ! -e PROMPT_RCE_MARKER && printf \'%s\\0%s\\0%s\\0\' "$CODEX_SECURITY_REPOSITORY" "$CODEX_SECURITY_SCAN_DIR" "$PYTHON" && cat "$CODEX_SECURITY_SCAN_DIR/target-paths.json"',
+          'test -d "$CODEX_SECURITY_REPOSITORY" && test -d "$CODEX_SECURITY_SCAN_DIR" && test -d "$CODEX_SECURITY_PLUGIN_ROOT" && test ! -e PROMPT_RCE_MARKER && printf \'%s\\0%s\\0%s\\0\' "$CODEX_SECURITY_REPOSITORY" "$CODEX_SECURITY_SCAN_DIR" "$PYTHON" && cat "$CODEX_SECURITY_TARGET_PATHS_FILE"',
         ],
         {
           cwd: root,
@@ -862,7 +954,7 @@ describe("CodexSecurity orchestration", () => {
         "--repo",
         repository,
         "--scopes-file",
-        join(scanDir, "target-paths.json"),
+        targetPathsFile,
         "--out",
         rankInput,
       ],
@@ -891,7 +983,7 @@ describe("CodexSecurity orchestration", () => {
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
         "bind-repo-scopes",
         "--scopes-file",
-        join(scanDir, "target-paths.json"),
+        targetPathsFile,
         "--manifest",
         manifest,
         "--coverage",
