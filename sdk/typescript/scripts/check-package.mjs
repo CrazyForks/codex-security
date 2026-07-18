@@ -268,10 +268,10 @@ function textPayloads(bytes) {
           /(?<![a-z0-9+/_-])[a-z0-9+/_-]{6,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
         ...unescaped.matchAll(
-          /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]{4,}[ \t]*\r?\n[ \t]*)+[a-z0-9+/_-]{2,}={0,2}(?![a-z0-9+/_=-])/giu,
+          /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]{4,}[ \t]*\r?\n[ \t]*)+[a-z0-9+/_-]{1,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
         ...unescaped.matchAll(
-          /(?<![a-z0-9+/_-])[a-z0-9+/_-]{1,3}[ \t]*\r?\n[ \t]*[a-z0-9+/_-]{5,}={0,2}(?![a-z0-9+/_=-])/giu,
+          /(?<![a-z0-9+/_-])[a-z0-9+/_-]{1,3}[ \t]*\r?\n[ \t]*[a-z0-9+/_-]{3,}={0,2}(?![a-z0-9+/_=-])/giu,
         ),
         ...unescaped.matchAll(
           /(?<![a-z0-9+/_-])(?:[a-z0-9+/_-]+[ \t]*\r?\n[ \t]*){2,}[a-z0-9+/_-]+={0,2}(?![a-z0-9+/_=-])/giu,
@@ -417,6 +417,16 @@ function pngTextPayloads(bytes, file) {
       throw new Error(`npm tarball contains a truncated PNG: ${file}.`);
     }
     const data = bytes.subarray(offset + 8, end);
+    let crc = 0xffffffff;
+    for (const byte of bytes.subarray(offset + 4, end)) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) {
+        crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+      }
+    }
+    if ((crc ^ 0xffffffff) >>> 0 !== bytes.readUInt32BE(end)) {
+      throw new Error(`npm tarball contains an invalid PNG checksum: ${file}.`);
+    }
     if (type === "IHDR") {
       if (data.byteLength !== 13) {
         throw new Error(`npm tarball contains invalid PNG metadata: ${file}.`);
@@ -426,21 +436,6 @@ function pngTextPayloads(bytes, file) {
       throw new Error(`npm tarball contains animated PNG data: ${file}.`);
     } else if (type === "IDAT") {
       imageData.push(data);
-    } else if (type === "zTXt") {
-      const keywordEnd = data.indexOf(0);
-      if (keywordEnd < 0 || data[keywordEnd + 1] !== 0) {
-        throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
-      }
-      texts.push(
-        ...textPayloads(zlibPayload(data.subarray(keywordEnd + 2), file)),
-      );
-    } else if (type === "iCCP") {
-      const profileEnd = data.indexOf(0);
-      if (profileEnd < 0 || data[profileEnd + 1] !== 0) {
-        throw new Error(`npm tarball contains invalid PNG profile: ${file}.`);
-      }
-      const profile = zlibPayload(data.subarray(profileEnd + 2), file);
-      texts.push(...textPayloads(profile));
     } else if (type === "eXIf") {
       texts.push(...textPayloads(data));
     } else if (type === "iTXt") {
@@ -484,11 +479,12 @@ function pngTextPayloads(bytes, file) {
       `npm tarball contains trailing or truncated PNG data: ${file}.`,
     );
   }
-  if (imageData.length > 0) {
-    const pixels = zlibPayload(Buffer.concat(imageData), file);
-    texts.push(...textPayloads(pixels));
-    texts.push(...textPayloads(unfilterPngPixels(pixels, header, file)));
+  if (header === null || imageData.length === 0) {
+    throw new Error(`npm tarball contains invalid PNG image data: ${file}.`);
   }
+  const pixels = zlibPayload(Buffer.concat(imageData), file);
+  texts.push(...textPayloads(pixels));
+  texts.push(...textPayloads(unfilterPngPixels(pixels, header, file)));
   return texts;
 }
 
