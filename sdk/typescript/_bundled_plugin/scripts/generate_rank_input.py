@@ -274,7 +274,7 @@ def path_is_excluded(path: Path) -> bool:
 
 
 def resolve_scope(repo: Path, scope: str) -> Path:
-    scope_path = Path(scope).expanduser()
+    scope_path = Path(scope)
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
     scope_path = scope_path.resolve()

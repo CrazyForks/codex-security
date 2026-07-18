@@ -216,7 +216,7 @@ const internalMarker =
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
-const payloads = [archiveBytes.toString("utf8")];
+const payloads = textPayloads(archiveBytes);
 const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
 const compressedParts = new Map();
 for (const file of files) {
@@ -228,6 +228,16 @@ for (const file of files) {
   compressedParts.set(name, parts);
 }
 
+function textPayloads(bytes) {
+  return [
+    bytes.toString("utf8"),
+    new TextDecoder("utf-16be").decode(bytes),
+    new TextDecoder("utf-16le").decode(bytes),
+    new TextDecoder("utf-16be").decode(bytes.subarray(1)),
+    new TextDecoder("utf-16le").decode(bytes.subarray(1)),
+  ];
+}
+
 function brotliPayload(bytes, file) {
   const result = brotliDecompressSync(bytes, {
     info: true,
@@ -236,7 +246,7 @@ function brotliPayload(bytes, file) {
   if (result.engine.bytesWritten !== bytes.length) {
     throw new Error(`npm tarball contains trailing Brotli data: ${file}.`);
   }
-  return result.buffer.toString("utf8");
+  return result.buffer;
 }
 
 function zlibPayload(bytes, file) {
@@ -250,13 +260,86 @@ function zlibPayload(bytes, file) {
   return result.buffer;
 }
 
+function unfilterPngPixels(pixels, header, file) {
+  if (header === null || header.byteLength !== 13) {
+    throw new Error(`npm tarball contains an invalid PNG header: ${file}.`);
+  }
+  const width = header.readUInt32BE(0);
+  const height = header.readUInt32BE(4);
+  const bitDepth = header[8];
+  const colorType = header[9];
+  const channels = new Map([
+    [0, 1],
+    [2, 3],
+    [3, 1],
+    [4, 2],
+    [6, 4],
+  ]).get(colorType);
+  const rowBytes = Math.ceil((width * (channels ?? 0) * bitDepth) / 8);
+  const expectedLength = (rowBytes + 1) * height;
+  if (
+    width === 0 ||
+    height === 0 ||
+    channels === undefined ||
+    ![1, 2, 4, 8, 16].includes(bitDepth) ||
+    header[10] !== 0 ||
+    header[11] !== 0 ||
+    header[12] !== 0 ||
+    !Number.isSafeInteger(expectedLength) ||
+    expectedLength > MAX_EXPANDED_ASSET_BYTES ||
+    pixels.byteLength !== expectedLength
+  ) {
+    throw new Error(`npm tarball contains unsupported PNG pixels: ${file}.`);
+  }
+
+  const bytesPerPixel = Math.max(1, Math.ceil((channels * bitDepth) / 8));
+  const decoded = Buffer.alloc(rowBytes * height);
+  for (let row = 0; row < height; row += 1) {
+    const source = row * (rowBytes + 1);
+    const target = row * rowBytes;
+    const filter = pixels[source];
+    if (filter > 4) {
+      throw new Error(`npm tarball contains an invalid PNG filter: ${file}.`);
+    }
+    for (let column = 0; column < rowBytes; column += 1) {
+      const left =
+        column >= bytesPerPixel ? decoded[target + column - bytesPerPixel] : 0;
+      const up = row > 0 ? decoded[target + column - rowBytes] : 0;
+      const upLeft =
+        row > 0 && column >= bytesPerPixel
+          ? decoded[target + column - rowBytes - bytesPerPixel]
+          : 0;
+      let predictor = 0;
+      if (filter === 1) predictor = left;
+      else if (filter === 2) predictor = up;
+      else if (filter === 3) predictor = Math.floor((left + up) / 2);
+      else if (filter === 4) {
+        const estimate = left + up - upLeft;
+        const leftDistance = Math.abs(estimate - left);
+        const upDistance = Math.abs(estimate - up);
+        const upLeftDistance = Math.abs(estimate - upLeft);
+        predictor =
+          leftDistance <= upDistance && leftDistance <= upLeftDistance
+            ? left
+            : upDistance <= upLeftDistance
+              ? up
+              : upLeft;
+      }
+      decoded[target + column] =
+        (pixels[source + column + 1] + predictor) & 0xff;
+    }
+  }
+  return decoded;
+}
+
 function pngTextPayloads(bytes, file) {
   const signature = Buffer.from("89504e470d0a1a0a", "hex");
   if (!bytes.subarray(0, signature.length).equals(signature)) {
     throw new Error(`npm tarball contains an invalid PNG: ${file}.`);
   }
-  const texts = [];
+  const texts = textPayloads(bytes);
   const imageData = [];
+  let header = null;
   let offset = signature.length;
   let ended = false;
   while (offset + 12 <= bytes.length) {
@@ -267,7 +350,11 @@ function pngTextPayloads(bytes, file) {
       throw new Error(`npm tarball contains a truncated PNG: ${file}.`);
     }
     const data = bytes.subarray(offset + 8, end);
-    if (type === "IDAT") {
+    if (type === "IHDR") {
+      header = data;
+    } else if (type === "acTL" || type === "fcTL" || type === "fdAT") {
+      throw new Error(`npm tarball contains animated PNG data: ${file}.`);
+    } else if (type === "IDAT") {
       imageData.push(data);
     } else if (type === "zTXt") {
       const keywordEnd = data.indexOf(0);
@@ -275,7 +362,7 @@ function pngTextPayloads(bytes, file) {
         throw new Error(`npm tarball contains invalid PNG text: ${file}.`);
       }
       texts.push(
-        zlibPayload(data.subarray(keywordEnd + 2), file).toString("utf8"),
+        ...textPayloads(zlibPayload(data.subarray(keywordEnd + 2), file)),
       );
     } else if (type === "iCCP") {
       const profileEnd = data.indexOf(0);
@@ -283,17 +370,9 @@ function pngTextPayloads(bytes, file) {
         throw new Error(`npm tarball contains invalid PNG profile: ${file}.`);
       }
       const profile = zlibPayload(data.subarray(profileEnd + 2), file);
-      texts.push(
-        profile.toString("utf8"),
-        new TextDecoder("utf-16be").decode(profile),
-        new TextDecoder("utf-16le").decode(profile),
-      );
+      texts.push(...textPayloads(profile));
     } else if (type === "eXIf") {
-      texts.push(
-        data.toString("utf8"),
-        new TextDecoder("utf-16be").decode(data),
-        new TextDecoder("utf-16le").decode(data),
-      );
+      texts.push(...textPayloads(data));
     } else if (type === "iTXt") {
       const keywordEnd = data.indexOf(0);
       const compression = data[keywordEnd + 1];
@@ -311,7 +390,7 @@ function pngTextPayloads(bytes, file) {
       }
       const text = data.subarray(translatedEnd + 1);
       texts.push(
-        (compression === 1 ? zlibPayload(text, file) : text).toString("utf8"),
+        ...textPayloads(compression === 1 ? zlibPayload(text, file) : text),
       );
     }
     offset = end + 4;
@@ -327,24 +406,23 @@ function pngTextPayloads(bytes, file) {
   }
   if (imageData.length > 0) {
     const pixels = zlibPayload(Buffer.concat(imageData), file);
-    texts.push(
-      pixels.toString("utf8"),
-      new TextDecoder("utf-16be").decode(pixels),
-      new TextDecoder("utf-16le").decode(pixels),
-    );
+    texts.push(...textPayloads(pixels));
+    texts.push(...textPayloads(unfilterPngPixels(pixels, header, file)));
   }
   return texts;
 }
 
 for (const file of compressedFiles) {
-  payloads.push(brotliPayload(tar(["-xOf", archive, file]), file));
+  payloads.push(
+    ...textPayloads(brotliPayload(tar(["-xOf", archive, file]), file)),
+  );
 }
 for (const parts of compressedParts.values()) {
   parts.sort((left, right) => left.part - right.part);
   const bytes = Buffer.concat(
     parts.map(({ file }) => tar(["-xOf", archive, file])),
   );
-  payloads.push(brotliPayload(bytes, parts[0].file));
+  payloads.push(...textPayloads(brotliPayload(bytes, parts[0].file)));
 }
 for (const file of files) {
   if (/\.png$/iu.test(file)) {
