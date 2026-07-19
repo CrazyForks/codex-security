@@ -51,7 +51,10 @@ Partial repository ranking uses one verified worker slot and preserves the
 static pool-plan and receipt contract without depending on Codex preflight.
 Repository symlinks and special files such as FIFOs/sockets are omitted,
 consistent with the scan inventory's regular-file policy; executable files and
-linked Git worktree identity/status are preserved in the staged snapshot. The
+Git worktree identity/status are preserved in a minimal, self-contained staged
+snapshot that omits local remotes and Git configuration. Git-ignored files are
+not staged unless they are explicitly selected with `--path`; a Git-backed
+subdirectory is represented as the directory snapshot actually reviewed. The
 shell environment does not receive model
 API keys, and source/tool traces and sensitive SDK debug logging (including
 `OPENAI_LOG=debug` request bodies) are disabled for the scan. `--model`,

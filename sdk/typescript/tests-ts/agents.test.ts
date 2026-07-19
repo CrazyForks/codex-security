@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { rmSync, symlinkSync } from "node:fs";
+import { existsSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -392,6 +392,43 @@ describe("Agents SDK scan workspace", () => {
       ),
     ).rejects.toBeInstanceOf(OutputDirectoryError);
 
+    const tooManyEntriesDestination = join(root, "too-many-entries");
+    await mkdir(tooManyEntriesDestination);
+    await expect(
+      copySandboxOutput(
+        {
+          async listDir() {
+            return Array.from({ length: 20_001 }, (_, index) => ({
+              name: `empty-${index}`,
+              path: `output/empty-${index}`,
+              type: "dir" as const,
+            }));
+          },
+          async readFile() {
+            throw new Error("unexpected output file");
+          },
+        },
+        tooManyEntriesDestination,
+      ),
+    ).rejects.toThrow("too many scan output entries");
+    expect(await readdir(tooManyEntriesDestination)).toEqual([]);
+
+    const deeplyNestedDestination = join(root, "deeply-nested");
+    await mkdir(deeplyNestedDestination);
+    await expect(
+      copySandboxOutput(
+        {
+          async listDir({ path }) {
+            return [{ name: "nested", path: `${path}/nested`, type: "dir" }];
+          },
+          async readFile() {
+            throw new Error("unexpected output file");
+          },
+        },
+        deeplyNestedDestination,
+      ),
+    ).rejects.toThrow("excessively nested scan output");
+
     const nestedDestination = join(root, "nested-swap");
     const escapedDestination = join(root, "escaped");
     await mkdir(nestedDestination);
@@ -746,6 +783,185 @@ describe("AgentsSecurity orchestration", () => {
           !JSON.stringify(value.input).includes("synthetic-agents-key"),
       ),
     ).toBe(true);
+    await client.close();
+  });
+
+  test("classifies a staged Git subdirectory as a directory snapshot while binding source drift", async () => {
+    const root = await temporaryDirectory();
+    const worktree = join(root, "worktree");
+    const repository = join(worktree, "service");
+    const scanDir = join(root, "scan");
+    const workspaceRoot = join(root, "docker-workspaces");
+    await mkdir(repository, { recursive: true });
+    await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+    execFileSync("git", ["init", "--quiet", worktree]);
+    execFileSync("git", [
+      "-C",
+      worktree,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", worktree, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", worktree, "add", "service/app.ts"]);
+    execFileSync("git", ["-C", worktree, "commit", "--quiet", "-m", "initial"]);
+    let calls = 0;
+    const revision = execFileSync(
+      "git",
+      ["-C", worktree, "rev-parse", "HEAD"],
+      {
+        encoding: "utf8",
+      },
+    ).trim();
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        repositoryRevision: async (value: string) => {
+          expect(value).toBe(repository);
+          calls += 1;
+          return revision;
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          expect(value.repositoryRevision).toBeNull();
+          expect(existsSync(join(value.repository, ".git"))).toBe(false);
+          expect(await readFile(join(value.repository, "app.ts"), "utf8")).toBe(
+            "export const ok = true;\n",
+          );
+          await writeCompletedScan(value.scanDir);
+          const manifestPath = join(value.scanDir, "scan-manifest.json");
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+            scan: { target: Record<string, unknown> };
+          };
+          manifest.scan.target = {
+            kind: "directory_snapshot",
+            targetId: "target_sha256_example",
+            displayName: "service",
+            snapshotDigest: `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`,
+          };
+          await writeFile(
+            manifestPath,
+            `${JSON.stringify(manifest, null, 2)}\n`,
+          );
+          return { responseId: "resp_subdir", finalResponse: "complete" };
+        },
+      },
+    );
+    const result = await client.run(repository, { outputDir: scanDir });
+    expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
+    expect(calls).toBe(2);
+    await client.close();
+  });
+
+  test("rebuilds a regular Git worktree snapshot without exposing local remote credentials", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspaceRoot = join(root, "docker-workspaces");
+    const scanDir = join(root, "scan");
+    const scopedScanDir = join(root, "scoped-scan");
+    await mkdir(repository);
+    await mkdir(join(repository, "node_modules", "pkg"), { recursive: true });
+    await mkdir(join(repository, "dist"));
+    await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+    await writeFile(
+      join(repository, "node_modules", "pkg", "dependency.js"),
+      "ignored dependency\n",
+    );
+    await writeFile(join(repository, "dist", "bundle.js"), "ignored bundle\n");
+    await writeFile(join(repository, ".env"), "LOCAL_SECRET=must-not-stage\n");
+    await writeFile(
+      join(repository, ".gitignore"),
+      "node_modules/\ndist/\n.env\n",
+    );
+    execFileSync("git", ["init", "--quiet", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", repository, "add", "app.ts", ".gitignore"]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "commit",
+      "--quiet",
+      "-m",
+      "initial",
+    ]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "remote.origin.url",
+      "https://synthetic-git-secret@example.invalid/private/repo.git",
+    ]);
+    const revision = execFileSync(
+      "git",
+      ["-C", repository, "rev-parse", "HEAD"],
+      {
+        encoding: "utf8",
+      },
+    ).trim();
+    let reached = 0;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached += 1;
+          expect(value.repository).not.toBe(repository);
+          expect(value.repositoryRevision).toBe(revision);
+          expect(existsSync(join(value.repository, ".git"))).toBe(true);
+          expect(existsSync(join(value.repository, ".env"))).toBe(false);
+          expect(existsSync(join(value.repository, "dist"))).toBe(false);
+          expect(existsSync(join(value.repository, "node_modules"))).toBe(
+            value.target.kind === "paths",
+          );
+          if (value.target.kind === "paths") {
+            expect(
+              await readFile(
+                join(value.repository, "node_modules", "pkg", "dependency.js"),
+                "utf8",
+              ),
+            ).toBe("ignored dependency\n");
+          }
+          expect(
+            await readFile(join(value.repository, ".git", "config"), "utf8"),
+          ).not.toContain("synthetic-git-secret");
+          expect(
+            execFileSync("git", ["-C", value.repository, "rev-parse", "HEAD"], {
+              encoding: "utf8",
+            }).trim(),
+          ).toBe(revision);
+          expect(
+            execFileSync("git", ["-C", value.repository, "remote"], {
+              encoding: "utf8",
+            }).trim(),
+          ).toBe("");
+          throw new Error("stop after staging inspection");
+        },
+      },
+    );
+    await expect(
+      client.run(repository, { outputDir: scanDir }),
+    ).rejects.toThrow("stop after staging inspection");
+    await expect(
+      client.run(repository, {
+        target: ["node_modules/pkg"],
+        outputDir: scopedScanDir,
+      }),
+    ).rejects.toThrow("stop after staging inspection");
+    expect(reached).toBe(2);
+    expect(await readdir(workspaceRoot)).toEqual([]);
     await client.close();
   });
 

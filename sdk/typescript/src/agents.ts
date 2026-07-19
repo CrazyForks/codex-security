@@ -10,7 +10,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { promisify } from "node:util";
 import createDebug from "debug";
@@ -77,7 +77,8 @@ const DEFAULT_DOCKER_IMAGE = "node:22-bookworm";
 const DEFAULT_REASONING_EFFORT: AgentsReasoningEffort = "high";
 const DEFAULT_MAX_TURNS = 200;
 const DEFAULT_WORKER_MAX_TURNS = 100;
-const MAX_OUTPUT_FILES = 20_000;
+const MAX_OUTPUT_ENTRIES = 20_000;
+const MAX_OUTPUT_DEPTH = 128;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
 const execFile = promisify(execFileCallback);
@@ -335,15 +336,18 @@ export class AgentsSecurity {
       );
       check();
 
-      const expectedRevision = await (
+      const sourceRevision = await (
         this.#dependencies.repositoryRevision ?? repositoryRevision
       )(repo, controller.signal);
+      const expectedRevision = protectedRoot === repo ? sourceRevision : null;
       const stagedRepository = await stageRepositoryWithoutSymbolicLinks(
         repo,
         staging,
         controller.signal,
         sandbox === "docker",
         expectedRevision,
+        target,
+        protectedRoot !== repo,
       );
       const stagedPlugin =
         sandbox === "docker"
@@ -356,7 +360,7 @@ export class AgentsSecurity {
       const currentRevision = await (
         this.#dependencies.repositoryRevision ?? repositoryRevision
       )(repo, controller.signal);
-      if (currentRevision !== expectedRevision) {
+      if (currentRevision !== sourceRevision) {
         throw new InvalidTargetError(
           `Repository revision changed during scan preparation: ${repo}`,
         );
@@ -747,7 +751,7 @@ export async function copySandboxOutput(
       "Agents SDK sandbox cannot return generated scan artifacts.",
     );
   }
-  let files = 0;
+  let entriesSeen = 0;
   let bytes = 0;
   const destinationMetadata = await lstat(destination).catch(() => null);
   if (
@@ -786,10 +790,25 @@ export async function copySandboxOutput(
       currentPath = resolve(currentPath, "..");
     }
   };
-  const visit = async (source: string, target: string): Promise<void> => {
+  const visit = async (
+    source: string,
+    target: string,
+    depth: number,
+  ): Promise<void> => {
     throwIfAborted(signal, destination);
+    if (depth > MAX_OUTPUT_DEPTH) {
+      throw new OutputDirectoryError(
+        "Agents SDK sandbox produced excessively nested scan output.",
+      );
+    }
     await requireUnchangedDirectories(target);
     const entries = await session.listDir!({ path: source });
+    entriesSeen += entries.length;
+    if (entriesSeen > MAX_OUTPUT_ENTRIES) {
+      throw new OutputDirectoryError(
+        "Agents SDK sandbox produced too many scan output entries.",
+      );
+    }
     for (const entry of entries) {
       throwIfAborted(signal, destination);
       if (
@@ -822,14 +841,8 @@ export async function copySandboxOutput(
           dev: childMetadata.dev,
           ino: childMetadata.ino,
         });
-        await visit(childSource, childTarget);
+        await visit(childSource, childTarget, depth + 1);
       } else if (entry.type === "file") {
-        files += 1;
-        if (files > MAX_OUTPUT_FILES) {
-          throw new OutputDirectoryError(
-            "Agents SDK sandbox produced too many scan output files.",
-          );
-        }
         const content = await session.readFile!({
           path: childSource,
           maxBytes: MAX_OUTPUT_FILE_BYTES + 1,
@@ -858,7 +871,7 @@ export async function copySandboxOutput(
       }
     }
   };
-  await visit("output", destination);
+  await visit("output", destination, 0);
 }
 
 async function stageRepositoryWithoutSymbolicLinks(
@@ -867,6 +880,8 @@ async function stageRepositoryWithoutSymbolicLinks(
   signal: AbortSignal,
   forceSnapshot = false,
   expectedRevision: string | null = null,
+  target: NormalizedTarget = { kind: "repository", paths: [] },
+  withinGitWorktree = false,
 ): Promise<string> {
   const containsSymbolicLink = async (directory: string): Promise<boolean> => {
     throwIfAborted(signal, staging);
@@ -885,10 +900,18 @@ async function stageRepositoryWithoutSymbolicLinks(
   };
 
   const gitMetadata = await lstat(join(repository, ".git")).catch(() => null);
-  const linkedWorktree = gitMetadata?.isFile() === true;
+  const gitBacked =
+    gitMetadata?.isFile() === true || gitMetadata?.isDirectory() === true;
+  const stageFilter =
+    gitBacked || withinGitWorktree
+      ? {
+          includedPaths: await gitIncludedPaths(repository, signal),
+          explicitScopes: target.kind === "paths" ? target.paths : [],
+        }
+      : undefined;
   if (
     !forceSnapshot &&
-    !linkedWorktree &&
+    !gitBacked &&
     !(await containsSymbolicLink(repository))
   ) {
     return repository;
@@ -898,9 +921,10 @@ async function stageRepositoryWithoutSymbolicLinks(
     repository,
     snapshot,
     signal,
-    linkedWorktree ? join(repository, ".git") : undefined,
+    gitBacked ? join(repository, ".git") : undefined,
+    stageFilter,
   );
-  if (linkedWorktree && expectedRevision !== null) {
+  if (gitBacked && expectedRevision !== null) {
     await makeSelfContainedWorktreeSnapshot(
       repository,
       snapshot,
@@ -916,17 +940,92 @@ async function stageTreeWithoutSymbolicLinks(
   destination: string,
   signal: AbortSignal,
   omittedPath?: string,
+  stageFilter?: {
+    includedPaths: ReadonlySet<string>;
+    explicitScopes: readonly string[];
+  },
 ): Promise<string> {
   await cp(sourceRoot, destination, {
     recursive: true,
     filter: async (source) => {
       if (source === omittedPath) return false;
+      if (stageFilter !== undefined) {
+        const path = relative(sourceRoot, source).split(sep).join("/");
+        const explicitlyRequested = stageFilter.explicitScopes.some(
+          (scope) =>
+            scope === "." ||
+            path === scope ||
+            path.startsWith(`${scope}/`) ||
+            scope.startsWith(`${path}/`),
+        );
+        if (
+          path.length > 0 &&
+          !stageFilter.includedPaths.has(path) &&
+          !explicitlyRequested
+        ) {
+          return false;
+        }
+      }
       const metadata = await lstat(source);
       return metadata.isFile() || metadata.isDirectory();
     },
   });
   throwIfAborted(signal, destination);
   return destination;
+}
+
+async function gitIncludedPaths(
+  repository: string,
+  signal: AbortSignal,
+): Promise<Set<string>> {
+  let output: string;
+  try {
+    ({ stdout: output } = await execFile(
+      "git",
+      [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ".",
+      ],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        env: sanitizedGitEnvironment(),
+        signal,
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    ));
+  } catch (error) {
+    throwIfAborted(signal, repository);
+    throw new InvalidTargetError(
+      `Unable to enumerate non-ignored repository files: ${repository}`,
+      { cause: error },
+    );
+  }
+  const paths = new Set<string>();
+  for (const value of output.split("\0")) {
+    if (value.length === 0) continue;
+    const parts = value.split("/");
+    if (
+      parts.some((part) => part.length === 0 || part === "." || part === "..")
+    ) {
+      throw new InvalidTargetError(
+        `Git returned an invalid repository path while staging: ${repository}`,
+      );
+    }
+    for (let index = 1; index <= parts.length; index += 1) {
+      paths.add(parts.slice(0, index).join("/"));
+    }
+  }
+  return paths;
 }
 
 async function repositoryExecutablePaths(
@@ -962,27 +1061,7 @@ async function makeSelfContainedWorktreeSnapshot(
       `Cannot stage an invalid Git worktree revision: ${revision}`,
     );
   }
-  const environment: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_SSH_COMMAND",
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-  ]) {
-    delete environment[name];
-  }
-  environment["GIT_CONFIG_NOSYSTEM"] = "1";
-  environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
-  environment["GIT_TERMINAL_PROMPT"] = "0";
-  environment["GIT_ALLOW_PROTOCOL"] = "file";
-  environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  const environment = sanitizedGitEnvironment();
   const runGit = async (args: string[]): Promise<void> => {
     await execFile("git", args, {
       cwd: snapshot,
@@ -1016,6 +1095,31 @@ async function makeSelfContainedWorktreeSnapshot(
   await runGit(["symbolic-ref", "HEAD", "refs/heads/codex-security-snapshot"]);
   await runGit(["reset", "--quiet", "--mixed", "HEAD"]);
   await rm(join(snapshot, ".git", "FETCH_HEAD"), { force: true });
+}
+
+function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+  ]) {
+    delete environment[name];
+  }
+  environment["GIT_CONFIG_NOSYSTEM"] = "1";
+  environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
+  environment["GIT_TERMINAL_PROMPT"] = "0";
+  environment["GIT_ALLOW_PROTOCOL"] = "file";
+  environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  return environment;
 }
 
 async function isolateDockerSession(
