@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rm,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
@@ -27,7 +28,7 @@ import {
   type StreamEvent,
 } from "@openai/agents";
 import createDebug from "debug";
-import { localDir } from "@openai/agents/sandbox";
+import { Manifest, dir, localDir } from "@openai/agents/sandbox";
 import {
   UnixLocalSandboxClient,
   localDirLazySkillSource,
@@ -561,6 +562,45 @@ describe("Agents SDK scan workspace", () => {
         unsafeDestination,
       ),
     ).rejects.toBeInstanceOf(OutputDirectoryError);
+  });
+
+  test("uses genuinely bounded local reads instead of the Agents SDK whole-file read path", async () => {
+    const root = await temporaryDirectory();
+    const smallDestination = join(root, "small-output");
+    const largeDestination = join(root, "large-output");
+    await mkdir(smallDestination);
+    await mkdir(largeDestination);
+    const session = await new UnixLocalSandboxClient({
+      workspaceBaseDir: root,
+    }).create({
+      manifest: new Manifest({
+        root: "/workspace",
+        entries: { output: dir() },
+      }),
+    });
+    let sdkReadCalls = 0;
+    session.readFile = async () => {
+      sdkReadCalls += 1;
+      throw new Error("unsafe whole-file SDK read must not be called");
+    };
+    try {
+      const output = join(session.state.workspaceRootPath, "output");
+      await writeFile(join(output, "small.txt"), "bounded output\n");
+      await copySandboxOutput(session, smallDestination);
+      expect(await readFile(join(smallDestination, "small.txt"), "utf8")).toBe(
+        "bounded output\n",
+      );
+      const large = join(output, "large.bin");
+      await writeFile(large, "");
+      await truncate(large, 64 * 1024 * 1024 + 1);
+      await expect(
+        copySandboxOutput(session, largeDestination),
+      ).rejects.toThrow("Agents SDK sandbox output file is too large");
+      expect(sdkReadCalls).toBe(0);
+      expect(existsSync(join(largeDestination, "large.bin"))).toBe(false);
+    } finally {
+      await session.close();
+    }
   });
 
   test("fails closed when the selected plugin does not contain the scan skill", async () => {

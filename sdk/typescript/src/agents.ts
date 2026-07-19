@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import type { Dirent } from "node:fs";
+import { constants as fsConstants, type Dirent } from "node:fs";
 import {
   cp,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   realpath,
   rm,
@@ -813,6 +814,7 @@ export async function copySandboxOutput(
   }
   let entriesSeen = 0;
   let bytes = 0;
+  const workspaceRoot = localSandboxWorkspaceRoot(session);
   const destinationMetadata = await lstat(destination).catch(() => null);
   if (
     destinationMetadata === null ||
@@ -903,14 +905,10 @@ export async function copySandboxOutput(
         });
         await visit(childSource, childTarget, depth + 1);
       } else if (entry.type === "file") {
-        const content = await session.readFile!({
-          path: childSource,
-          maxBytes: MAX_OUTPUT_FILE_BYTES + 1,
-        });
         const data =
-          typeof content === "string"
-            ? new TextEncoder().encode(content)
-            : content;
+          workspaceRoot === undefined
+            ? await readGenericSandboxOutputFile(session, childSource)
+            : await readLocalSandboxOutputFile(workspaceRoot, childSource);
         if (data.byteLength > MAX_OUTPUT_FILE_BYTES) {
           throw new OutputDirectoryError(
             `Agents SDK sandbox output file is too large: ${childSource}`,
@@ -932,6 +930,94 @@ export async function copySandboxOutput(
     }
   };
   await visit("output", destination, 0);
+}
+
+function localSandboxWorkspaceRoot(
+  session: Pick<SandboxSessionLike, "listDir" | "readFile">,
+): string | undefined {
+  const state = (session as { state?: { workspaceRootPath?: unknown } }).state;
+  return typeof state?.workspaceRootPath === "string"
+    ? resolve(state.workspaceRootPath)
+    : undefined;
+}
+
+async function readGenericSandboxOutputFile(
+  session: Pick<SandboxSessionLike, "readFile">,
+  path: string,
+): Promise<Uint8Array> {
+  const content = await session.readFile!({
+    path,
+    maxBytes: MAX_OUTPUT_FILE_BYTES + 1,
+  });
+  return typeof content === "string"
+    ? new TextEncoder().encode(content)
+    : content;
+}
+
+async function readLocalSandboxOutputFile(
+  workspaceRoot: string,
+  path: string,
+): Promise<Uint8Array> {
+  const source = join(workspaceRoot, ...path.split("/"));
+  const metadata = await lstat(source).catch(() => null);
+  if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new OutputDirectoryError(
+      `Agents SDK sandbox output is not a regular file: ${path}`,
+    );
+  }
+  if (metadata.size > MAX_OUTPUT_FILE_BYTES) {
+    throw new OutputDirectoryError(
+      `Agents SDK sandbox output file is too large: ${path}`,
+    );
+  }
+  let handle;
+  try {
+    handle = await open(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    throw new OutputDirectoryError(
+      `Agents SDK sandbox output changed while copying artifacts: ${path}`,
+      { cause: error },
+    );
+  }
+  try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== metadata.dev ||
+      opened.ino !== metadata.ino ||
+      opened.size !== metadata.size
+    ) {
+      throw new OutputDirectoryError(
+        `Agents SDK sandbox output changed while copying artifacts: ${path}`,
+      );
+    }
+    const data = new Uint8Array(opened.size);
+    let offset = 0;
+    while (offset < data.byteLength) {
+      const { bytesRead } = await handle.read(
+        data,
+        offset,
+        data.byteLength - offset,
+        offset,
+      );
+      if (bytesRead === 0) {
+        throw new OutputDirectoryError(
+          `Agents SDK sandbox output changed while copying artifacts: ${path}`,
+        );
+      }
+      offset += bytesRead;
+    }
+    const extra = new Uint8Array(1);
+    const { bytesRead } = await handle.read(extra, 0, 1, data.byteLength);
+    if (bytesRead !== 0) {
+      throw new OutputDirectoryError(
+        `Agents SDK sandbox output changed while copying artifacts: ${path}`,
+      );
+    }
+    return data;
+  } finally {
+    await handle.close();
+  }
 }
 
 async function stageRepositoryWithoutSymbolicLinks(
