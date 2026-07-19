@@ -965,6 +965,57 @@ describe("AgentsSecurity orchestration", () => {
     await client.close();
   });
 
+  test("omits ignored files when an unsafe-local scan targets a Git subdirectory", async () => {
+    const root = await temporaryDirectory();
+    const worktree = join(root, "worktree");
+    const repository = join(worktree, "service");
+    const scanDir = join(root, "scan");
+    await mkdir(repository, { recursive: true });
+    await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+    await writeFile(join(repository, ".env"), "LOCAL_SECRET=must-not-stage\n");
+    await writeFile(join(worktree, ".gitignore"), ".env\n");
+    execFileSync("git", ["init", "--quiet", worktree]);
+    execFileSync("git", [
+      "-C",
+      worktree,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", worktree, "config", "user.name", "test"]);
+    execFileSync("git", [
+      "-C",
+      worktree,
+      "add",
+      ".gitignore",
+      "service/app.ts",
+    ]);
+    execFileSync("git", ["-C", worktree, "commit", "--quiet", "-m", "initial"]);
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "unsafe-local" },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-agents-key" },
+        resolvePluginPython: async () => "/managed/python",
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(value.repository).not.toBe(repository);
+          expect(value.repositoryRevision).toBeNull();
+          expect(await readFile(join(value.repository, "app.ts"), "utf8")).toBe(
+            "export const ok = true;\n",
+          );
+          expect(existsSync(join(value.repository, ".env"))).toBe(false);
+          throw new Error("stop after staging inspection");
+        },
+      },
+    );
+    await expect(
+      client.run(repository, { outputDir: scanDir }),
+    ).rejects.toThrow("stop after staging inspection");
+    expect(reached).toBe(true);
+    await client.close();
+  });
+
   test.skipIf(process.platform === "win32")(
     "omits repository FIFOs while staging Docker inputs",
     async () => {

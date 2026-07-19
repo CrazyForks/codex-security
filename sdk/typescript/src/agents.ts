@@ -912,6 +912,7 @@ async function stageRepositoryWithoutSymbolicLinks(
   if (
     !forceSnapshot &&
     !gitBacked &&
+    !withinGitWorktree &&
     !(await containsSymbolicLink(repository))
   ) {
     return repository;
