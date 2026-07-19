@@ -351,8 +351,6 @@ describe("CLI compatibility contract", () => {
         "--max-turns",
         "42",
         "--worker-max-turns=12",
-        "--sandbox",
-        "unsafe-local",
       ]),
     ).toMatchObject({
       repository: "repo",
@@ -361,7 +359,6 @@ describe("CLI compatibility contract", () => {
       reasoningEffort: "xhigh",
       maxTurns: 42,
       workerMaxTurns: 12,
-      sandbox: "unsafe-local",
     });
 
     expect(
@@ -957,8 +954,6 @@ describe("CLI compatibility contract", () => {
         "25",
         "--worker-max-turns",
         "7",
-        "--sandbox",
-        "docker",
       ],
     ]) {
       let engine: "agents" | "codex" | undefined;
@@ -1019,10 +1014,6 @@ describe("CLI compatibility contract", () => {
       ],
       [
         ["scan", "repo", "--engine", "codex", "--model", "gpt-test"],
-        "require the Agents SDK engine",
-      ],
-      [
-        ["scan", "repo", "--engine", "codex", "--sandbox", "docker"],
         "require the Agents SDK engine",
       ],
     ] as const) {

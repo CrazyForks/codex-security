@@ -40,6 +40,7 @@ interface ScanRoot {
 export interface ScanExpectation {
   repository: string;
   repositoryRevision: string | null;
+  repositoryIdentity?: string;
   target: NormalizedTarget;
   mode: ScanMode;
   pluginVersion: string;
@@ -1227,6 +1228,14 @@ function validateExpectation(
   }
 
   const target = scan.target;
+  if (
+    expectation.repositoryIdentity !== undefined &&
+    target.targetId !== expectation.repositoryIdentity
+  ) {
+    throw new ContractValidationError(
+      "Scan target identity does not match the requested repository.",
+    );
+  }
   const requested = expectation.target;
   if (requested.kind === "refs" || requested.kind === "working_tree") {
     if (target.kind !== "git_diff") {

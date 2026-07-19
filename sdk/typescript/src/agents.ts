@@ -1,21 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { constants as fsConstants, type Dirent } from "node:fs";
-import {
-  cp,
-  lstat,
-  mkdir,
-  mkdtemp,
-  open,
-  readdir,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
+import { basename, join, sep } from "node:path";
 import { promisify } from "node:util";
-import createDebug from "debug";
 import OpenAI from "openai";
 import {
   NoopTrace,
@@ -26,25 +14,20 @@ import {
   tool,
   type ModelProvider,
 } from "@openai/agents";
-import { z } from "zod";
 import {
   Capabilities,
   Manifest,
   SandboxAgent,
   dir,
   file,
-  localDir,
   mount,
-  skills,
-  type SandboxSessionLike,
 } from "@openai/agents/sandbox";
 import {
   DockerSandboxClient,
   type DockerSandboxSession,
-  UnixLocalSandboxClient,
-  type UnixLocalSandboxSession,
   localDirLazySkillSource,
 } from "@openai/agents/sandbox/local";
+import { z } from "zod";
 import {
   loadContract,
   requireScanFile,
@@ -64,7 +47,6 @@ import {
   prepareOutputDir,
   requireModelSafeOutputDir,
   resolvePluginPath,
-  resolvePluginPython,
   validateOutputDir,
   validatePreparedOutputDir,
   type ProcessEnvironment,
@@ -79,43 +61,16 @@ import {
   type ScanTarget,
 } from "./targets.js";
 
+const execFile = promisify(execFileCallback);
 const DEFAULT_MODEL = "gpt-5.6";
-const DEFAULT_DOCKER_IMAGE = "node:22-bookworm";
 const DEFAULT_REASONING_EFFORT: AgentsReasoningEffort = "high";
 const DEFAULT_MAX_TURNS = 200;
 const DEFAULT_WORKER_MAX_TURNS = 100;
-const MAX_OUTPUT_ENTRIES = 20_000;
-const MAX_OUTPUT_DEPTH = 128;
-const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
-const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
-const MAX_INPUT_FILE_BYTES = 256 * 1024 * 1024;
-const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
-const MAX_INPUT_ENTRIES = 2_000_000;
-const MAX_NESTED_GIT_REPOSITORIES = 256;
-const MAX_GIT_IGNORE_DISCOVERY_ENTRIES = 2_000_000;
-const MAX_GIT_CONFIG_FILES = 128;
-const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
-const GIT_COMMAND_TIMEOUT_MS = 120_000;
-const execFile = promisify(execFileCallback);
-const REQUIRED_PLUGIN_DIRECTORIES = [
-  "references",
-  "schemas",
-  "scripts",
-] as const;
-const OPTIONAL_PLUGIN_DIRECTORIES = [
-  ".codex-plugin",
-  "examples",
-  "preflight",
-] as const;
-
-let sensitiveTelemetryUsers = 0;
-let savedDebugNamespaces = "";
-let savedDontLogModelData: string | undefined;
-let savedDontLogToolData: string | undefined;
-let savedOpenAILogLevel: string | undefined;
-let savedTracingDisabled = false;
-let sandboxTimeoutUsers = 0;
-let savedSetTimeout: typeof setTimeout | undefined;
+const DEFAULT_DOCKER_IMAGE = "node:22-bookworm";
+const REQUIRED_PLUGIN_DIRECTORIES = ["references", "schemas", "scripts"];
+const OPTIONAL_PLUGIN_DIRECTORIES = [".codex-plugin", "examples", "preflight"];
+let tracingUsers = 0;
+let tracingWasDisabled = false;
 
 export type AgentsReasoningEffort =
   | "none"
@@ -126,8 +81,6 @@ export type AgentsReasoningEffort =
   | "xhigh"
   | "max";
 
-export type AgentsSandbox = "docker" | "unsafe-local";
-
 export interface AgentsSecurityConfig {
   pluginPath?: string;
   pythonPath?: string;
@@ -135,7 +88,6 @@ export interface AgentsSecurityConfig {
   reasoningEffort?: AgentsReasoningEffort;
   maxTurns?: number;
   workerMaxTurns?: number;
-  sandbox?: AgentsSandbox;
 }
 
 export interface AgentsScanOptions {
@@ -151,11 +103,9 @@ export interface AgentsScanRequest {
   scanDir: string;
   pluginRoot: string;
   python: string;
-  sandbox: AgentsSandbox;
   sandboxBaseDir: string;
-  sandboxInputRoot?: string;
   repositoryRevision: string | null;
-  repositoryIdentity?: string;
+  repositoryIdentity: string;
   apiKey: string;
   baseURL?: string;
   organization?: string;
@@ -180,14 +130,11 @@ export interface AgentsRuntimeDependencies {
 interface ClientDependencies {
   environment: ProcessEnvironment;
   runAgents?: (request: AgentsScanRequest) => Promise<AgentsScanSummary>;
-  resolvePluginPython?: typeof resolvePluginPython;
   prepareOutputDir?: typeof prepareOutputDir;
   repositoryRevision?: typeof repositoryRevision;
 }
 
-const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  environment: process.env,
-};
+const DEFAULT_DEPENDENCIES: ClientDependencies = { environment: process.env };
 
 export class AgentsSecurity {
   public readonly config: Readonly<AgentsSecurityConfig>;
@@ -195,7 +142,6 @@ export class AgentsSecurity {
   readonly #controllers = new Set<AbortController>();
   readonly #runs = new Set<Promise<void>>();
   #closed = false;
-  #closePromise: Promise<void> | null = null;
 
   public constructor(config?: AgentsSecurityConfig);
   public constructor(
@@ -212,20 +158,16 @@ export class AgentsSecurity {
   ): Promise<ScanResult> {
     this.#requireOpen();
     const controller = new AbortController();
-    const removeExternalAbort = forwardAbort(options.signal, controller);
+    const removeAbort = forwardAbort(options.signal, controller);
     this.#controllers.add(controller);
     let finish!: () => void;
     const running = new Promise<void>((resolve) => {
       finish = resolve;
     });
     this.#runs.add(running);
-    let staging: string | null = null;
+    let staging: string | undefined;
     let scanDir = "";
     try {
-      const check = (): void => {
-        this.#requireOpen();
-        throwIfAborted(controller.signal, scanDir);
-      };
       const repositoryPath = resolveRepositoryPath(repository);
       const repo = await normalizeRepository(repositoryPath, controller.signal);
       const target = await normalizeTarget(
@@ -238,194 +180,62 @@ export class AgentsSecurity {
           "Agents SDK scans support repository and path targets only; use the Codex engine for diff scans.",
         );
       }
-      if (process.platform === "win32") {
-        throw new CodexSecurityError(
-          "The Agents SDK sandbox does not support native Windows host paths; use the Codex engine or run the Agents engine from WSL.",
-        );
-      }
       const protectedRoot =
         (await enclosingGitWorktreeRoot(repo, controller.signal)) ?? repo;
-      const repositoryMetadata = await lstat(repo);
-      const targetMetadata =
-        target.kind === "paths"
-          ? await Promise.all(
-              target.paths.map((path) => lstat(join(repo, path))),
-            )
-          : [];
       const requestedOutput = await validateOutputDir(options.outputDir);
       const temporaryRoot = await realpath(tmpdir());
-      requireOutsideRepository(protectedRoot, temporaryRoot);
       if (requestedOutput !== null) {
         requireOutsideRepository(protectedRoot, requestedOutput);
+      } else {
+        requireOutsideRepository(protectedRoot, temporaryRoot);
       }
-      check();
-
       const apiKey = environmentApiKey(this.#dependencies.environment);
       if (apiKey === null) {
         throw new AuthenticationRequiredError(
           "Agents SDK scans require OPENAI_API_KEY or CODEX_API_KEY. File-backed Codex authentication is available only with the Codex engine.",
         );
       }
-      const sandbox = this.config.sandbox ?? "docker";
-      if (sandbox !== "docker" && sandbox !== "unsafe-local") {
-        throw new CodexSecurityError(
-          "Agents SDK sandbox must be docker or unsafe-local.",
-        );
-      }
-      const stagingRoot =
-        sandbox === "docker"
-          ? await dockerWorkspaceRoot(
-              this.#dependencies.environment,
-              protectedRoot,
-            )
-          : temporaryRoot;
-      staging = await mkdtemp(
-        join(stagingRoot, "codex-security-agents-runtime-"),
+      const workspaceRoot = await dockerWorkspaceRoot(
+        this.#dependencies.environment,
+        protectedRoot,
       );
+      staging = await mkdtemp(join(workspaceRoot, "codex-security-agents-"));
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,
         staging,
         controller.signal,
       );
       const plugin = await pluginMetadata(pluginRoot);
-      const python =
-        sandbox === "docker"
-          ? nonEmpty(this.config.pythonPath, "pythonPath") ?? "python3"
-          : await (
-              this.#dependencies.resolvePluginPython ?? resolvePluginPython
-            )({
-              configuredPath: this.config.pythonPath,
-              environment: withoutApiKeys(this.#dependencies.environment),
-              signal: controller.signal,
-            });
-      check();
-      const currentRepository = await normalizeRepository(
-        repositoryPath,
-        controller.signal,
-      );
-      const currentRepositoryMetadata = await lstat(currentRepository);
-      const currentTarget = await normalizeTarget(
-        repo,
-        target.kind === "paths" ? target.paths : "repository",
-        controller.signal,
-      );
-      const currentTargetMetadata =
-        currentTarget.kind === "paths"
-          ? await Promise.all(
-              currentTarget.paths.map((path) => lstat(join(repo, path))),
-            )
-          : [];
-      if (
-        currentRepository !== repo ||
-        currentRepositoryMetadata.dev !== repositoryMetadata.dev ||
-        currentRepositoryMetadata.ino !== repositoryMetadata.ino ||
-        currentTarget.kind !== target.kind ||
-        (target.kind === "paths" &&
-          currentTarget.kind === "paths" &&
-          (currentTarget.paths.length !== target.paths.length ||
-            currentTarget.paths.some(
-              (path, index) => path !== target.paths[index],
-            ) ||
-            currentTargetMetadata.some(
-              (metadata, index) =>
-                metadata.dev !== targetMetadata[index]?.dev ||
-                metadata.ino !== targetMetadata[index]?.ino,
-            )))
-      ) {
-        throw new InvalidTargetError(
-          `Repository or path target changed during scan preparation: ${repo}`,
-        );
-      }
       scanDir = await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
         requestedOutput ?? undefined,
         basename(repo),
-        temporaryRoot,
+        requestedOutput === null ? workspaceRoot : temporaryRoot,
         (path) => requireOutsideRepository(protectedRoot, path),
       );
-      requireOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
-      const scanDirectoryMetadata = await lstat(scanDir);
+      const outputMetadata = await lstat(scanDir);
       options.onOutputDirReady?.(scanDir);
       scanDir = await validatePreparedOutputDir(
         scanDir,
         (path) => requireOutsideRepository(protectedRoot, path),
-        scanDirectoryMetadata,
+        outputMetadata,
       );
-      check();
-
-      await requireSafeGitWorktreeMetadata(protectedRoot, controller.signal);
-      if (protectedRoot !== repo) {
-        await requireSafeGitWorktreeMetadata(repo, controller.signal);
-      }
-      const selectedGitMetadata = await lstat(join(repo, ".git")).catch(
-        () => null,
-      );
-      const selectedGitBacked =
-        selectedGitMetadata?.isFile() === true ||
-        selectedGitMetadata?.isDirectory() === true;
-      const revisionResolver =
-        this.#dependencies.repositoryRevision ?? safeRepositoryRevision;
-      const sourceRevision = await revisionResolver(repo, controller.signal);
-      const expectedRevision =
-        (selectedGitBacked || protectedRoot === repo) &&
-        (!selectedGitBacked ||
-          !(await isPartialGitRepository(repo, controller.signal)))
-          ? sourceRevision
-          : null;
-      const repositoryIdentity = stableRepositoryIdentity(repo);
-      const stagedRepository = await stageRepositoryWithoutSymbolicLinks(
-        repo,
-        staging,
-        controller.signal,
-        sandbox === "docker",
-        expectedRevision,
-        target,
-        protectedRoot !== repo,
-      );
-      const stagedPlugin =
-        sandbox === "docker"
-          ? await stageTreeWithoutSymbolicLinks(
-              pluginRoot,
-              join(staging, "plugin-input"),
-              controller.signal,
-            )
-          : pluginRoot;
-      const currentRevision = await revisionResolver(repo, controller.signal);
-      if (currentRevision !== sourceRevision) {
-        throw new InvalidTargetError(
-          `Repository revision changed during scan preparation: ${repo}`,
-        );
-      }
-      check();
-
-      const sandboxInputRoot = join(staging, "scan-inputs");
-      await mkdir(sandboxInputRoot, { recursive: false, mode: 0o700 });
-      await writeFile(
-        join(sandboxInputRoot, "target-paths.json"),
-        `${JSON.stringify(target.kind === "paths" ? target.paths : ["."])}\n`,
-        { flag: "wx", mode: 0o400 },
-      );
-      await writeFile(
-        join(sandboxInputRoot, "repository-identity.json"),
-        `${JSON.stringify({ targetId: repositoryIdentity })}\n`,
-        { flag: "wx", mode: 0o400 },
-      );
-      await writeFile(
-        join(sandboxInputRoot, "repository-executables.json"),
-        `${JSON.stringify(await repositoryExecutablePaths(stagedRepository))}\n`,
-        { flag: "wx", mode: 0o400 },
-      );
-
+      const revision = await (
+        this.#dependencies.repositoryRevision ?? repositoryRevision
+      )(repo, controller.signal);
+      const repositoryIdentity = `codex-security-target/v1:sha256:${createHash(
+        "sha256",
+      )
+        .update(repo.normalize("NFC"))
+        .digest("hex")}`;
       const summary = await (this.#dependencies.runAgents ?? runAgentsScan)({
-        repository: stagedRepository,
+        repository: repo,
         target,
         scanDir,
-        pluginRoot: stagedPlugin,
-        python,
-        sandbox,
+        pluginRoot,
+        python: this.config.pythonPath ?? "python3",
         sandboxBaseDir: staging,
-        sandboxInputRoot,
-        repositoryRevision: expectedRevision,
+        repositoryRevision: revision,
         repositoryIdentity,
         apiKey,
         baseURL: environmentValue(
@@ -450,18 +260,25 @@ export class AgentsSecurity {
         ),
         signal: controller.signal,
       });
-      check();
-      const expectation: ScanExpectation = {
-        repository: repo,
-        repositoryRevision: expectedRevision,
-        target,
-        mode: "standard",
-        pluginVersion: plugin.version,
-      };
+      const currentRevision = await (
+        this.#dependencies.repositoryRevision ?? repositoryRevision
+      )(repo, controller.signal);
+      if (revision !== currentRevision) {
+        throw new InvalidTargetError(
+          `Repository revision changed during scan: ${repo}`,
+        );
+      }
       return await collectAgentsResult(
         scanDir,
         pluginRoot,
-        expectation,
+        {
+          repository: repo,
+          repositoryRevision: revision,
+          repositoryIdentity,
+          target,
+          mode: "standard",
+          pluginVersion: plugin.version,
+        },
         summary,
         controller.signal,
       );
@@ -470,31 +287,23 @@ export class AgentsSecurity {
         throw new ScanInterruptedError(
           `Codex Security scan was interrupted${scanDir ? `; partial output remains at ${scanDir}` : ""}.`,
           scanDir,
+          { cause: error },
         );
       }
       throw error;
     } finally {
-      removeExternalAbort();
+      removeAbort();
       this.#controllers.delete(controller);
-      try {
-        if (staging !== null) {
-          await rm(staging, { recursive: true, force: true });
-        }
-      } finally {
-        this.#runs.delete(running);
-        finish();
+      this.#runs.delete(running);
+      finish();
+      if (staging !== undefined) {
+        await rm(staging, { recursive: true, force: true });
       }
     }
   }
 
   public async close(): Promise<void> {
-    if (this.#closePromise !== null) return await this.#closePromise;
     this.#closed = true;
-    this.#closePromise = this.#finishClose();
-    await this.#closePromise;
-  }
-
-  async #finishClose(): Promise<void> {
     for (const controller of this.#controllers) controller.abort();
     await Promise.allSettled(this.#runs);
   }
@@ -509,48 +318,21 @@ export async function runAgentsScan(
   dependencies: AgentsRuntimeDependencies = {},
 ): Promise<AgentsScanSummary> {
   const manifest = await agentsManifest(request);
-  const client =
-    request.sandbox === "docker"
-      ? new DockerSandboxClient({
-          image: DEFAULT_DOCKER_IMAGE,
-          workspaceBaseDir: request.sandboxBaseDir,
-        })
-      : new UnixLocalSandboxClient({
-          workspaceBaseDir: request.sandboxBaseDir,
-        });
-  const session = await createSandboxSession(
-    client,
-    manifest,
-    request.signal,
-    request.scanDir,
-  );
-  const releaseTelemetry = suppressSensitiveAgentsTelemetry();
-  const releaseSandboxTimeouts = suppressReferencedSandboxTimeouts();
+  const session = await new DockerSandboxClient({
+    image: DEFAULT_DOCKER_IMAGE,
+    workspaceBaseDir: request.sandboxBaseDir,
+  }).create({ manifest });
+  const releaseTracing = suppressAgentsTracing();
   let ownedProvider: OpenAIProvider | undefined;
-  let summary: AgentsScanSummary | undefined;
-  let failure: unknown;
   try {
-    if (request.sandbox === "docker") {
-      await isolateDockerSession(session as DockerSandboxSession);
-    }
-    const provider =
-      dependencies.modelProvider ??
-      (ownedProvider = agentsModelProvider(request));
+    await isolateDockerSession(session);
     const preflight = await session.exec({
       cmd: [
         'command -v "$PYTHON" >/dev/null',
-        ...(request.sandbox === "unsafe-local"
-          ? [
-              '"$PYTHON" -c \'import json,os,stat; root=os.path.realpath("repository"); entries=json.load(open("scan-inputs/repository-executables.json",encoding="utf-8")); [(lambda p,m: os.chmod(p,(os.lstat(p).st_mode & 0o666) | m) if stat.S_ISREG(os.lstat(p).st_mode) and os.path.commonpath((root,os.path.realpath(p))) == root else (_ for _ in ()).throw(RuntimeError("unsafe executable entry")))(os.path.join(root,*path.split("/")),mode) for path,mode in entries]\'',
-            ]
-          : []),
         "command -v git >/dev/null",
-        "command -v grep >/dev/null",
-        "command -v find >/dev/null",
         "test -f plugin/scripts/finalize_scan_contract.py",
         "test -f plugin/scripts/generate_rank_input.py",
         "test -r scan-inputs/target-paths.json",
-        "test -r scan-inputs/repository-executables.json",
         "test -r scan-inputs/repository-identity.json",
       ].join(" && "),
       workdir: "/workspace",
@@ -561,7 +343,20 @@ export async function runAgentsScan(
         `Agents SDK sandbox is missing required scan tools or inputs: ${preflight.stderr.trim() || preflight.stdout.trim() || `exit ${preflight.exitCode}`}`,
       );
     }
-    const runnerConfig = {
+    const provider =
+      dependencies.modelProvider ??
+      (ownedProvider = new OpenAIProvider({
+        openAIClient: new OpenAI({
+          apiKey: request.apiKey,
+          baseURL: request.baseURL,
+          organization: request.organization,
+          project: request.project,
+          logLevel: "warn",
+        }),
+        useResponses: true,
+        useResponsesWebSocket: false,
+      }));
+    const runConfig = {
       modelProvider: provider,
       tracingDisabled: true,
       traceIncludeSensitiveData: false,
@@ -577,33 +372,27 @@ export async function runAgentsScan(
         store: false,
       },
       instructions: [
-        "You are a bounded Codex Security scan worker running inside an Agents SDK sandbox.",
-        "Follow the exact assignment from the coordinator and the referenced phase skill under plugin/skills.",
-        "Use repository, plugin, output, and scan-inputs/target-paths.json as workspace-relative paths. Never edit repository files or scan inputs.",
-        "The Agents runtime verifies one usable ranking-worker slot; process an assigned ranking slot completely before returning its exact receipt.",
-        "Write only the requested worker-local artifacts and receipts, then return a concise evidence-backed summary.",
+        "Follow the coordinator assignment and the referenced phase skill under plugin/skills.",
+        "Use repository, plugin, output, and scan-inputs as workspace-relative paths. Never edit repository or plugin files.",
+        "Write only the requested worker-local artifacts and return a concise receipt.",
       ].join("\n"),
       capabilities: Capabilities.default(),
     });
     const delegate = worker.asTool({
       toolName: "delegate_security_task",
       toolDescription:
-        "Run one bounded Codex Security ranking, file-review, validation, attack-path, write-up, or hardening assignment in the shared scan sandbox. Provide exact ownership, source paths, artifact paths, and expected receipt/output.",
-      runConfig: runnerConfig,
-      runOptions: {
-        sandbox: { session },
-        maxTurns: request.workerMaxTurns,
-      },
+        "Run one bounded Codex Security ranking, review, validation, or write-up assignment in the shared scan sandbox.",
+      runConfig,
+      runOptions: { sandbox: { session }, maxTurns: request.workerMaxTurns },
     });
-    const skillSource = localDirLazySkillSource({
-      src: join(request.pluginRoot, "skills"),
-      baseDir: request.pluginRoot,
-    });
-    const skillIndex = skillSource.getIndex?.(manifest, "plugin/skills") ?? [];
-    const loadMountedSkill = tool({
+    const skillIndex =
+      localDirLazySkillSource({
+        src: join(request.pluginRoot, "skills"),
+        baseDir: request.pluginRoot,
+      }).getIndex?.(manifest, "plugin/skills") ?? [];
+    const loadSkill = tool({
       name: "load_skill",
-      description:
-        "Load a bundled Codex Security phase skill from the read-only Docker plugin mount.",
+      description: "Load a bundled Codex Security phase skill.",
       parameters: z.object({ skill_name: z.string().min(1) }),
       execute: async ({ skill_name }) => {
         const matches = skillIndex.filter((entry) => entry.name === skill_name);
@@ -612,11 +401,10 @@ export async function runAgentsScan(
             `Unknown or ambiguous Agents scan skill: ${skill_name}`,
           );
         }
-        const match = matches[0]!;
         return {
           status: "already_loaded",
-          skill_name: match.name,
-          path: `plugin/skills/${match.path ?? match.name}`,
+          skill_name,
+          path: `plugin/skills/${matches[0]!.path ?? skill_name}`,
         };
       },
     });
@@ -629,142 +417,61 @@ export async function runAgentsScan(
         store: false,
       },
       instructions: [
-        "You coordinate a non-interactive Codex Security standard scan inside an Agents SDK sandbox.",
-        "The host repository has been copied to repository; never edit it. Write every scan artifact below output.",
-        'Use "$PYTHON" for every plugin helper invocation; its value is supplied by the trusted host environment.',
-        "The full plugin helper/reference tree is under plugin and all phase skills are under plugin/skills.",
-        "When the scan skill calls for a subagent, call delegate_security_task with one bounded assignment; the tool shares this sandbox and cannot recursively delegate.",
-        "For repository ranking, the Agents runtime verifies one usable worker slot. Set usable_worker_slots to 1 when creating the static rank-worker plan; the Codex capability-preflight result is not available in this runtime.",
-        "The Agents host has no Codex app, MCP workbench, goals, native fanout, or config-preflight tools. Use the terminal/chat workflow and do not wait for UI or invoke Codex-only tools.",
-        "Complete all required phase, coverage, and candidate-ledger receipts, then run the terminal finalizer exactly once. Never claim complete coverage when a required worker or receipt is missing.",
+        "Coordinate a non-interactive Codex Security standard scan inside the shared Agents SDK sandbox.",
+        'Use "$PYTHON" for plugin helpers and delegate_security_task for required subagent assignments.',
+        "The host has no Codex app, MCP workbench, goals, or capability-preflight tools; use the terminal/chat workflow and preserve required receipts.",
       ].join("\n"),
-      tools: [
-        delegate,
-        ...(request.sandbox === "docker" ? [loadMountedSkill] : []),
-      ],
-      capabilities: [
-        ...Capabilities.default(),
-        ...(request.sandbox === "unsafe-local"
-          ? [
-              skills({
-                lazyFrom: skillSource,
-                skillsPath: "plugin/skills",
-              }),
-            ]
-          : []),
-      ],
+      tools: [delegate, loadSkill],
+      capabilities: Capabilities.default(),
     });
-    const runner = new Runner(runnerConfig);
-    const stream = await runner.run(coordinator, agentsScanPrompt(request), {
-      stream: true,
-      signal: request.signal,
-      sandbox: { session },
-      maxTurns: request.maxTurns,
-    });
+    const stream = await new Runner(runConfig).run(
+      coordinator,
+      agentsScanPrompt(request),
+      {
+        stream: true,
+        signal: request.signal,
+        sandbox: { session },
+        maxTurns: request.maxTurns,
+      },
+    );
     for await (const _event of stream) {
-      // Consuming the stream keeps tool execution and cancellation responsive.
+      // Consume tool and model events until the scan completes.
     }
     await stream.completed;
     if (stream.error !== undefined && stream.error !== null) throw stream.error;
     if (stream.cancelled || request.signal.aborted) {
       throw new DOMException("Agents SDK scan was aborted.", "AbortError");
     }
-    const usage = stream.runContext.usage;
-    summary = {
+    return {
       responseId: stream.lastResponseId,
       finalResponse:
         typeof stream.finalOutput === "string" ? stream.finalOutput : undefined,
-      usage: {
-        requests: usage.requests,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        totalTokens: usage.totalTokens,
-        inputTokensDetails: usage.inputTokensDetails,
-        outputTokensDetails: usage.outputTokensDetails,
-      },
+      usage: stream.runContext.usage,
     };
-  } catch (error) {
-    failure = error;
-  }
-  try {
-    if (request.sandbox === "docker") {
-      await quiesceDockerSession(session as DockerSandboxSession);
+  } finally {
+    try {
+      await session.close().catch(() => undefined);
+      await ownedProvider?.close().catch(() => undefined);
+    } finally {
+      releaseTracing();
     }
-    await copySandboxOutput(session, request.scanDir);
-  } catch (error) {
-    if (failure === undefined) failure = error;
-  } finally {
-    await session.close().catch(() => undefined);
-    await ownedProvider?.close().catch(() => undefined);
-    releaseSandboxTimeouts();
-    releaseTelemetry();
-  }
-  if (failure !== undefined) throw sanitizeAgentsRuntimeFailure(failure);
-  if (summary === undefined) {
-    throw new IncompleteScanError("Agents SDK scan ended without a result.");
-  }
-  return summary;
-}
-
-async function createSandboxSession(
-  client: DockerSandboxClient | UnixLocalSandboxClient,
-  manifest: Manifest,
-  signal: AbortSignal,
-  scanDir: string,
-): Promise<DockerSandboxSession | UnixLocalSandboxSession> {
-  throwIfAborted(signal, scanDir);
-  const creation = client.create({ manifest });
-  let removeAbort = (): void => undefined;
-  const interrupted = new Promise<never>((_, reject) => {
-    const abort = (): void => {
-      void creation.then((session) => session.close()).catch(() => undefined);
-      reject(
-        new ScanInterruptedError(
-          `Codex Security scan was interrupted; partial output remains at ${scanDir}.`,
-          scanDir,
-        ),
-      );
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    removeAbort = () => signal.removeEventListener("abort", abort);
-  });
-  try {
-    return await Promise.race([creation, interrupted]);
-  } finally {
-    removeAbort();
   }
 }
 
-function sanitizeAgentsRuntimeFailure(error: unknown): unknown {
-  if (typeof error !== "object" || error === null || !("state" in error)) {
-    return error;
+function suppressAgentsTracing(): () => void {
+  if (tracingUsers++ === 0) {
+    tracingWasDisabled =
+      getGlobalTraceProvider().createTrace({
+        name: "Codex Security tracing state probe",
+      }) instanceof NoopTrace;
+    setTracingDisabled(true);
   }
-  const name =
-    "name" in error && typeof error.name === "string"
-      ? error.name
-      : "runtime error";
-  return new IncompleteScanError(
-    `Agents SDK scan ended without a complete result (${name}).`,
-  );
-}
-
-export function agentsModelProvider(
-  request: Pick<
-    AgentsScanRequest,
-    "apiKey" | "baseURL" | "organization" | "project"
-  >,
-): OpenAIProvider {
-  return new OpenAIProvider({
-    openAIClient: new OpenAI({
-      apiKey: request.apiKey,
-      baseURL: request.baseURL,
-      organization: request.organization,
-      project: request.project,
-      logLevel: "warn",
-    }),
-    useResponses: true,
-    useResponsesWebSocket: false,
-  });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--tracingUsers === 0) setTracingDisabled(tracingWasDisabled);
+  };
 }
 
 export async function agentsManifest(
@@ -772,69 +479,42 @@ export async function agentsManifest(
     AgentsScanRequest,
     | "repository"
     | "target"
+    | "scanDir"
     | "pluginRoot"
     | "python"
-    | "sandboxInputRoot"
     | "repositoryIdentity"
-  > & { sandbox?: AgentsSandbox },
+  >,
 ): Promise<Manifest> {
   const entries: Record<
     string,
-    | ReturnType<typeof localDir>
-    | ReturnType<typeof mount>
-    | ReturnType<typeof dir>
-    | ReturnType<typeof file>
+    ReturnType<typeof mount> | ReturnType<typeof dir>
   > = {
-    repository:
-      request.sandbox === "docker"
-        ? mount({ source: request.repository, readOnly: true })
-        : localDir({ src: request.repository }),
-    output: dir(),
-    "scan-inputs":
-      request.sandbox === "docker" && request.sandboxInputRoot !== undefined
-        ? mount({ source: request.sandboxInputRoot, readOnly: true })
-        : dir({
-            permissions: 0o755,
-            children: {
-              "target-paths.json": file({
-                permissions: 0o400,
-                content: `${JSON.stringify(
-                  request.target.kind === "paths"
-                    ? request.target.paths
-                    : ["."],
-                )}\n`,
-              }),
-              "repository-executables.json": file({
-                permissions: 0o400,
-                content: `${JSON.stringify(await repositoryExecutablePaths(request.repository))}\n`,
-              }),
-              "repository-identity.json": file({
-                permissions: 0o400,
-                content: `${JSON.stringify({
-                  targetId:
-                    request.repositoryIdentity ??
-                    stableRepositoryIdentity(request.repository),
-                })}\n`,
-              }),
-            },
-          }),
+    repository: mount({ source: request.repository, readOnly: true }),
+    output: mount({ source: request.scanDir, readOnly: false }),
+    "scan-inputs": dir({
+      children: {
+        "target-paths.json": file({
+          permissions: 0o400,
+          content: `${JSON.stringify(
+            request.target.kind === "paths" ? request.target.paths : ["."],
+          )}\n`,
+        }),
+        "repository-identity.json": file({
+          permissions: 0o400,
+          content: `${JSON.stringify({ targetId: request.repositoryIdentity })}\n`,
+        }),
+      },
+    }),
   };
   for (const name of REQUIRED_PLUGIN_DIRECTORIES) {
     const source = join(request.pluginRoot, name);
     const metadata = await lstat(source).catch(() => null);
-    if (
-      metadata === null ||
-      !metadata.isDirectory() ||
-      metadata.isSymbolicLink()
-    ) {
+    if (metadata?.isDirectory() !== true || metadata.isSymbolicLink()) {
       throw new IncompleteScanError(
         `Selected plugin is missing Agents scan runtime directory: ${name}`,
       );
     }
-    entries[`plugin/${name}`] =
-      request.sandbox === "docker"
-        ? mount({ source, readOnly: true })
-        : localDir({ src: source });
+    entries[`plugin/${name}`] = mount({ source, readOnly: true });
   }
   for (const name of OPTIONAL_PLUGIN_DIRECTORIES) {
     const source = join(request.pluginRoot, name);
@@ -845,47 +525,25 @@ export async function agentsManifest(
         `Selected plugin has an invalid Agents scan runtime directory: ${name}`,
       );
     }
-    entries[`plugin/${name}`] =
-      request.sandbox === "docker"
-        ? mount({ source, readOnly: true })
-        : localDir({ src: source });
+    entries[`plugin/${name}`] = mount({ source, readOnly: true });
   }
-  const scanSkill = join(
-    request.pluginRoot,
-    "skills",
-    "security-scan",
-    "SKILL.md",
-  );
-  const scanSkillMetadata = await lstat(scanSkill).catch(() => null);
-  if (
-    scanSkillMetadata === null ||
-    !scanSkillMetadata.isFile() ||
-    scanSkillMetadata.isSymbolicLink()
-  ) {
+  const skills = join(request.pluginRoot, "skills");
+  const scanSkill = await lstat(
+    join(skills, "security-scan", "SKILL.md"),
+  ).catch(() => null);
+  if (scanSkill?.isFile() !== true || scanSkill.isSymbolicLink()) {
     throw new IncompleteScanError(
       "Selected plugin is missing scan skill: security-scan",
     );
   }
-  if (request.sandbox === "docker") {
-    entries["plugin/skills"] = mount({
-      source: join(request.pluginRoot, "skills"),
-      readOnly: true,
-    });
-  }
+  entries["plugin/skills"] = mount({ source: skills, readOnly: true });
   return new Manifest({
     root: "/workspace",
     entries,
     extraPathGrants: [
-      {
-        path: request.repository,
-        readOnly: true,
-        description: "Source repository staged into the scan sandbox.",
-      },
-      {
-        path: request.pluginRoot,
-        readOnly: true,
-        description: "Codex Security scan skills and helpers.",
-      },
+      { path: request.repository, readOnly: true },
+      { path: request.pluginRoot, readOnly: true },
+      { path: request.scanDir, readOnly: false },
     ],
     environment: {
       PYTHON: request.python,
@@ -909,1442 +567,67 @@ export function agentsScanPrompt(
     "target" | "repositoryRevision" | "repositoryIdentity"
   >,
 ): string {
-  const targetInstruction =
+  const target =
     request.target.kind === "paths"
       ? [
           "Scan target: the paths listed in scan-inputs/target-paths.json.",
           'Generate one combined inventory with "$PYTHON" plugin/scripts/generate_rank_input.py make-repo-rank-input --repo repository --scopes-file scan-inputs/target-paths.json --out output/artifacts/02_discovery/rank_input.jsonl.',
           'Before finalization, bind every requested scope with "$PYTHON" plugin/scripts/generate_rank_input.py bind-repo-scopes --scopes-file scan-inputs/target-paths.json --manifest output/scan-manifest.json --coverage output/coverage.json.',
-          "Do not print, evaluate, or modify scan-inputs/target-paths.json.",
-        ].join(" ")
-      : "Scan target: the entire repository.";
+        ]
+      : ["Scan target: the entire repository."];
   return [
     "Use the $security-scan skill at plugin/skills/security-scan/SKILL.md.",
-    "Run a standard, non-interactive repository/path scan with the Agents SDK CLI runtime.",
+    "Run a standard, non-interactive repository/path scan with the Agents SDK runtime.",
     "Repository root: repository",
     "Plugin root: plugin",
     "Use this exact scan directory for all output: output",
     request.repositoryRevision === null
       ? "Repository identity: unversioned directory snapshot."
       : `Repository revision: ${request.repositoryRevision}`,
-    `Repository targetId: ${request.repositoryIdentity ?? "read scan-inputs/repository-identity.json"}. Use this exact stable targetId in scan-manifest.json; never derive identity from the staged workspace path or revision.`,
-    targetInstruction,
-    "Use delegate_security_task for every required subagent assignment and preserve all phase/coverage receipts.",
-    "For partial repository ranking, the Agents runtime has verified one usable worker slot; create the static rank-worker plan with --usable-worker-slots 1 and do not wait for a Codex capability-preflight result.",
+    `Repository targetId: ${request.repositoryIdentity}. Use this exact stable targetId in scan-manifest.json.`,
+    ...target,
+    "Use delegate_security_task for required subagent assignments and preserve phase/coverage receipts.",
+    "The Agents runtime provides one ranking-worker slot; create the static rank-worker plan with --usable-worker-slots 1 and do not wait for a Codex capability-preflight result.",
     'Complete and seal the canonical JSON contract with "$PYTHON" plugin/scripts/finalize_scan_contract.py --scan-dir output --source-root repository before returning.',
   ].join("\n");
-}
-
-export async function copySandboxOutput(
-  session: Pick<SandboxSessionLike, "listDir" | "readFile">,
-  destination: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (session.listDir === undefined || session.readFile === undefined) {
-    throw new IncompleteScanError(
-      "Agents SDK sandbox cannot return generated scan artifacts.",
-    );
-  }
-  let entriesSeen = 0;
-  let bytes = 0;
-  const workspaceRoot = localSandboxWorkspaceRoot(session);
-  const sourceDirectoryMetadata = new Map<
-    string,
-    { dev: number; ino: number }
-  >();
-  const destinationMetadata = await lstat(destination).catch(() => null);
-  if (
-    destinationMetadata === null ||
-    !destinationMetadata.isDirectory() ||
-    destinationMetadata.isSymbolicLink()
-  ) {
-    throw new OutputDirectoryError(
-      `Agents SDK scan output directory is not a regular directory: ${destination}`,
-    );
-  }
-  const directoryMetadata = new Map([
-    [
-      destination,
-      { dev: destinationMetadata.dev, ino: destinationMetadata.ino },
-    ],
-  ]);
-  const requireUnchangedDirectories = async (target: string): Promise<void> => {
-    let currentPath = target;
-    while (true) {
-      const expected = directoryMetadata.get(currentPath);
-      const current = await lstat(currentPath).catch(() => null);
-      if (
-        expected === undefined ||
-        current === null ||
-        !current.isDirectory() ||
-        current.isSymbolicLink() ||
-        current.dev !== expected.dev ||
-        current.ino !== expected.ino
-      ) {
-        throw new OutputDirectoryError(
-          `Agents SDK scan output directory changed while copying artifacts: ${currentPath}`,
-        );
-      }
-      if (currentPath === destination) break;
-      currentPath = resolve(currentPath, "..");
-    }
-  };
-  const requireUnchangedSourceDirectories = async (
-    source: string,
-  ): Promise<void> => {
-    if (workspaceRoot === undefined) return;
-    const parts = source.split("/");
-    for (let index = 1; index <= parts.length; index += 1) {
-      const logicalPath = parts.slice(0, index).join("/");
-      const hostPath = join(workspaceRoot, ...parts.slice(0, index));
-      const current = await lstat(hostPath).catch(() => null);
-      const expected = sourceDirectoryMetadata.get(logicalPath);
-      if (
-        current === null ||
-        !current.isDirectory() ||
-        current.isSymbolicLink() ||
-        (expected !== undefined &&
-          (current.dev !== expected.dev || current.ino !== expected.ino))
-      ) {
-        throw new OutputDirectoryError(
-          `Agents SDK sandbox output directory changed while copying artifacts: ${logicalPath}`,
-        );
-      }
-      sourceDirectoryMetadata.set(logicalPath, {
-        dev: current.dev,
-        ino: current.ino,
-      });
-    }
-  };
-  const visit = async (
-    source: string,
-    target: string,
-    depth: number,
-  ): Promise<void> => {
-    throwIfAborted(signal, destination);
-    if (depth > MAX_OUTPUT_DEPTH) {
-      throw new OutputDirectoryError(
-        "Agents SDK sandbox produced excessively nested scan output.",
-      );
-    }
-    await requireUnchangedDirectories(target);
-    await requireUnchangedSourceDirectories(source);
-    const entries = await session.listDir!({ path: source });
-    await requireUnchangedSourceDirectories(source);
-    entriesSeen += entries.length;
-    if (entriesSeen > MAX_OUTPUT_ENTRIES) {
-      throw new OutputDirectoryError(
-        "Agents SDK sandbox produced too many scan output entries.",
-      );
-    }
-    for (const entry of entries) {
-      throwIfAborted(signal, destination);
-      if (
-        entry.name.length === 0 ||
-        entry.name === "." ||
-        entry.name === ".." ||
-        entry.name.includes("/") ||
-        entry.name.includes("\\")
-      ) {
-        throw new OutputDirectoryError(
-          `Agents SDK sandbox returned an unsafe output entry: ${entry.name}`,
-        );
-      }
-      const childSource = `${source}/${entry.name}`;
-      const childTarget = join(target, entry.name);
-      if (entry.type === "dir") {
-        await requireUnchangedDirectories(target);
-        await mkdir(childTarget, { recursive: false, mode: 0o700 });
-        const childMetadata = await lstat(childTarget).catch(() => null);
-        if (
-          childMetadata === null ||
-          !childMetadata.isDirectory() ||
-          childMetadata.isSymbolicLink()
-        ) {
-          throw new OutputDirectoryError(
-            `Agents SDK scan output directory changed while copying artifacts: ${childTarget}`,
-          );
-        }
-        directoryMetadata.set(childTarget, {
-          dev: childMetadata.dev,
-          ino: childMetadata.ino,
-        });
-        await visit(childSource, childTarget, depth + 1);
-      } else if (entry.type === "file") {
-        await requireUnchangedSourceDirectories(source);
-        const data =
-          workspaceRoot === undefined
-            ? await readGenericSandboxOutputFile(session, childSource)
-            : await readLocalSandboxOutputFile(workspaceRoot, childSource);
-        await requireUnchangedSourceDirectories(source);
-        if (data.byteLength > MAX_OUTPUT_FILE_BYTES) {
-          throw new OutputDirectoryError(
-            `Agents SDK sandbox output file is too large: ${childSource}`,
-          );
-        }
-        bytes += data.byteLength;
-        if (bytes > MAX_OUTPUT_BYTES) {
-          throw new OutputDirectoryError(
-            "Agents SDK sandbox produced too much scan output.",
-          );
-        }
-        await requireUnchangedDirectories(target);
-        await writeFile(childTarget, data, { flag: "wx", mode: 0o600 });
-      } else {
-        throw new OutputDirectoryError(
-          `Agents SDK sandbox output is not a regular file or directory: ${childSource}`,
-        );
-      }
-    }
-  };
-  await visit("output", destination, 0);
-}
-
-function localSandboxWorkspaceRoot(
-  session: Pick<SandboxSessionLike, "listDir" | "readFile">,
-): string | undefined {
-  const state = (session as { state?: { workspaceRootPath?: unknown } }).state;
-  return typeof state?.workspaceRootPath === "string"
-    ? resolve(state.workspaceRootPath)
-    : undefined;
-}
-
-async function readGenericSandboxOutputFile(
-  session: Pick<SandboxSessionLike, "readFile">,
-  path: string,
-): Promise<Uint8Array> {
-  const content = await session.readFile!({
-    path,
-    maxBytes: MAX_OUTPUT_FILE_BYTES + 1,
-  });
-  return typeof content === "string"
-    ? new TextEncoder().encode(content)
-    : content;
-}
-
-async function readLocalSandboxOutputFile(
-  workspaceRoot: string,
-  path: string,
-): Promise<Uint8Array> {
-  const source = join(workspaceRoot, ...path.split("/"));
-  const metadata = await lstat(source).catch(() => null);
-  if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new OutputDirectoryError(
-      `Agents SDK sandbox output is not a regular file: ${path}`,
-    );
-  }
-  if (metadata.size > MAX_OUTPUT_FILE_BYTES) {
-    throw new OutputDirectoryError(
-      `Agents SDK sandbox output file is too large: ${path}`,
-    );
-  }
-  let handle;
-  try {
-    handle = await open(
-      source,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
-    );
-  } catch (error) {
-    throw new OutputDirectoryError(
-      `Agents SDK sandbox output changed while copying artifacts: ${path}`,
-      { cause: error },
-    );
-  }
-  try {
-    const opened = await handle.stat();
-    if (
-      !opened.isFile() ||
-      opened.dev !== metadata.dev ||
-      opened.ino !== metadata.ino ||
-      opened.size !== metadata.size
-    ) {
-      throw new OutputDirectoryError(
-        `Agents SDK sandbox output changed while copying artifacts: ${path}`,
-      );
-    }
-    const data = new Uint8Array(opened.size);
-    let offset = 0;
-    while (offset < data.byteLength) {
-      const { bytesRead } = await handle.read(
-        data,
-        offset,
-        data.byteLength - offset,
-        offset,
-      );
-      if (bytesRead === 0) {
-        throw new OutputDirectoryError(
-          `Agents SDK sandbox output changed while copying artifacts: ${path}`,
-        );
-      }
-      offset += bytesRead;
-    }
-    const extra = new Uint8Array(1);
-    const { bytesRead } = await handle.read(extra, 0, 1, data.byteLength);
-    if (bytesRead !== 0) {
-      throw new OutputDirectoryError(
-        `Agents SDK sandbox output changed while copying artifacts: ${path}`,
-      );
-    }
-    return data;
-  } finally {
-    await handle.close();
-  }
-}
-
-async function stageRepositoryWithoutSymbolicLinks(
-  repository: string,
-  staging: string,
-  signal: AbortSignal,
-  forceSnapshot = false,
-  expectedRevision: string | null = null,
-  target: NormalizedTarget = { kind: "repository", paths: [] },
-  withinGitWorktree = false,
-): Promise<string> {
-  const containsSymbolicLink = async (directory: string): Promise<boolean> => {
-    throwIfAborted(signal, staging);
-    const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      throwIfAborted(signal, staging);
-      if (entry.isSymbolicLink()) return true;
-      if (
-        entry.isDirectory() &&
-        (await containsSymbolicLink(join(directory, entry.name)))
-      ) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  const gitMetadata = await lstat(join(repository, ".git")).catch(() => null);
-  if (gitMetadata?.isSymbolicLink() === true) {
-    throw new InvalidTargetError(
-      `Git worktree metadata must not be a symbolic link: ${join(repository, ".git")}`,
-    );
-  }
-  const gitBacked =
-    gitMetadata?.isFile() === true || gitMetadata?.isDirectory() === true;
-  const caseInsensitive =
-    gitBacked || withinGitWorktree
-      ? await isCaseInsensitiveGitRepository(repository, signal)
-      : false;
-  const stageFilter =
-    gitBacked || withinGitWorktree
-      ? {
-          includedPaths: new Set(
-            [...(await gitIncludedPaths(repository, signal))].map((path) =>
-              stagedPathKey(path, caseInsensitive),
-            ),
-          ),
-          explicitScopes: target.kind === "paths" ? target.paths : [],
-          caseInsensitive,
-        }
-      : undefined;
-  if (
-    !forceSnapshot &&
-    !gitBacked &&
-    !withinGitWorktree &&
-    !(await containsSymbolicLink(repository))
-  ) {
-    return repository;
-  }
-  const snapshot = join(staging, "repository-input");
-  await stageTreeWithoutSymbolicLinks(
-    repository,
-    snapshot,
-    signal,
-    gitBacked ? join(repository, ".git") : undefined,
-    stageFilter,
-    true,
-  );
-  if (gitBacked && expectedRevision !== null) {
-    await makeSelfContainedWorktreeSnapshot(
-      repository,
-      snapshot,
-      expectedRevision,
-      signal,
-    );
-  }
-  return snapshot;
-}
-
-async function stageTreeWithoutSymbolicLinks(
-  sourceRoot: string,
-  destination: string,
-  signal: AbortSignal,
-  omittedPath?: string,
-  stageFilter?: {
-    includedPaths: ReadonlySet<string>;
-    explicitScopes: readonly string[];
-    caseInsensitive: boolean;
-  },
-  omitBareGit = false,
-): Promise<string> {
-  let entries = 0;
-  let bytes = 0;
-  await cp(sourceRoot, destination, {
-    recursive: true,
-    filter: async (source) => {
-      throwIfAborted(signal, destination);
-      entries += 1;
-      if (entries > MAX_INPUT_ENTRIES) {
-        throw new InvalidTargetError(
-          `Repository contains too many entries to stage safely: ${sourceRoot}`,
-        );
-      }
-      if (source === omittedPath || basename(source) === ".git") return false;
-      if (omitBareGit && (await isBareGitDirectory(source))) return false;
-      if (stageFilter !== undefined) {
-        const path = stagedPathKey(
-          relative(sourceRoot, source).split(sep).join("/"),
-          stageFilter.caseInsensitive,
-        );
-        const explicitlyRequested = stageFilter.explicitScopes.some((value) => {
-          const scope = stagedPathKey(value, stageFilter.caseInsensitive);
-          return (
-            scope === "." ||
-            path === scope ||
-            path.startsWith(`${scope}/`) ||
-            scope.startsWith(`${path}/`)
-          );
-        });
-        if (
-          path.length > 0 &&
-          !stageFilter.includedPaths.has(path) &&
-          !explicitlyRequested
-        ) {
-          return false;
-        }
-      }
-      const metadata = await lstat(source);
-      if (metadata.isFile()) {
-        if (metadata.size > MAX_INPUT_FILE_BYTES) {
-          throw new InvalidTargetError(
-            `Repository input file is too large to stage safely: ${source}`,
-          );
-        }
-        bytes += metadata.size;
-        if (bytes > MAX_INPUT_BYTES) {
-          throw new InvalidTargetError(
-            `Repository inputs are too large to stage safely: ${sourceRoot}`,
-          );
-        }
-        return true;
-      }
-      return metadata.isDirectory();
-    },
-  });
-  throwIfAborted(signal, destination);
-  return destination;
-}
-
-function stagedPathKey(path: string, caseInsensitive: boolean): string {
-  const normalized = path.normalize("NFC");
-  return caseInsensitive ? normalized.toLocaleLowerCase("en-US") : normalized;
-}
-
-async function requireSafeGitWorktreeMetadata(
-  repository: string,
-  signal: AbortSignal,
-): Promise<void> {
-  throwIfAborted(signal, repository);
-  const marker = join(repository, ".git");
-  const markerMetadata = await lstat(marker).catch(() => null);
-  if (markerMetadata === null) return;
-  if (markerMetadata.isSymbolicLink()) {
-    throw new InvalidTargetError(
-      `Git worktree metadata must not be a symbolic link: ${marker}`,
-    );
-  }
-  let gitDirectory = marker;
-  if (markerMetadata.isFile()) {
-    const pointer = await readSmallGitMetadata(marker);
-    const match = /^gitdir:\s*(.+?)\s*$/u.exec(pointer);
-    if (match === null) {
-      throw new InvalidTargetError(
-        `Git worktree metadata is invalid: ${marker}`,
-      );
-    }
-    gitDirectory = resolve(repository, match[1]!);
-  } else if (!markerMetadata.isDirectory()) {
-    throw new InvalidTargetError(`Git worktree metadata is invalid: ${marker}`);
-  }
-  const commonDirectoryMarker = join(gitDirectory, "commondir");
-  const commonMetadata = await lstat(commonDirectoryMarker).catch(() => null);
-  const commonDirectory =
-    commonMetadata === null
-      ? gitDirectory
-      : resolve(
-          gitDirectory,
-          (await readSmallGitMetadata(commonDirectoryMarker)).trim(),
-        );
-  for (const path of [
-    join(gitDirectory, "HEAD"),
-    join(commonDirectory, "config"),
-  ]) {
-    const metadata = await lstat(path).catch(() => null);
-    if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new InvalidTargetError(
-        `Git worktree metadata must be a regular file before staging: ${path}`,
-      );
-    }
-  }
-  await requireSafeGitConfigIncludes(join(commonDirectory, "config"), signal);
-}
-
-async function requireSafeGitConfigIncludes(
-  configPath: string,
-  signal: AbortSignal,
-): Promise<void> {
-  const pending = [configPath];
-  const visited = new Set<string>();
-  while (pending.length > 0) {
-    throwIfAborted(signal, configPath);
-    const current = pending.pop()!;
-    const canonical = await realpath(current).catch(() => current);
-    if (visited.has(canonical)) continue;
-    visited.add(canonical);
-    if (visited.size > MAX_GIT_CONFIG_FILES) {
-      throw new InvalidTargetError(
-        `Git configuration contains too many included files: ${configPath}`,
-      );
-    }
-    const contents = await readSmallGitMetadata(current, MAX_GIT_CONFIG_BYTES);
-    let includeSection = false;
-    for (const line of contents.split(/\r?\n/u)) {
-      const section = /^\s*\[\s*([^\s\]"]+)(?:\s+.*)?\]\s*(?:[#;].*)?$/u.exec(
-        line,
-      );
-      if (section !== null) {
-        includeSection = /^(?:include|includeif)$/iu.test(section[1]!);
-        continue;
-      }
-      if (!includeSection) continue;
-      const setting = /^\s*path\s*=\s*(.*)$/iu.exec(line);
-      if (setting === null) continue;
-      const include = parseGitConfigIncludePath(setting[1]!, current);
-      if (include.length === 0 || /[\r\n\0]/u.test(include)) {
-        throw new InvalidTargetError(
-          `Git configuration contains an invalid include path: ${current}`,
-        );
-      }
-      const includedPath = include.startsWith("~/")
-        ? join(homedir(), include.slice(2))
-        : resolve(dirname(current), include);
-      const metadata = await lstat(includedPath).catch(() => null);
-      if (metadata === null) continue;
-      if (!metadata.isFile() || metadata.isSymbolicLink()) {
-        throw new InvalidTargetError(
-          `Git configuration include must be a regular file before staging: ${includedPath}`,
-        );
-      }
-      pending.push(includedPath);
-    }
-  }
-}
-
-function parseGitConfigIncludePath(value: string, configPath: string): string {
-  const input = value.trimStart();
-  const quoted = input.startsWith('"');
-  let result = "";
-  let escaped = false;
-  let closed = !quoted;
-  for (let index = quoted ? 1 : 0; index < input.length; index += 1) {
-    const character = input[index]!;
-    if (escaped) {
-      const decoded: Record<string, string> = {
-        '"': '"',
-        "\\": "\\",
-        b: "\b",
-        n: "\n",
-        t: "\t",
-      };
-      if (!(character in decoded)) {
-        throw new InvalidTargetError(
-          `Git configuration contains an invalid include escape: ${configPath}`,
-        );
-      }
-      result += decoded[character]!;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (quoted && character === '"') {
-      closed = true;
-      const suffix = input.slice(index + 1).trimStart();
-      if (suffix.length > 0 && !/^[#;]/u.test(suffix)) {
-        throw new InvalidTargetError(
-          `Git configuration contains an invalid include path: ${configPath}`,
-        );
-      }
-      break;
-    }
-    if (!quoted && /[#;]/u.test(character)) break;
-    result += character;
-  }
-  if (
-    !closed ||
-    escaped ||
-    (result.startsWith("~") && !result.startsWith("~/"))
-  ) {
-    throw new InvalidTargetError(
-      `Git configuration contains an unsupported include path: ${configPath}`,
-    );
-  }
-  return quoted ? result : result.trimEnd();
-}
-
-async function readSmallGitMetadata(
-  path: string,
-  maxBytes = 8192,
-): Promise<string> {
-  const metadata = await lstat(path).catch(() => null);
-  if (
-    metadata === null ||
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.size > maxBytes
-  ) {
-    throw new InvalidTargetError(
-      `Git worktree metadata must be a small regular file before staging: ${path}`,
-    );
-  }
-  let handle;
-  try {
-    handle = await open(
-      path,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
-    );
-    const opened = await handle.stat();
-    if (
-      !opened.isFile() ||
-      opened.dev !== metadata.dev ||
-      opened.ino !== metadata.ino ||
-      opened.size !== metadata.size
-    ) {
-      throw new InvalidTargetError(`Git worktree metadata changed: ${path}`);
-    }
-    const data = new Uint8Array(opened.size + 1);
-    let bytesRead = 0;
-    while (bytesRead < data.byteLength) {
-      const result = await handle.read(
-        data,
-        bytesRead,
-        data.byteLength - bytesRead,
-        bytesRead,
-      );
-      if (result.bytesRead === 0) break;
-      bytesRead += result.bytesRead;
-    }
-    if (bytesRead !== opened.size) {
-      throw new InvalidTargetError(`Git worktree metadata changed: ${path}`);
-    }
-    return new TextDecoder("utf-8", { fatal: true }).decode(
-      data.subarray(0, bytesRead),
-    );
-  } catch (error) {
-    if (error instanceof InvalidTargetError) throw error;
-    throw new InvalidTargetError(
-      `Unable to inspect Git worktree metadata: ${path}`,
-      {
-        cause: error,
-      },
-    );
-  } finally {
-    await handle?.close();
-  }
-}
-
-async function isBareGitDirectory(path: string): Promise<boolean> {
-  const metadata = await lstat(path).catch(() => null);
-  if (metadata?.isDirectory() !== true || metadata.isSymbolicLink()) {
-    return false;
-  }
-  const [head, config, objects, refs] = await Promise.all(
-    ["HEAD", "config", "objects", "refs"].map(async (name) =>
-      lstat(join(path, name)).catch(() => null),
-    ),
-  );
-  if (
-    head?.isFile() !== true ||
-    head.isSymbolicLink() ||
-    config?.isFile() !== true ||
-    config.isSymbolicLink() ||
-    objects?.isDirectory() !== true ||
-    objects.isSymbolicLink() ||
-    refs?.isDirectory() !== true ||
-    refs.isSymbolicLink()
-  ) {
-    return false;
-  }
-  const headText = await readSmallGitMetadata(join(path, "HEAD"));
-  if (!/^(?:ref:\s+refs\/\S+|[0-9a-f]{40}|[0-9a-f]{64})\s*$/iu.test(headText)) {
-    return false;
-  }
-  const configText = await readSmallGitMetadata(
-    join(path, "config"),
-    MAX_GIT_CONFIG_BYTES,
-  );
-  let inCore = false;
-  for (const line of configText.split(/\r?\n/u)) {
-    const section = /^\s*\[([^\]]+)\]\s*(?:[#;].*)?$/u.exec(line);
-    if (section !== null) {
-      inCore = section[1]!.trim().toLowerCase() === "core";
-      continue;
-    }
-    if (
-      inCore &&
-      /^\s*bare\s*(?:=\s*(?:true|yes|on|1))?\s*(?:[#;].*)?$/iu.test(line)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function gitIncludedPaths(
-  repository: string,
-  signal: AbortSignal,
-): Promise<Set<string>> {
-  await requireSafeGitIgnoreFiles(repository, signal);
-  await requireSafeAncestorGitIgnoreFiles(repository, signal);
-  const paths = new Set<string>();
-  const pending = [{ repository, prefix: "" }];
-  const visited = new Set<string>();
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    await requireSafeGitWorktreeMetadata(current.repository, signal);
-    const canonical = await realpath(current.repository);
-    if (visited.has(canonical)) continue;
-    visited.add(canonical);
-    if (visited.size > MAX_NESTED_GIT_REPOSITORIES + 1) {
-      throw new InvalidTargetError(
-        `Repository contains too many initialized nested Git repositories: ${repository}`,
-      );
-    }
-    const excludeFiles = await requireSafeGitIgnoreInputs(
-      current.repository,
-      signal,
-      repository,
-    );
-    const files = await gitListFiles(
-      current.repository,
-      [
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        ...excludeFiles.map((path) => `--exclude-from=${path}`),
-      ],
-      signal,
-      repository,
-    );
-    for (const value of files.split("\0")) {
-      if (value.length === 0) continue;
-      const nested = value.endsWith("/");
-      const listedPath = nested ? value.slice(0, -1) : value;
-      addGitIncludedPath(paths, current.prefix, listedPath, repository);
-      if (!nested) continue;
-      const nestedRepository = join(current.repository, listedPath);
-      const metadata = await lstat(nestedRepository).catch(() => null);
-      const gitMetadata = await lstat(join(nestedRepository, ".git")).catch(
-        () => null,
-      );
-      if (
-        metadata?.isDirectory() !== true ||
-        gitMetadata === null ||
-        gitMetadata.isSymbolicLink()
-      ) {
-        throw new InvalidTargetError(
-          `Git returned an invalid nested repository path while staging: ${repository}`,
-        );
-      }
-      pending.push({
-        repository: nestedRepository,
-        prefix: current.prefix ? `${current.prefix}/${listedPath}` : listedPath,
-      });
-    }
-    const staged = await gitListFiles(
-      current.repository,
-      ["--stage"],
-      signal,
-      repository,
-    );
-    for (const record of staged.split("\0")) {
-      if (!record.startsWith("160000 ")) continue;
-      const separator = record.indexOf("\t");
-      if (separator < 0) {
-        throw new InvalidTargetError(
-          `Git returned an invalid submodule entry while staging: ${repository}`,
-        );
-      }
-      const value = record.slice(separator + 1);
-      addGitIncludedPath(paths, current.prefix, value, repository);
-      const nestedRepository = join(current.repository, value);
-      const metadata = await lstat(nestedRepository).catch(() => null);
-      const gitMetadata = await lstat(join(nestedRepository, ".git")).catch(
-        () => null,
-      );
-      if (
-        metadata?.isDirectory() !== true ||
-        gitMetadata === null ||
-        gitMetadata.isSymbolicLink()
-      ) {
-        throw new InvalidTargetError(
-          `Git returned an invalid nested repository path while staging: ${repository}`,
-        );
-      }
-      pending.push({
-        repository: nestedRepository,
-        prefix: current.prefix ? `${current.prefix}/${value}` : value,
-      });
-    }
-  }
-  return paths;
-}
-
-async function gitListFiles(
-  repository: string,
-  options: readonly string[],
-  signal: AbortSignal,
-  root: string,
-): Promise<string> {
-  try {
-    const { stdout } = await execFile(
-      "git",
-      [
-        "--no-optional-locks",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        `safe.directory=${repository}`,
-        "ls-files",
-        ...options,
-        "-z",
-        "--",
-        ".",
-      ],
-      {
-        cwd: repository,
-        encoding: "utf8",
-        env: sanitizedGitEnvironment(),
-        signal,
-        timeout: GIT_COMMAND_TIMEOUT_MS,
-        maxBuffer: 64 * 1024 * 1024,
-      },
-    );
-    return stdout;
-  } catch (error) {
-    throwIfAborted(signal, root);
-    throw new InvalidTargetError(
-      `Unable to enumerate non-ignored repository files: ${repository}`,
-      { cause: error },
-    );
-  }
-}
-
-async function requireSafeGitIgnoreInputs(
-  repository: string,
-  signal: AbortSignal,
-  root: string,
-): Promise<string[]> {
-  const options = {
-    cwd: repository,
-    encoding: "utf8" as const,
-    env: configuredGitEnvironment(),
-    signal,
-    timeout: GIT_COMMAND_TIMEOUT_MS,
-    maxBuffer: 1024 * 1024,
-  };
-  let configuredExcludes = "";
-  try {
-    ({ stdout: configuredExcludes } = await execFile(
-      "git",
-      [
-        "--no-optional-locks",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        `safe.directory=${repository}`,
-        "config",
-        "--null",
-        "--path",
-        "--get-all",
-        "core.excludesFile",
-      ],
-      options,
-    ));
-  } catch (error) {
-    throwIfAborted(signal, root);
-    if ((error as { code?: unknown }).code !== 1) {
-      throw new InvalidTargetError(
-        `Unable to inspect Git ignore configuration: ${repository}`,
-        { cause: error },
-      );
-    }
-  }
-  let gitCommonDirectory: string;
-  try {
-    ({ stdout: gitCommonDirectory } = await execFile(
-      "git",
-      [
-        "--no-optional-locks",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        `safe.directory=${repository}`,
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-common-dir",
-      ],
-      options,
-    ));
-  } catch (error) {
-    throwIfAborted(signal, root);
-    throw new InvalidTargetError(
-      `Unable to inspect Git repository metadata: ${repository}`,
-      { cause: error },
-    );
-  }
-  const ignoreInputs = [
-    ...configuredExcludes
-      .split("\0")
-      .filter((value) => value.length > 0)
-      .map((value) => resolve(repository, value)),
-    join(gitCommonDirectory.replace(/\r?\n$/u, ""), "info", "exclude"),
-  ];
-  const safeIgnoreInputs: string[] = [];
-  for (const path of ignoreInputs) {
-    const metadata = await lstat(path).catch(() => null);
-    if (metadata === null) continue;
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new InvalidTargetError(
-        `Git ignore input must be a regular file before staging: ${path}`,
-      );
-    }
-    safeIgnoreInputs.push(path);
-  }
-  return safeIgnoreInputs;
-}
-
-async function isCaseInsensitiveGitRepository(
-  repository: string,
-  signal: AbortSignal,
-): Promise<boolean> {
-  try {
-    const { stdout } = await execFile(
-      "git",
-      [
-        "--no-optional-locks",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        `safe.directory=${repository}`,
-        "config",
-        "--type=bool",
-        "--get",
-        "core.ignorecase",
-      ],
-      {
-        cwd: repository,
-        encoding: "utf8",
-        env: configuredGitEnvironment(),
-        signal,
-        timeout: GIT_COMMAND_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-      },
-    );
-    return stdout.trim() === "true";
-  } catch (error) {
-    throwIfAborted(signal, repository);
-    if ((error as { code?: unknown }).code === 1) return false;
-    throw new InvalidTargetError(
-      `Unable to inspect Git path configuration: ${repository}`,
-      { cause: error },
-    );
-  }
-}
-
-async function isPartialGitRepository(
-  repository: string,
-  signal: AbortSignal,
-): Promise<boolean> {
-  try {
-    const { stdout } = await execFile(
-      "git",
-      [
-        "--no-optional-locks",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        `safe.directory=${repository}`,
-        "config",
-        "--null",
-        "--get-regexp",
-        "^(extensions\\.partialclone|remote\\..*\\.promisor)$",
-      ],
-      {
-        cwd: repository,
-        encoding: "utf8",
-        env: configuredGitEnvironment(),
-        signal,
-        timeout: GIT_COMMAND_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-      },
-    );
-    return stdout.split("\0").some((record) => {
-      if (record.length === 0) return false;
-      const separator = record.indexOf("\n");
-      if (separator < 0) return false;
-      const key = record.slice(0, separator).toLowerCase();
-      const value = record
-        .slice(separator + 1)
-        .trim()
-        .toLowerCase();
-      return key === "extensions.partialclone"
-        ? value.length > 0
-        : /^(?:true|yes|on|1)$/u.test(value);
-    });
-  } catch (error) {
-    throwIfAborted(signal, repository);
-    if ((error as { code?: unknown }).code === 1) return false;
-    throw new InvalidTargetError(
-      `Unable to inspect Git partial-clone configuration: ${repository}`,
-      { cause: error },
-    );
-  }
-}
-
-async function safeRepositoryRevision(
-  repository: string,
-  signal?: AbortSignal,
-): Promise<string | null> {
-  try {
-    const { stdout } = await execFile(
-      "git",
-      [
-        "--no-optional-locks",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        `safe.directory=${repository}`,
-        "rev-parse",
-        "--verify",
-        "HEAD^{commit}",
-      ],
-      {
-        cwd: repository,
-        encoding: "utf8",
-        env: sanitizedGitEnvironment(),
-        signal,
-        timeout: GIT_COMMAND_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-      },
-    );
-    return stdout.trim();
-  } catch (error) {
-    throwIfAborted(signal, repository);
-    const failed = error as { killed?: unknown; signal?: unknown };
-    if (failed.killed === true || failed.signal === "SIGTERM") {
-      throw new InvalidTargetError(
-        `Unable to inspect Git revision within the staging time limit: ${repository}`,
-        { cause: error },
-      );
-    }
-    return null;
-  }
-}
-
-function stableRepositoryIdentity(repository: string): string {
-  return `codex-security-target/v1:sha256:${createHash("sha256")
-    .update(repository.normalize("NFC"))
-    .digest("hex")}`;
-}
-
-async function requireSafeAncestorGitIgnoreFiles(
-  repository: string,
-  signal: AbortSignal,
-): Promise<void> {
-  const root = await enclosingGitWorktreeRoot(repository, signal);
-  if (root === null || root === repository) return;
-  let directory = resolve(repository, "..");
-  while (true) {
-    throwIfAborted(signal, repository);
-    const ignorePath = join(directory, ".gitignore");
-    const metadata = await lstat(ignorePath).catch(() => null);
-    if (
-      metadata !== null &&
-      (!metadata.isFile() || metadata.isSymbolicLink())
-    ) {
-      throw new InvalidTargetError(
-        `Git ignore input must be a regular file before staging: ${ignorePath}`,
-      );
-    }
-    if (directory === root) break;
-    const parent = resolve(directory, "..");
-    if (parent === directory) break;
-    directory = parent;
-  }
-}
-
-async function requireSafeGitIgnoreFiles(
-  repository: string,
-  signal: AbortSignal,
-): Promise<void> {
-  const pending = [repository];
-  let entries = 0;
-  while (pending.length > 0) {
-    throwIfAborted(signal, repository);
-    const directory = pending.pop()!;
-    let children: Array<Dirent<string>>;
-    try {
-      children = await readdir(directory, { withFileTypes: true });
-    } catch (error) {
-      throw new InvalidTargetError(
-        `Unable to inspect Git ignore inputs before staging: ${directory}`,
-        { cause: error },
-      );
-    }
-    entries += children.length;
-    if (entries > MAX_GIT_IGNORE_DISCOVERY_ENTRIES) {
-      throw new InvalidTargetError(
-        `Repository contains too many entries to inspect Git ignore inputs safely: ${repository}`,
-      );
-    }
-    for (const child of children) {
-      if (child.name === ".git") continue;
-      const path = join(directory, child.name);
-      if (child.name === ".gitignore") {
-        const metadata = await lstat(path).catch(() => null);
-        if (
-          metadata === null ||
-          !metadata.isFile() ||
-          metadata.isSymbolicLink()
-        ) {
-          throw new InvalidTargetError(
-            `Git ignore input must be a regular file before staging: ${path}`,
-          );
-        }
-      }
-      if (child.isDirectory() && !child.isSymbolicLink()) pending.push(path);
-    }
-  }
-}
-
-function addGitIncludedPath(
-  paths: Set<string>,
-  prefix: string,
-  value: string,
-  repository: string,
-): void {
-  const parts = value.split("/");
-  if (
-    parts.some((part) => part.length === 0 || part === "." || part === "..")
-  ) {
-    throw new InvalidTargetError(
-      `Git returned an invalid repository path while staging: ${repository}`,
-    );
-  }
-  const relative = prefix ? `${prefix}/${value}` : value;
-  const relativeParts = relative.split("/");
-  for (let index = 1; index <= relativeParts.length; index += 1) {
-    paths.add(relativeParts.slice(0, index).join("/"));
-  }
-}
-
-async function repositoryExecutablePaths(
-  repository: string,
-): Promise<Array<[string, number]>> {
-  const result: Array<[string, number]> = [];
-  const visit = async (directory: string, relative = ""): Promise<void> => {
-    const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
-      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
-      const child = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await visit(child, childRelative);
-      } else if (entry.isFile()) {
-        const executeBits = (await lstat(child)).mode & 0o111;
-        if (executeBits !== 0) result.push([childRelative, executeBits]);
-      }
-    }
-  };
-  await visit(repository);
-  return result;
-}
-
-async function makeSelfContainedWorktreeSnapshot(
-  repository: string,
-  snapshot: string,
-  revision: string,
-  signal: AbortSignal,
-): Promise<void> {
-  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(revision)) {
-    throw new InvalidTargetError(
-      `Cannot stage an invalid Git worktree revision: ${revision}`,
-    );
-  }
-  const environment = sanitizedGitEnvironment();
-  const runGit = async (args: string[]): Promise<void> => {
-    await execFile(
-      "git",
-      [
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        `safe.directory=${snapshot}`,
-        "-c",
-        `safe.directory=${repository}`,
-        ...args,
-      ],
-      {
-        cwd: snapshot,
-        encoding: "utf8",
-        env: environment,
-        signal,
-        timeout: GIT_COMMAND_TIMEOUT_MS,
-      },
-    );
-  };
-  const objectFormat = revision.length === 64 ? "sha256" : "sha1";
-  await runGit(["init", "--quiet", `--object-format=${objectFormat}`]);
-  await runGit([
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "uploadpack.packObjectsHook=",
-    "-c",
-    "protocol.file.allow=always",
-    "fetch",
-    "--quiet",
-    "--depth=1",
-    "--no-tags",
-    "--no-recurse-submodules",
-    repository,
-    revision,
-  ]);
-  await runGit([
-    "update-ref",
-    "refs/heads/codex-security-snapshot",
-    "FETCH_HEAD",
-  ]);
-  await runGit(["symbolic-ref", "HEAD", "refs/heads/codex-security-snapshot"]);
-  await runGit(["reset", "--quiet", "--mixed", "HEAD"]);
-  await rm(join(snapshot, ".git", "FETCH_HEAD"), { force: true });
-  await rm(join(snapshot, ".git", "logs"), { recursive: true, force: true });
-}
-
-function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
-  for (const name of [
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "LANG",
-    "LC_ALL",
-    "XDG_CONFIG_HOME",
-    "GIT_CONFIG_SYSTEM",
-  ]) {
-    if (process.env[name] !== undefined) environment[name] = process.env[name];
-  }
-  environment["GIT_CONFIG_NOSYSTEM"] = "1";
-  environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
-  environment["GIT_TERMINAL_PROMPT"] = "0";
-  environment["GIT_ALLOW_PROTOCOL"] = "file";
-  environment["GIT_LFS_SKIP_SMUDGE"] = "1";
-  environment["GIT_NO_LAZY_FETCH"] = "1";
-  environment["GIT_COMMITTER_NAME"] = "Codex Security";
-  environment["GIT_COMMITTER_EMAIL"] = "codex-security@invalid";
-  environment["GIT_AUTHOR_NAME"] = "Codex Security";
-  environment["GIT_AUTHOR_EMAIL"] = "codex-security@invalid";
-  return environment;
-}
-
-function configuredGitEnvironment(): NodeJS.ProcessEnv {
-  const environment = sanitizedGitEnvironment();
-  if (process.env["GIT_CONFIG_GLOBAL"] === undefined) {
-    delete environment["GIT_CONFIG_GLOBAL"];
-  } else {
-    environment["GIT_CONFIG_GLOBAL"] = process.env["GIT_CONFIG_GLOBAL"];
-  }
-  if (process.env["GIT_CONFIG_NOSYSTEM"] === undefined) {
-    delete environment["GIT_CONFIG_NOSYSTEM"];
-  } else {
-    environment["GIT_CONFIG_NOSYSTEM"] = process.env["GIT_CONFIG_NOSYSTEM"];
-  }
-  return environment;
-}
-
-async function quiesceDockerSession(
-  session: DockerSandboxSession,
-): Promise<void> {
-  try {
-    await execFile("docker", ["rm", "-f", session.state.containerId], {
-      encoding: "utf8",
-      timeout: 30_000,
-    });
-  } catch (error) {
-    throw new IncompleteScanError(
-      "Agents SDK Docker sandbox could not be stopped before artifact handoff.",
-      { cause: error },
-    );
-  }
 }
 
 async function isolateDockerSession(
   session: DockerSandboxSession,
 ): Promise<void> {
-  const inspectNetworks = async (): Promise<string[]> => {
-    const { stdout } = await execFile(
-      "docker",
-      [
-        "inspect",
-        "--type",
-        "container",
-        "--format",
-        "{{json .NetworkSettings.Networks}}",
-        session.state.containerId,
-      ],
-      { encoding: "utf8", timeout: 10_000 },
-    );
-    const parsed = JSON.parse(stdout) as unknown;
-    if (
-      parsed === null ||
-      typeof parsed !== "object" ||
-      Array.isArray(parsed)
-    ) {
-      throw new Error("Docker returned invalid container network metadata.");
-    }
-    return Object.keys(parsed);
-  };
   try {
-    for (const network of await inspectNetworks()) {
+    const networks = async (): Promise<string[]> => {
+      const { stdout } = await execFile(
+        "docker",
+        [
+          "inspect",
+          "--type",
+          "container",
+          "--format",
+          "{{json .NetworkSettings.Networks}}",
+          session.state.containerId,
+        ],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+      return Object.keys(
+        (JSON.parse(stdout) as Record<string, unknown> | null) ?? {},
+      );
+    };
+    for (const network of await networks()) {
       await execFile(
         "docker",
         ["network", "disconnect", "-f", network, session.state.containerId],
         { encoding: "utf8", timeout: 10_000 },
       );
     }
-    const remaining = await inspectNetworks();
-    if (remaining.length > 0) {
-      throw new Error(
-        `Docker networks still attached: ${remaining.join(", ")}`,
-      );
-    }
+    if ((await networks()).length > 0)
+      throw new Error("network still attached");
   } catch (error) {
     throw new IncompleteScanError(
       "Unable to disable Docker sandbox network access before scanning.",
       { cause: error },
     );
   }
-}
-
-function suppressSensitiveAgentsTelemetry(): () => void {
-  if (sensitiveTelemetryUsers++ === 0) {
-    savedDebugNamespaces = createDebug.disable();
-    createDebug.enable(
-      [savedDebugNamespaces, "-openai-agents:*"].filter(Boolean).join(","),
-    );
-    savedDontLogModelData = process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
-    savedDontLogToolData = process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
-    savedOpenAILogLevel = process.env["OPENAI_LOG"];
-    process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1";
-    process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1";
-    process.env["OPENAI_LOG"] = "warn";
-    savedTracingDisabled =
-      getGlobalTraceProvider().createTrace({
-        name: "Codex Security tracing state probe",
-      }) instanceof NoopTrace;
-    setTracingDisabled(true);
-  }
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    if (--sensitiveTelemetryUsers !== 0) return;
-    createDebug.enable(savedDebugNamespaces);
-    restoreEnvironmentValue(
-      "OPENAI_AGENTS_DONT_LOG_MODEL_DATA",
-      savedDontLogModelData,
-    );
-    restoreEnvironmentValue(
-      "OPENAI_AGENTS_DONT_LOG_TOOL_DATA",
-      savedDontLogToolData,
-    );
-    restoreEnvironmentValue("OPENAI_LOG", savedOpenAILogLevel);
-    setTracingDisabled(savedTracingDisabled);
-  };
-}
-
-export function suppressReferencedSandboxTimeouts(): () => void {
-  if (sandboxTimeoutUsers++ === 0) {
-    const previous = globalThis.setTimeout;
-    savedSetTimeout = previous;
-    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
-      const timeout = previous(...args);
-      if (
-        /[\\/]sandbox[\\/]sandboxes[\\/]unixLocal\./.test(
-          new Error().stack ?? "",
-        )
-      ) {
-        timeout.unref();
-      }
-      return timeout;
-    }) as typeof setTimeout;
-  }
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    if (--sandboxTimeoutUsers !== 0) return;
-    if (savedSetTimeout !== undefined) globalThis.setTimeout = savedSetTimeout;
-    savedSetTimeout = undefined;
-  };
-}
-
-function restoreEnvironmentValue(
-  name: string,
-  value: string | undefined,
-): void {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
-
-async function dockerWorkspaceRoot(
-  environment: ProcessEnvironment,
-  protectedRoot: string,
-): Promise<string> {
-  const configured = environmentValue(
-    environment,
-    "CODEX_SECURITY_DOCKER_WORKSPACE_ROOT",
-  );
-  const candidate = resolve(
-    configured ?? join(homedir(), ".cache", "codex-security", "sandboxes"),
-  );
-  requireOutsideRepository(protectedRoot, candidate);
-  await mkdir(candidate, { recursive: true, mode: 0o700 });
-  const root = await realpath(candidate);
-  requireOutsideRepository(protectedRoot, root);
-  return root;
 }
 
 async function collectAgentsResult(
@@ -2387,55 +670,58 @@ async function collectAgentsResult(
       "exports/results.sarif",
       signal,
     );
-  } catch (error) {
-    if (signal.aborted) throw signal.reason ?? error;
-  }
+  } catch {}
   const turnResult: TurnResultMetadata = {
-    id: summary.responseId,
+    id: summary.responseId ?? `agents_${manifest.scan.id}`,
+    engine: "agents",
     status: "completed",
     finalResponse: summary.finalResponse,
     usage: summary.usage,
-    engine: "agents",
   };
   return new ScanResult({
     manifest,
     findings,
     coverage,
     scanDir,
-    threadId: summary.responseId ?? `agents-${randomUUID()}`,
-    turnResult,
     sarifPath,
+    threadId: summary.responseId ?? `agents_${manifest.scan.id}`,
+    turnResult,
   });
 }
 
-function environmentApiKey(environment: ProcessEnvironment): string | null {
-  return (
-    environmentValue(environment, "OPENAI_API_KEY") ??
-    environmentValue(environment, "CODEX_API_KEY") ??
-    null
+async function dockerWorkspaceRoot(
+  environment: ProcessEnvironment,
+  protectedRoot: string,
+): Promise<string> {
+  const configured = environmentValue(
+    environment,
+    "CODEX_SECURITY_DOCKER_WORKSPACE_ROOT",
   );
+  const candidate =
+    configured ?? join(homedir(), ".cache", "codex-security", "sandboxes");
+  requireOutsideRepository(protectedRoot, candidate);
+  await mkdir(candidate, { recursive: true, mode: 0o700 });
+  const root = await realpath(candidate);
+  requireOutsideRepository(protectedRoot, root);
+  return root;
+}
+
+function environmentApiKey(environment: ProcessEnvironment): string | null {
+  for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+    const value = environmentValue(environment, name);
+    if (value !== undefined) return value;
+  }
+  return null;
 }
 
 function environmentValue(
   environment: ProcessEnvironment,
   name: string,
 ): string | undefined {
-  const key = Object.keys(environment).find(
-    (candidate) => candidate.toUpperCase() === name,
-  );
-  const value = key === undefined ? undefined : environment[key];
+  const value = environment[name];
   return typeof value === "string" && value.trim().length > 0
-    ? value
+    ? value.trim()
     : undefined;
-}
-
-function withoutApiKeys(environment: ProcessEnvironment): ProcessEnvironment {
-  return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => {
-      const upper = name.toUpperCase();
-      return upper !== "OPENAI_API_KEY" && upper !== "CODEX_API_KEY";
-    }),
-  );
 }
 
 function requireOutsideRepository(repository: string, candidate: string): void {
@@ -2464,24 +750,13 @@ function nonEmpty(value: string | undefined, name: string): string | undefined {
   return value;
 }
 
-function throwIfAborted(
-  signal: AbortSignal | undefined,
-  scanDir: string,
-): void {
-  if (signal?.aborted !== true) return;
-  throw new ScanInterruptedError(
-    `Codex Security scan was interrupted${scanDir ? `; partial output remains at ${scanDir}` : ""}.`,
-    scanDir,
-  );
-}
-
 function forwardAbort(
-  source: AbortSignal | undefined,
-  target: AbortController,
+  signal: AbortSignal | undefined,
+  controller: AbortController,
 ): () => void {
-  if (source === undefined) return () => undefined;
-  const listener = (): void => target.abort(source.reason);
-  if (source.aborted) listener();
-  else source.addEventListener("abort", listener, { once: true });
-  return () => source.removeEventListener("abort", listener);
+  if (signal === undefined) return () => undefined;
+  const abort = (): void => controller.abort(signal.reason);
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+  return () => signal.removeEventListener("abort", abort);
 }

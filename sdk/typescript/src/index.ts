@@ -4,12 +4,10 @@ export {
   AgentsSecurity,
   agentsManifest,
   agentsScanPrompt,
-  copySandboxOutput,
   runAgentsScan,
 } from "./agents.js";
 export type {
   AgentsReasoningEffort,
-  AgentsSandbox,
   AgentsRuntimeDependencies,
   AgentsScanOptions,
   AgentsScanRequest,

@@ -7,7 +7,6 @@ import { parse as parseToml } from "smol-toml";
 import {
   AgentsSecurity,
   type AgentsReasoningEffort,
-  type AgentsSandbox,
   type AgentsSecurityConfig,
 } from "./agents.js";
 import { CodexSecurity, type ScanOptions } from "./api.js";
@@ -38,7 +37,6 @@ const SCAN_LONG_OPTIONS = [
   "--reasoning-effort",
   "--max-turns",
   "--worker-max-turns",
-  "--sandbox",
   "--working-tree",
   "--json",
 ];
@@ -66,7 +64,6 @@ export interface ParsedScanArguments {
   reasoningEffort?: AgentsReasoningEffort;
   maxTurns?: number;
   workerMaxTurns?: number;
-  sandbox?: AgentsSandbox;
   codex: string[];
   json: boolean;
 }
@@ -132,7 +129,7 @@ export function scanHelp(): string {
     "                           [--plugin-path PATH] [--python PATH]",
     "                           [--engine {agents,codex}] [--model MODEL]",
     "                           [--reasoning-effort EFFORT] [--max-turns N]",
-    "                           [--worker-max-turns N] [--sandbox BACKEND]",
+    "                           [--worker-max-turns N]",
     "                           [--codex KEY=VALUE]",
     "                           [--json] [repository]",
     "",
@@ -168,8 +165,6 @@ export function scanHelp(): string {
     "  --max-turns N         Maximum Agents SDK coordinator turns (default: 200).",
     "  --worker-max-turns N  Maximum turns for one delegated Agents SDK scan",
     "                        worker (default: 100).",
-    "  --sandbox BACKEND     Agents SDK sandbox: docker (default, no network) or",
-    "                        unsafe-local (development only; no host isolation).",
     "  --codex KEY=VALUE     Override isolated Codex config with a TOML KEY=VALUE;",
     "                        repeat as needed.",
     "  --json                Print manifest, findings, coverage, output paths, and",
@@ -324,7 +319,6 @@ async function runScan(
             reasoningEffort: arguments_.reasoningEffort,
             maxTurns: arguments_.maxTurns,
             workerMaxTurns: arguments_.workerMaxTurns,
-            sandbox: arguments_.sandbox,
           }
         : {
             pluginPath: arguments_.pluginPath,
@@ -506,15 +500,6 @@ export function parseScanArguments(
           option,
         );
         if (inline === undefined) index += 1;
-      } else if (option === "--sandbox") {
-        const sandbox = optionValue(values, index, option, inline);
-        if (inline === undefined) index += 1;
-        if (sandbox !== "docker" && sandbox !== "unsafe-local") {
-          throw new CliUsageError(
-            `argument --sandbox: invalid choice: ${sandbox}`,
-          );
-        }
-        parsed.sandbox = sandbox;
       } else {
         if (ignoreUnrecognized && !option.startsWith("-h-")) continue;
         throw new CliUsageError(`unrecognized argument: ${token}`);
@@ -603,11 +588,10 @@ function scanEngineFor(
     (arguments_.model !== undefined ||
       arguments_.reasoningEffort !== undefined ||
       arguments_.maxTurns !== undefined ||
-      arguments_.workerMaxTurns !== undefined ||
-      arguments_.sandbox !== undefined)
+      arguments_.workerMaxTurns !== undefined)
   ) {
     throw new CodexSecurityError(
-      "--model, --reasoning-effort, --max-turns, --worker-max-turns, and --sandbox require the Agents SDK engine.",
+      "--model, --reasoning-effort, --max-turns, and --worker-max-turns require the Agents SDK engine.",
     );
   }
   return engine;

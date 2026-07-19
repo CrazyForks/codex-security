@@ -4,7 +4,7 @@ usage: codex-security scan [-h] [--path PATH | --diff BASE | --working-tree]
                            [--plugin-path PATH] [--python PATH]
                            [--engine {agents,codex}] [--model MODEL]
                            [--reasoning-effort EFFORT] [--max-turns N]
-                           [--worker-max-turns N] [--sandbox BACKEND]
+                           [--worker-max-turns N]
                            [--codex KEY=VALUE]
                            [--json] [repository]
 
@@ -40,8 +40,6 @@ options:
   --max-turns N         Maximum Agents SDK coordinator turns (default: 200).
   --worker-max-turns N  Maximum turns for one delegated Agents SDK scan
                         worker (default: 100).
-  --sandbox BACKEND     Agents SDK sandbox: docker (default, no network) or
-                        unsafe-local (development only; no host isolation).
   --codex KEY=VALUE     Override isolated Codex config with a TOML KEY=VALUE;
                         repeat as needed.
   --json                Print manifest, findings, coverage, output paths, and

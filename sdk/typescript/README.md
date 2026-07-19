@@ -18,9 +18,8 @@ npx codex-security --version
 
 Node.js 22 or later is required. Standard Agents scans require a running Docker
 daemon; the default sandbox image includes Python for the bundled scan helpers.
-`--python` and `pythonPath` select an in-container interpreter for Docker, or a
-host interpreter for Codex and `unsafe-local` scans. `PYTHON` is honored only
-for host-local execution.
+`--python` and `pythonPath` select an in-container interpreter for Agents
+scans or a host interpreter for Codex scans.
 
 Before a standard repository/path scan, set `OPENAI_API_KEY` or
 `CODEX_API_KEY`. File-backed Codex sign-in remains available for
@@ -43,36 +42,22 @@ repository and path targets. The output directory must be outside the scanned
 repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
-The default Agents engine stages a copy of the repository, the scan
-skills/helpers, and immutable scan-control inputs, then bind-mounts them
-read-only in a Docker-isolated, network-disabled `node:22-bookworm` sandbox,
-runs the standard `security-scan` workflow with bounded delegated workers, and
-stops the sandbox before transferring generated scan artifacts back to the
-output directory.
-Partial repository ranking uses one verified worker slot and preserves the
-static pool-plan and receipt contract without depending on Codex preflight.
-Repository symlinks and special files such as FIFOs/sockets are omitted,
-consistent with the scan inventory's regular-file policy; executable files and
-Git worktree identity/status, initialized-submodule source, and untracked nested
-Git source are preserved in a minimal, shallow, self-contained staged snapshot
-that omits local remotes, nested Git metadata, Git configuration, and reflogs.
-A stable, one-way-hashed workspace identity is supplied as an immutable input
-so finding identities do not collide across repositories or change between
-scans. Git-ignored files are not staged unless they are explicitly selected with
-`--path`; a Git-backed subdirectory or sparse partial clone is represented as
-the directory snapshot actually reviewed. Staging rejects non-regular Git
-ignore/exclude/config-include inputs, bounds Git metadata commands, and limits
-repository inputs to 2,000,000 entries, 256 MiB per file, and 4 GiB total so a
-malformed repository cannot stall or exhaust the host before isolation.
-The shell environment does not receive model
-API keys, and source/tool traces and sensitive SDK debug logging (including
-`OPENAI_LOG=debug` request bodies) are disabled for the scan. `--model`,
-`--reasoning-effort`, `--max-turns`,
-`--worker-max-turns`, and `--sandbox` control the Agents workflow.
-`--sandbox unsafe-local` is for trusted local development only and provides no
-host isolation.
+The default Agents engine uses the SDK Docker sandbox directly: repository and
+plugin directories are mounted read-only, the requested output directory is
+mounted writable, and network access is disabled before tool execution. The
+standard `security-scan` skill runs with one bounded delegated ranking worker
+and preserves the existing pool-plan, receipt, and canonical output contract.
+A stable one-way-hashed repository identity is bound during validation, and SDK
+tracing is suppressed for the duration of the scan.
 
-Docker staging defaults to `~/.cache/codex-security/sandboxes`, which works with
+This intentionally avoids a second Git, staging, and artifact-copy
+implementation in the CLI. It is a trusted-local-repository adapter, not an
+adversarial multi-tenant sandbox: ignored files, symlinks, and Git metadata are
+visible inside the read-only repository mount, and resource limits are owned by
+the Docker host. `--model`, `--reasoning-effort`, `--max-turns`, and
+`--worker-max-turns` control the Agents workflow.
+
+Docker workspaces default to `~/.cache/codex-security/sandboxes`, which works with
 Docker Desktop and Colima's default shared-user-directory mount. Set
 `CODEX_SECURITY_DOCKER_WORKSPACE_ROOT` to another Docker-shared directory when a
 custom daemon or mount policy requires it.

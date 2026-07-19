@@ -111,6 +111,21 @@ describe("canonical scan contract", () => {
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
+  test("rejects a completed scan whose target identity does not match the request", async () => {
+    const scanDir = await copyExample();
+    await expect(
+      loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          ...expectation({ kind: "repository", paths: [] }),
+          repositoryIdentity: `codex-security-target/v1:sha256:${"a".repeat(64)}`,
+        },
+      }),
+    ).rejects.toThrow(
+      "Scan target identity does not match the requested repository",
+    );
+  });
+
   test("honors cancellation during contract validation", async () => {
     const scanDir = await copyExample();
     const controller = new AbortController();

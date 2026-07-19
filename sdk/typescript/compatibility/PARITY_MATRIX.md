@@ -34,7 +34,6 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | `AgentsSecurityConfig.reasoningEffort`       | n/a                                                 | Agents reasoning effort, default `high`                                                           |
 | `AgentsSecurityConfig.maxTurns`              | n/a                                                 | Coordinator turn limit, default `200`                                                             |
 | `AgentsSecurityConfig.workerMaxTurns`        | n/a                                                 | Per-worker turn limit, default `100`                                                              |
-| `AgentsSecurityConfig.sandbox`               | n/a                                                 | `docker` default; `unsafe-local` is an explicit development-only escape hatch                     |
 | n/a                                          | Explicit plugin Python interpreter                  | `pythonPath` and CLI `--python`                                                                   |
 | `ScanResult` paths/properties                | Canonical contract plus paths and turn result       | Readonly camelCase fields and path getters                                                        |
 | Contract Pydantic models                     | Typed nested documents; unknown fields retained     | TypeScript interfaces plus Ajv 2020 validation; parsed JSON objects retain unknown fields         |
@@ -59,7 +58,6 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | `--reasoning-effort EFFORT`    | Agents reasoning effort, default `high`                                            |
 | `--max-turns N`                | Agents coordinator turn limit, default `200`                                       |
 | `--worker-max-turns N`         | Agents per-worker turn limit, default `100`                                        |
-| `--sandbox BACKEND`            | Agents sandbox: isolated `docker` by default or development-only `unsafe-local`    |
 | `--output-dir DIR`             | Must be absent or empty and outside the repository; preserved on interruption      |
 | `--plugin-path PATH`           | Plugin directory or safe ZIP override                                              |
 | repeatable `--codex KEY=VALUE` | Parse TOML literals, reject duplicate/conflicting/owned keys                       |
@@ -77,33 +75,19 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | Ctrl-C                         | empty                                                      | cancellation and partial-output location | 130  |
 | SIGTERM                        | empty                                                      | termination and partial-output location  | 143  |
 
-Standard repository/path CLI scans use `@openai/agents@0.13.5`. The Agents
-runtime stages repository, plugin, and scan-control inputs and bind-mounts them
-read-only in a Docker-isolated, network-disabled `node:22-bookworm` sandbox,
-uses the `security-scan` skill plus an explicit delegated-worker tool, disables
-traces and sensitive debug logging
-(including `OPENAI_LOG=debug` request bodies) that could capture source/tool
-data, keeps API keys outside the sandbox shell,
-and validates the same canonical output contract. `AgentsSecurity` requires an
-API key and does not consume file-backed Codex authentication. Repository
-symlinks and special files are omitted because the deterministic scan inventory
-only includes regular files; executable files, Git worktree identity/status,
-initialized-submodule source, and untracked nested Git source are preserved in
-a minimal, shallow, self-contained snapshot without local remotes, nested Git
-metadata, Git configuration, reflogs, or nested bare-repository metadata. An
-immutable, one-way-hashed workspace identity preserves stable finding identity.
-Git-ignored files, including validated global and system excludes, are omitted
-unless explicitly selected as a path target, and a Git-backed subdirectory or
-sparse partial clone is bound as the directory snapshot actually reviewed.
-Non-regular Git ignore/exclude/config-include inputs are rejected, Git metadata
-commands and repository staging are bounded (2,000,000 entries, 256 MiB per
-file, 4 GiB total), inherited Git templates/hooks are disabled, and Docker is
-stopped before bounded artifact handoff.
-Partial repository ranking uses one verified worker slot with the unchanged
-static pool-plan and receipt contract instead of Codex capability preflight.
-`unsafe-local` is explicitly opt-in and is not a host isolation boundary.
-Native Windows paths are unsupported by the Agents sandbox and route to Codex;
-WSL can be used for Agents execution. Docker staging defaults to
+Standard repository/path CLI scans use `@openai/agents@0.13.5`. The thin Agents
+adapter mounts repository and plugin directories read-only and the output
+directory writable in a network-disabled `node:22-bookworm` Docker sandbox,
+runs the `security-scan` skill with one delegated ranking worker, and validates
+the canonical output contract against a stable repository identity. SDK tracing
+is suppressed during the scan. It requires
+an API key and does not consume file-backed Codex authentication.
+
+The adapter deliberately does not duplicate Git filtering, source staging, or
+resource management. Ignored files, symlinks, and Git metadata are visible in
+the read-only repository mount, and Docker-host limits apply; use it with
+trusted local repositories. Native Windows paths route to Codex; WSL can be
+used for Agents execution. Docker workspaces default to
 `~/.cache/codex-security/sandboxes`; set
 `CODEX_SECURITY_DOCKER_WORKSPACE_ROOT` when a custom Docker mount policy needs a
 different shared directory.
