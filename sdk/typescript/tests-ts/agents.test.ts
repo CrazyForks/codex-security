@@ -46,6 +46,7 @@ import {
   runAgentsScan,
   type AgentsScanRequest,
 } from "../src/index.js";
+import { suppressReferencedSandboxTimeouts } from "../src/agents.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
@@ -309,6 +310,38 @@ describe("Agents SDK scan workspace", () => {
     expect(prompt).not.toContain("$(do-not-run)");
   });
 
+  test("does not let completed sandbox shell commands keep the host process alive", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const session = await new UnixLocalSandboxClient({
+      workspaceBaseDir: root,
+    }).create({ manifest: await agentsManifest(request(repository)) });
+    const previousSetTimeout = globalThis.setTimeout;
+    const observed: Array<ReturnType<typeof setTimeout>> = [];
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      const timeout = previousSetTimeout(...args);
+      if (args[1] === 30_000) observed.push(timeout);
+      return timeout;
+    }) as typeof setTimeout;
+    const restoreSandboxTimeouts = suppressReferencedSandboxTimeouts();
+    try {
+      const result = await session.exec({
+        cmd: "true",
+        workdir: "/workspace",
+        login: false,
+        yieldTimeMs: 30_000,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(observed.length).toBeGreaterThan(0);
+      expect(observed.every((timeout) => !timeout.hasRef())).toBe(true);
+    } finally {
+      await session.close();
+      restoreSandboxTimeouts();
+      globalThis.setTimeout = previousSetTimeout;
+    }
+  });
+
   test("copies nested regular output while rejecting unsafe and non-regular entries", async () => {
     const root = await temporaryDirectory();
     const destination = join(root, "output");
@@ -358,6 +391,47 @@ describe("Agents SDK scan workspace", () => {
         unsafeDestination,
       ),
     ).rejects.toBeInstanceOf(OutputDirectoryError);
+
+    const nestedDestination = join(root, "nested-swap");
+    const escapedDestination = join(root, "escaped");
+    await mkdir(nestedDestination);
+    await mkdir(escapedDestination);
+    await expect(
+      copySandboxOutput(
+        {
+          async listDir({ path }) {
+            if (path === "output") {
+              return [
+                { name: "artifacts", path: "output/artifacts", type: "dir" },
+              ];
+            }
+            return [
+              {
+                name: "outside.txt",
+                path: "output/artifacts/outside.txt",
+                type: "file",
+              },
+            ];
+          },
+          async readFile() {
+            rmSync(join(nestedDestination, "artifacts"), {
+              recursive: true,
+              force: true,
+            });
+            symlinkSync(
+              escapedDestination,
+              join(nestedDestination, "artifacts"),
+              "dir",
+            );
+            return "must-not-escape";
+          },
+        },
+        nestedDestination,
+      ),
+    ).rejects.toBeInstanceOf(OutputDirectoryError);
+    await expect(
+      readFile(join(escapedDestination, "outside.txt"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
 
     const swappedDestination = join(root, "swapped");
     await mkdir(swappedDestination);
@@ -1007,7 +1081,15 @@ describe("AgentsSecurity orchestration", () => {
     const running = client.run(repository).catch((error: unknown) => error);
     await started;
     expect((await readdir(workspaceRoot)).length).toBe(1);
-    await client.close();
+    const firstClose = client.close();
+    let secondCloseResolved = false;
+    const secondClose = client.close().then(() => {
+      secondCloseResolved = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(secondCloseResolved).toBe(false);
+    await Promise.all([firstClose, secondClose]);
     expect(await readdir(workspaceRoot)).toEqual([]);
     expect(await running).toBeInstanceOf(ScanInterruptedError);
   });

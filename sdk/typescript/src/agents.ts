@@ -98,6 +98,8 @@ let savedDontLogModelData: string | undefined;
 let savedDontLogToolData: string | undefined;
 let savedOpenAILogLevel: string | undefined;
 let savedTracingDisabled = false;
+let sandboxTimeoutUsers = 0;
+let savedSetTimeout: typeof setTimeout | undefined;
 
 export type AgentsReasoningEffort =
   | "none"
@@ -175,6 +177,7 @@ export class AgentsSecurity {
   readonly #controllers = new Set<AbortController>();
   readonly #runs = new Set<Promise<void>>();
   #closed = false;
+  #closePromise: Promise<void> | null = null;
 
   public constructor(config?: AgentsSecurityConfig);
   public constructor(
@@ -434,8 +437,13 @@ export class AgentsSecurity {
   }
 
   public async close(): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closePromise !== null) return await this.#closePromise;
     this.#closed = true;
+    this.#closePromise = this.#finishClose();
+    await this.#closePromise;
+  }
+
+  async #finishClose(): Promise<void> {
     for (const controller of this.#controllers) controller.abort();
     await Promise.allSettled(this.#runs);
   }
@@ -461,6 +469,7 @@ export async function runAgentsScan(
         });
   const session = await client.create({ manifest });
   const releaseTelemetry = suppressSensitiveAgentsTelemetry();
+  const releaseSandboxTimeouts = suppressReferencedSandboxTimeouts();
   let ownedProvider: OpenAIProvider | undefined;
   let summary: AgentsScanSummary | undefined;
   let failure: unknown;
@@ -599,6 +608,7 @@ export async function runAgentsScan(
   } finally {
     await session.close().catch(() => undefined);
     await ownedProvider?.close().catch(() => undefined);
+    releaseSandboxTimeouts();
     releaseTelemetry();
   }
   if (failure !== undefined) throw failure;
@@ -749,23 +759,36 @@ export async function copySandboxOutput(
       `Agents SDK scan output directory is not a regular directory: ${destination}`,
     );
   }
-  const requireUnchangedDestination = async (): Promise<void> => {
-    const current = await lstat(destination).catch(() => null);
-    if (
-      current === null ||
-      !current.isDirectory() ||
-      current.isSymbolicLink() ||
-      current.dev !== destinationMetadata.dev ||
-      current.ino !== destinationMetadata.ino
-    ) {
-      throw new OutputDirectoryError(
-        `Agents SDK scan output directory changed while copying artifacts: ${destination}`,
-      );
+  const directoryMetadata = new Map([
+    [
+      destination,
+      { dev: destinationMetadata.dev, ino: destinationMetadata.ino },
+    ],
+  ]);
+  const requireUnchangedDirectories = async (target: string): Promise<void> => {
+    let currentPath = target;
+    while (true) {
+      const expected = directoryMetadata.get(currentPath);
+      const current = await lstat(currentPath).catch(() => null);
+      if (
+        expected === undefined ||
+        current === null ||
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        current.dev !== expected.dev ||
+        current.ino !== expected.ino
+      ) {
+        throw new OutputDirectoryError(
+          `Agents SDK scan output directory changed while copying artifacts: ${currentPath}`,
+        );
+      }
+      if (currentPath === destination) break;
+      currentPath = resolve(currentPath, "..");
     }
   };
   const visit = async (source: string, target: string): Promise<void> => {
     throwIfAborted(signal, destination);
-    await requireUnchangedDestination();
+    await requireUnchangedDirectories(target);
     const entries = await session.listDir!({ path: source });
     for (const entry of entries) {
       throwIfAborted(signal, destination);
@@ -783,8 +806,22 @@ export async function copySandboxOutput(
       const childSource = `${source}/${entry.name}`;
       const childTarget = join(target, entry.name);
       if (entry.type === "dir") {
-        await requireUnchangedDestination();
+        await requireUnchangedDirectories(target);
         await mkdir(childTarget, { recursive: false, mode: 0o700 });
+        const childMetadata = await lstat(childTarget).catch(() => null);
+        if (
+          childMetadata === null ||
+          !childMetadata.isDirectory() ||
+          childMetadata.isSymbolicLink()
+        ) {
+          throw new OutputDirectoryError(
+            `Agents SDK scan output directory changed while copying artifacts: ${childTarget}`,
+          );
+        }
+        directoryMetadata.set(childTarget, {
+          dev: childMetadata.dev,
+          ino: childMetadata.ino,
+        });
         await visit(childSource, childTarget);
       } else if (entry.type === "file") {
         files += 1;
@@ -812,7 +849,7 @@ export async function copySandboxOutput(
             "Agents SDK sandbox produced too much scan output.",
           );
         }
-        await requireUnchangedDestination();
+        await requireUnchangedDirectories(target);
         await writeFile(childTarget, data, { flag: "wx", mode: 0o600 });
       } else {
         throw new OutputDirectoryError(
@@ -1063,6 +1100,32 @@ function suppressSensitiveAgentsTelemetry(): () => void {
     );
     restoreEnvironmentValue("OPENAI_LOG", savedOpenAILogLevel);
     setTracingDisabled(savedTracingDisabled);
+  };
+}
+
+export function suppressReferencedSandboxTimeouts(): () => void {
+  if (sandboxTimeoutUsers++ === 0) {
+    const previous = globalThis.setTimeout;
+    savedSetTimeout = previous;
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      const timeout = previous(...args);
+      if (
+        /[\\/]sandbox[\\/]sandboxes[\\/]unixLocal\./.test(
+          new Error().stack ?? "",
+        )
+      ) {
+        timeout.unref();
+      }
+      return timeout;
+    }) as typeof setTimeout;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--sandboxTimeoutUsers !== 0) return;
+    if (savedSetTimeout !== undefined) globalThis.setTimeout = savedSetTimeout;
+    savedSetTimeout = undefined;
   };
 }
 
