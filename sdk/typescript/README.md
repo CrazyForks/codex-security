@@ -44,15 +44,17 @@ repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
 The default Agents engine stages a copy of the repository plus the scan
-skills/helpers in a Docker-isolated, network-disabled `node:22-bookworm`
+skills/helpers and bind-mounts them read-only in a Docker-isolated,
+network-disabled `node:22-bookworm`
 sandbox, runs the standard `security-scan` workflow with bounded delegated
 workers, and transfers generated scan artifacts back to the output directory.
 Partial repository ranking uses one verified worker slot and preserves the
 static pool-plan and receipt contract without depending on Codex preflight.
 Repository symlinks and special files such as FIFOs/sockets are omitted,
 consistent with the scan inventory's regular-file policy; executable files and
-Git worktree identity/status are preserved in a minimal, self-contained staged
-snapshot that omits local remotes and Git configuration. Git-ignored files are
+Git worktree identity/status and initialized-submodule source are preserved in
+a minimal, shallow, self-contained staged snapshot that omits local remotes,
+nested Git metadata, and Git configuration. Git-ignored files are
 not staged unless they are explicitly selected with `--path`; a Git-backed
 subdirectory is represented as the directory snapshot actually reviewed. The
 shell environment does not receive model

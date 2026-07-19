@@ -78,17 +78,18 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | SIGTERM                        | empty                                                      | termination and partial-output location  | 143  |
 
 Standard repository/path CLI scans use `@openai/agents@0.13.5`. The Agents
-runtime stages repository and plugin inputs in a Docker-isolated,
-network-disabled `node:22-bookworm` sandbox, uses the `security-scan` skill plus
+runtime stages repository and plugin inputs and bind-mounts them read-only in a
+Docker-isolated, network-disabled `node:22-bookworm` sandbox, uses the `security-scan` skill plus
 an explicit delegated-worker tool, disables traces and sensitive debug logging
 (including `OPENAI_LOG=debug` request bodies) that could capture source/tool
 data, keeps API keys outside the sandbox shell,
 and validates the same canonical output contract. `AgentsSecurity` requires an
 API key and does not consume file-backed Codex authentication. Repository
 symlinks and special files are omitted because the deterministic scan inventory
-only includes regular files; executable files and Git worktree identity/status
-are preserved in a minimal self-contained snapshot without local remotes or
-Git configuration. Git-ignored files are omitted unless explicitly selected as
+only includes regular files; executable files, Git worktree identity/status, and
+initialized-submodule source are preserved in a minimal, shallow,
+self-contained snapshot without local remotes, nested Git metadata, or Git
+configuration. Git-ignored files are omitted unless explicitly selected as
 a path target, and a Git-backed subdirectory is bound as the directory snapshot
 actually reviewed.
 Partial repository ranking uses one verified worker slot with the unchanged

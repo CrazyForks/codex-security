@@ -20,8 +20,10 @@ import {
   Runner,
   getGlobalTraceProvider,
   setTracingDisabled,
+  tool,
   type ModelProvider,
 } from "@openai/agents";
+import { z } from "zod";
 import {
   Capabilities,
   Manifest,
@@ -29,6 +31,7 @@ import {
   dir,
   file,
   localDir,
+  mount,
   skills,
   type SandboxSessionLike,
 } from "@openai/agents/sandbox";
@@ -81,6 +84,7 @@ const MAX_OUTPUT_ENTRIES = 20_000;
 const MAX_OUTPUT_DEPTH = 128;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
+const MAX_GIT_SUBMODULES = 256;
 const execFile = promisify(execFileCallback);
 const REQUIRED_PLUGIN_DIRECTORIES = [
   "references",
@@ -492,7 +496,11 @@ export async function runAgentsScan(
     const preflight = await session.exec({
       cmd: [
         'command -v "$PYTHON" >/dev/null',
-        '"$PYTHON" -c \'import json,os,stat; root=os.path.realpath("repository"); entries=json.load(open("repository-executables.json",encoding="utf-8")); [(lambda p,m: os.chmod(p,(os.lstat(p).st_mode & 0o666) | m) if stat.S_ISREG(os.lstat(p).st_mode) and os.path.commonpath((root,os.path.realpath(p))) == root else (_ for _ in ()).throw(RuntimeError("unsafe executable entry")))(os.path.join(root,*path.split("/")),mode) for path,mode in entries]\'',
+        ...(request.sandbox === "unsafe-local"
+          ? [
+              '"$PYTHON" -c \'import json,os,stat; root=os.path.realpath("repository"); entries=json.load(open("repository-executables.json",encoding="utf-8")); [(lambda p,m: os.chmod(p,(os.lstat(p).st_mode & 0o666) | m) if stat.S_ISREG(os.lstat(p).st_mode) and os.path.commonpath((root,os.path.realpath(p))) == root else (_ for _ in ()).throw(RuntimeError("unsafe executable entry")))(os.path.join(root,*path.split("/")),mode) for path,mode in entries]\'',
+            ]
+          : []),
         "command -v git >/dev/null",
         "command -v grep >/dev/null",
         "command -v find >/dev/null",
@@ -543,6 +551,31 @@ export async function runAgentsScan(
         maxTurns: request.workerMaxTurns,
       },
     });
+    const skillSource = localDirLazySkillSource({
+      src: join(request.pluginRoot, "skills"),
+      baseDir: request.pluginRoot,
+    });
+    const skillIndex = skillSource.getIndex?.(manifest, "plugin/skills") ?? [];
+    const loadMountedSkill = tool({
+      name: "load_skill",
+      description:
+        "Load a bundled Codex Security phase skill from the read-only Docker plugin mount.",
+      parameters: z.object({ skill_name: z.string().min(1) }),
+      execute: async ({ skill_name }) => {
+        const matches = skillIndex.filter((entry) => entry.name === skill_name);
+        if (matches.length !== 1) {
+          throw new IncompleteScanError(
+            `Unknown or ambiguous Agents scan skill: ${skill_name}`,
+          );
+        }
+        const match = matches[0]!;
+        return {
+          status: "already_loaded",
+          skill_name: match.name,
+          path: `plugin/skills/${match.path ?? match.name}`,
+        };
+      },
+    });
     const coordinator = new SandboxAgent({
       name: "Codex Security scan coordinator",
       model: request.model,
@@ -561,16 +594,20 @@ export async function runAgentsScan(
         "The Agents host has no Codex app, MCP workbench, goals, native fanout, or config-preflight tools. Use the terminal/chat workflow and do not wait for UI or invoke Codex-only tools.",
         "Complete all required phase, coverage, and candidate-ledger receipts, then run the terminal finalizer exactly once. Never claim complete coverage when a required worker or receipt is missing.",
       ].join("\n"),
-      tools: [delegate],
+      tools: [
+        delegate,
+        ...(request.sandbox === "docker" ? [loadMountedSkill] : []),
+      ],
       capabilities: [
         ...Capabilities.default(),
-        skills({
-          lazyFrom: localDirLazySkillSource({
-            src: join(request.pluginRoot, "skills"),
-            baseDir: request.pluginRoot,
-          }),
-          skillsPath: "plugin/skills",
-        }),
+        ...(request.sandbox === "unsafe-local"
+          ? [
+              skills({
+                lazyFrom: skillSource,
+                skillsPath: "plugin/skills",
+              }),
+            ]
+          : []),
       ],
     });
     const runner = new Runner(runnerConfig);
@@ -626,15 +663,19 @@ export async function agentsManifest(
   request: Pick<
     AgentsScanRequest,
     "repository" | "target" | "pluginRoot" | "python"
-  >,
+  > & { sandbox?: AgentsSandbox },
 ): Promise<Manifest> {
   const entries: Record<
     string,
     | ReturnType<typeof localDir>
+    | ReturnType<typeof mount>
     | ReturnType<typeof dir>
     | ReturnType<typeof file>
   > = {
-    repository: localDir({ src: request.repository }),
+    repository:
+      request.sandbox === "docker"
+        ? mount({ source: request.repository, readOnly: true })
+        : localDir({ src: request.repository }),
     output: dir(),
     "target-paths.json": file({
       permissions: 0o400,
@@ -659,7 +700,10 @@ export async function agentsManifest(
         `Selected plugin is missing Agents scan runtime directory: ${name}`,
       );
     }
-    entries[`plugin/${name}`] = localDir({ src: source });
+    entries[`plugin/${name}`] =
+      request.sandbox === "docker"
+        ? mount({ source, readOnly: true })
+        : localDir({ src: source });
   }
   for (const name of OPTIONAL_PLUGIN_DIRECTORIES) {
     const source = join(request.pluginRoot, name);
@@ -670,7 +714,10 @@ export async function agentsManifest(
         `Selected plugin has an invalid Agents scan runtime directory: ${name}`,
       );
     }
-    entries[`plugin/${name}`] = localDir({ src: source });
+    entries[`plugin/${name}`] =
+      request.sandbox === "docker"
+        ? mount({ source, readOnly: true })
+        : localDir({ src: source });
   }
   const scanSkill = join(
     request.pluginRoot,
@@ -687,6 +734,12 @@ export async function agentsManifest(
     throw new IncompleteScanError(
       "Selected plugin is missing scan skill: security-scan",
     );
+  }
+  if (request.sandbox === "docker") {
+    entries["plugin/skills"] = mount({
+      source: join(request.pluginRoot, "skills"),
+      readOnly: true,
+    });
   }
   return new Manifest({
     root: "/workspace",
@@ -709,6 +762,10 @@ export async function agentsManifest(
       PYTHONDONTWRITEBYTECODE: "1",
       CODEX_SECURITY_AGENT_RUNTIME: "agents-sdk",
       CODEX_SECURITY_TARGET_PATHS_FILE: "target-paths.json",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/workspace/repository",
     },
   });
 }
@@ -949,7 +1006,7 @@ async function stageTreeWithoutSymbolicLinks(
   await cp(sourceRoot, destination, {
     recursive: true,
     filter: async (source) => {
-      if (source === omittedPath) return false;
+      if (source === omittedPath || basename(source) === ".git") return false;
       if (stageFilter !== undefined) {
         const path = relative(sourceRoot, source).split(sep).join("/");
         const explicitlyRequested = stageFilter.explicitScopes.some(
@@ -979,19 +1036,77 @@ async function gitIncludedPaths(
   repository: string,
   signal: AbortSignal,
 ): Promise<Set<string>> {
-  let output: string;
+  const paths = new Set<string>();
+  const pending = [{ repository, prefix: "" }];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    const canonical = await realpath(current.repository);
+    if (visited.has(canonical)) continue;
+    visited.add(canonical);
+    if (visited.size > MAX_GIT_SUBMODULES + 1) {
+      throw new InvalidTargetError(
+        `Repository contains too many initialized Git submodules: ${repository}`,
+      );
+    }
+    const files = await gitListFiles(
+      current.repository,
+      ["--cached", "--others", "--exclude-standard"],
+      signal,
+      repository,
+    );
+    for (const value of files.split("\0")) {
+      if (value.length === 0) continue;
+      addGitIncludedPath(paths, current.prefix, value, repository);
+    }
+    const staged = await gitListFiles(
+      current.repository,
+      ["--stage"],
+      signal,
+      repository,
+    );
+    for (const record of staged.split("\0")) {
+      if (!record.startsWith("160000 ")) continue;
+      const separator = record.indexOf("\t");
+      if (separator < 0) {
+        throw new InvalidTargetError(
+          `Git returned an invalid submodule entry while staging: ${repository}`,
+        );
+      }
+      const value = record.slice(separator + 1);
+      addGitIncludedPath(paths, current.prefix, value, repository);
+      const nestedRepository = join(current.repository, value);
+      const metadata = await lstat(nestedRepository).catch(() => null);
+      const gitMetadata = await lstat(join(nestedRepository, ".git")).catch(
+        () => null,
+      );
+      if (metadata?.isDirectory() !== true || gitMetadata === null) continue;
+      pending.push({
+        repository: nestedRepository,
+        prefix: current.prefix ? `${current.prefix}/${value}` : value,
+      });
+    }
+  }
+  return paths;
+}
+
+async function gitListFiles(
+  repository: string,
+  options: readonly string[],
+  signal: AbortSignal,
+  root: string,
+): Promise<string> {
   try {
-    ({ stdout: output } = await execFile(
+    const { stdout } = await execFile(
       "git",
       [
+        "--no-optional-locks",
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
         "core.fsmonitor=false",
         "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
+        ...options,
         "-z",
         "--",
         ".",
@@ -1003,30 +1118,36 @@ async function gitIncludedPaths(
         signal,
         maxBuffer: 64 * 1024 * 1024,
       },
-    ));
+    );
+    return stdout;
   } catch (error) {
-    throwIfAborted(signal, repository);
+    throwIfAborted(signal, root);
     throw new InvalidTargetError(
       `Unable to enumerate non-ignored repository files: ${repository}`,
       { cause: error },
     );
   }
-  const paths = new Set<string>();
-  for (const value of output.split("\0")) {
-    if (value.length === 0) continue;
-    const parts = value.split("/");
-    if (
-      parts.some((part) => part.length === 0 || part === "." || part === "..")
-    ) {
-      throw new InvalidTargetError(
-        `Git returned an invalid repository path while staging: ${repository}`,
-      );
-    }
-    for (let index = 1; index <= parts.length; index += 1) {
-      paths.add(parts.slice(0, index).join("/"));
-    }
+}
+
+function addGitIncludedPath(
+  paths: Set<string>,
+  prefix: string,
+  value: string,
+  repository: string,
+): void {
+  const parts = value.split("/");
+  if (
+    parts.some((part) => part.length === 0 || part === "." || part === "..")
+  ) {
+    throw new InvalidTargetError(
+      `Git returned an invalid repository path while staging: ${repository}`,
+    );
   }
-  return paths;
+  const relative = prefix ? `${prefix}/${value}` : value;
+  const relativeParts = relative.split("/");
+  for (let index = 1; index <= relativeParts.length; index += 1) {
+    paths.add(relativeParts.slice(0, index).join("/"));
+  }
 }
 
 async function repositoryExecutablePaths(

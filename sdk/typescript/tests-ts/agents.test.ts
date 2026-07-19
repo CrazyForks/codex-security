@@ -240,6 +240,23 @@ describe("Agents SDK scan workspace", () => {
       target: { kind: "paths", paths: ["src"] },
     });
     const manifest = await agentsManifest(scanRequest);
+    const dockerManifest = await agentsManifest(
+      request(repository, {
+        target: { kind: "paths", paths: ["src"] },
+        sandbox: "docker",
+      }),
+    );
+    for (const path of ["repository", "plugin/scripts", "plugin/skills"]) {
+      expect(dockerManifest.entries[path]).toMatchObject({
+        type: "mount",
+        readOnly: true,
+      });
+    }
+    expect(dockerManifest.environment).toMatchObject({
+      GIT_CONFIG_COUNT: { value: "1" },
+      GIT_CONFIG_KEY_0: { value: "safe.directory" },
+      GIT_CONFIG_VALUE_0: { value: "/workspace/repository" },
+    });
     const lazySource = localDirLazySkillSource({
       src: join(PLUGIN_ROOT, "skills"),
       baseDir: PLUGIN_ROOT,
@@ -1013,6 +1030,201 @@ describe("AgentsSecurity orchestration", () => {
       client.run(repository, { outputDir: scanDir }),
     ).rejects.toThrow("stop after staging inspection");
     expect(reached).toBe(true);
+    await client.close();
+  });
+
+  test("stages initialized Git submodule source while excluding its ignored files and metadata", async () => {
+    const root = await temporaryDirectory();
+    const child = join(root, "child-source");
+    const repository = join(root, "repository");
+    const submodule = join(repository, "vendor", "service");
+    const scanDir = join(root, "scan");
+    const workspaceRoot = join(root, "docker-workspaces");
+    await mkdir(child);
+    await writeFile(
+      join(child, "vulnerable.ts"),
+      "export const reachable = true;\n",
+    );
+    await writeFile(join(child, ".gitignore"), ".env\nignored/\n");
+    execFileSync("git", ["init", "--quiet", child]);
+    execFileSync("git", [
+      "-C",
+      child,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", child, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", child, "add", "."]);
+    execFileSync("git", ["-C", child, "commit", "--quiet", "-m", "child"]);
+    await mkdir(repository);
+    execFileSync("git", ["init", "--quiet", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      child,
+      "vendor/service",
+    ]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "commit",
+      "--quiet",
+      "-am",
+      "parent",
+    ]);
+    await writeFile(
+      join(submodule, "local.ts"),
+      "export const local = true;\n",
+    );
+    await writeFile(join(submodule, ".env"), "LOCAL_SECRET=must-not-stage\n");
+    await mkdir(join(submodule, "ignored"));
+    await writeFile(
+      join(submodule, "ignored", "secret.ts"),
+      "ignored secret\n",
+    );
+
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(
+            await readFile(
+              join(value.repository, "vendor", "service", "vulnerable.ts"),
+              "utf8",
+            ),
+          ).toBe("export const reachable = true;\n");
+          expect(
+            await readFile(
+              join(value.repository, "vendor", "service", "local.ts"),
+              "utf8",
+            ),
+          ).toBe("export const local = true;\n");
+          expect(
+            existsSync(join(value.repository, "vendor", "service", ".env")),
+          ).toBe(false);
+          expect(
+            existsSync(join(value.repository, "vendor", "service", "ignored")),
+          ).toBe(false);
+          expect(
+            existsSync(join(value.repository, "vendor", "service", ".git")),
+          ).toBe(false);
+          throw new Error("stop after submodule staging inspection");
+        },
+      },
+    );
+    await expect(
+      client.run(repository, { outputDir: scanDir }),
+    ).rejects.toThrow("stop after submodule staging inspection");
+    expect(reached).toBe(true);
+    expect(await readdir(workspaceRoot)).toEqual([]);
+    await client.close();
+  });
+
+  test("never stages nested Git metadata when an ignored clone is explicitly targeted", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const nested = join(repository, "vendor-private");
+    const scanDir = join(root, "scan");
+    const workspaceRoot = join(root, "docker-workspaces");
+    await mkdir(repository);
+    await writeFile(join(repository, ".gitignore"), "vendor-private/\n");
+    await writeFile(
+      join(repository, "app.ts"),
+      "export const parent = true;\n",
+    );
+    execFileSync("git", ["init", "--quiet", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", repository, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "commit",
+      "--quiet",
+      "-m",
+      "parent",
+    ]);
+    await mkdir(nested);
+    await writeFile(join(nested, "source.ts"), "export const nested = true;\n");
+    execFileSync("git", ["init", "--quiet", nested]);
+    execFileSync("git", [
+      "-C",
+      nested,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", nested, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", nested, "add", "."]);
+    execFileSync("git", ["-C", nested, "commit", "--quiet", "-m", "nested"]);
+    execFileSync("git", [
+      "-C",
+      nested,
+      "config",
+      "remote.origin.url",
+      "https://synthetic-git-token@example.invalid/private/vendor.git",
+    ]);
+
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(
+            await readFile(
+              join(value.repository, "vendor-private", "source.ts"),
+              "utf8",
+            ),
+          ).toBe("export const nested = true;\n");
+          expect(
+            existsSync(join(value.repository, "vendor-private", ".git")),
+          ).toBe(false);
+          expect(
+            await readFile(join(value.repository, ".git", "config"), "utf8"),
+          ).not.toContain("synthetic-git-token");
+          throw new Error("stop after nested Git staging inspection");
+        },
+      },
+    );
+    await expect(
+      client.run(repository, {
+        target: ["vendor-private"],
+        outputDir: scanDir,
+      }),
+    ).rejects.toThrow("stop after nested Git staging inspection");
+    expect(reached).toBe(true);
+    expect(await readdir(workspaceRoot)).toEqual([]);
     await client.close();
   });
 
