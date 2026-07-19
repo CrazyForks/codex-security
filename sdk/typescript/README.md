@@ -43,11 +43,11 @@ repository and path targets. The output directory must be outside the scanned
 repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
-The default Agents engine stages a copy of the repository plus the scan
-skills/helpers and bind-mounts them read-only in a Docker-isolated,
+The default Agents engine stages a copy of the repository, the scan
+skills/helpers, and immutable scan-control inputs, then bind-mounts them read-only in a Docker-isolated,
 network-disabled `node:22-bookworm`
 sandbox, runs the standard `security-scan` workflow with bounded delegated
-workers, and transfers generated scan artifacts back to the output directory.
+workers, stops the sandbox before transferring generated scan artifacts back to the output directory.
 Partial repository ranking uses one verified worker slot and preserves the
 static pool-plan and receipt contract without depending on Codex preflight.
 Repository symlinks and special files such as FIFOs/sockets are omitted,

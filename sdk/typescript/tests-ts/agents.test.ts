@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  rename,
   readdir,
   readFile,
   realpath,
@@ -20,6 +21,7 @@ import {
   NoopTrace,
   Usage,
   getGlobalTraceProvider,
+  setDefaultOpenAIClient,
   setTracingDisabled,
   type Model,
   type ModelProvider,
@@ -47,7 +49,10 @@ import {
   runAgentsScan,
   type AgentsScanRequest,
 } from "../src/index.js";
-import { suppressReferencedSandboxTimeouts } from "../src/agents.js";
+import {
+  agentsModelProvider,
+  suppressReferencedSandboxTimeouts,
+} from "../src/agents.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
@@ -282,12 +287,12 @@ describe("Agents SDK scan workspace", () => {
           "test -f plugin/references/scan-artifacts.md",
           "test -f plugin/skills/security-scan/SKILL.md",
           "test -d output",
-          "test \"$(tr -d '\\n' < target-paths.json)\" = '[\"src\"]'",
-          "test ! -w target-paths.json",
-          "test ! -w repository-executables.json",
-          `test "$(tr -d '\\n' < repository-executables.json)" = '[["src/validate.sh",73]]'`,
+          "test \"$(tr -d '\\n' < scan-inputs/target-paths.json)\" = '[\"src\"]'",
+          "test ! -w scan-inputs/target-paths.json",
+          "test ! -w scan-inputs/repository-executables.json",
+          `test "$(tr -d '\\n' < scan-inputs/repository-executables.json)" = '[["src/validate.sh",73]]'`,
           'test "${CODEX_SECURITY_AGENT_RUNTIME-}" = agents-sdk',
-          'test "${CODEX_SECURITY_TARGET_PATHS_FILE-}" = target-paths.json',
+          'test "${CODEX_SECURITY_TARGET_PATHS_FILE-}" = scan-inputs/target-paths.json',
           'test -z "${OPENAI_API_KEY-}"',
           'test -z "${CODEX_API_KEY-}"',
         ].join(" && "),
@@ -314,7 +319,7 @@ describe("Agents SDK scan workspace", () => {
       "Use the $security-scan skill at plugin/skills/security-scan/SKILL.md.",
     );
     expect(prompt).toContain("delegate_security_task");
-    expect(prompt).toContain("--scopes-file target-paths.json");
+    expect(prompt).toContain("--scopes-file scan-inputs/target-paths.json");
     expect(prompt).toContain("--usable-worker-slots 1");
     expect(prompt).toContain(
       "do not wait for a Codex capability-preflight result",
@@ -326,6 +331,45 @@ describe("Agents SDK scan workspace", () => {
     expect(prompt).not.toContain("/managed/python");
     expect(prompt).not.toContain('src/with"scope');
     expect(prompt).not.toContain("$(do-not-run)");
+  });
+
+  test("uses an isolated Responses client instead of an inherited debug OpenAI client", async () => {
+    const inheritedClient = {
+      tag: "inherited-debug-client",
+      logLevel: "debug",
+      responses: { create: () => Promise.reject(new Error("must not run")) },
+    };
+    setDefaultOpenAIClient(inheritedClient as never);
+    const provider = agentsModelProvider(
+      request("/repository", {
+        apiKey: "synthetic-scan-key",
+        baseURL: "https://scan-endpoint.example.invalid/v1",
+        organization: "scan-org",
+        project: "scan-project",
+      }),
+    );
+    try {
+      const model = (await provider.getModel("gpt-test")) as unknown as {
+        _client: {
+          apiKey: string;
+          baseURL: string;
+          organization: string;
+          project: string;
+          logLevel: string;
+        };
+      };
+      expect(model._client).not.toBe(inheritedClient);
+      expect(model._client).toMatchObject({
+        apiKey: "synthetic-scan-key",
+        baseURL: "https://scan-endpoint.example.invalid/v1",
+        organization: "scan-org",
+        project: "scan-project",
+        logLevel: "warn",
+      });
+    } finally {
+      await provider.close();
+      setDefaultOpenAIClient(undefined as never);
+    }
   });
 
   test("does not let completed sandbox shell commands keep the host process alive", async () => {
@@ -436,7 +480,7 @@ describe("Agents SDK scan workspace", () => {
     await expect(
       copySandboxOutput(
         {
-          async listDir({ path }) {
+          async listDir({ path }: { path: string }) {
             return [{ name: "nested", path: `${path}/nested`, type: "dir" }];
           },
           async readFile() {
@@ -603,6 +647,58 @@ describe("Agents SDK scan workspace", () => {
     }
   });
 
+  test("rejects a sandbox output directory swapped for a host symlink during handoff", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "workspace");
+    const destination = join(root, "destination");
+    const outside = join(root, "outside");
+    await mkdir(join(workspace, "output", "artifacts"), { recursive: true });
+    await mkdir(destination);
+    await mkdir(outside);
+    await writeFile(join(outside, "secret.txt"), "HOST_SECRET=must-not-copy\n");
+    let swapped = false;
+    await expect(
+      copySandboxOutput(
+        {
+          state: { workspaceRootPath: workspace },
+          async listDir({ path }: { path: string }) {
+            if (path === "output") {
+              return [
+                { name: "artifacts", path: "output/artifacts", type: "dir" },
+              ];
+            }
+            if (path === "output/artifacts") {
+              await rename(
+                join(workspace, "output", "artifacts"),
+                join(workspace, "output", "artifacts-old"),
+              );
+              symlinkSync(outside, join(workspace, "output", "artifacts"));
+              swapped = true;
+              return [
+                {
+                  name: "secret.txt",
+                  path: "output/artifacts/secret.txt",
+                  type: "file",
+                },
+              ];
+            }
+            throw new Error(`unexpected sandbox path: ${path}`);
+          },
+          async readFile() {
+            throw new Error("generic reader must not run");
+          },
+        } as never,
+        destination,
+      ),
+    ).rejects.toThrow(
+      "sandbox output directory changed while copying artifacts",
+    );
+    expect(swapped).toBe(true);
+    expect(existsSync(join(destination, "artifacts", "secret.txt"))).toBe(
+      false,
+    );
+  });
+
   test("fails closed when the selected plugin does not contain the scan skill", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -633,8 +729,7 @@ describe("Agents SDK scan workspace", () => {
     expect(Object.keys(manifest.entries)).toEqual([
       "repository",
       "output",
-      "target-paths.json",
-      "repository-executables.json",
+      "scan-inputs",
       "plugin/references",
       "plugin/schemas",
       "plugin/scripts",
@@ -1398,6 +1493,314 @@ describe("AgentsSecurity orchestration", () => {
     expect(await readdir(workspaceRoot)).toEqual([]);
     await client.close();
   });
+
+  test("omits an untracked nested bare Git repository and its credential-bearing config", async () => {
+    const root = await temporaryDirectory();
+    const child = join(root, "child-source");
+    const repository = join(root, "repository");
+    const bare = join(repository, "cache", "private-mirror.git");
+    const workspaceRoot = join(root, "docker-workspaces");
+    await mkdir(child);
+    await mkdir(repository);
+    await writeFile(join(child, "child.ts"), "export const child = true;\n");
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    execFileSync("git", ["init", "--quiet", child]);
+    execFileSync("git", [
+      "-C",
+      child,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", child, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", child, "add", "."]);
+    execFileSync("git", ["-C", child, "commit", "--quiet", "-m", "child"]);
+    execFileSync("git", ["init", "--quiet", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", repository, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "commit",
+      "--quiet",
+      "-m",
+      "parent",
+    ]);
+    await mkdir(join(repository, "cache"));
+    execFileSync("git", ["clone", "--quiet", "--bare", child, bare]);
+    execFileSync("git", [
+      `--git-dir=${bare}`,
+      "config",
+      "remote.origin.url",
+      "https://synthetic-bare-token@example.invalid/private/mirror.git",
+    ]);
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(
+            existsSync(join(value.repository, "cache", "private-mirror.git")),
+          ).toBe(false);
+          expect(await readFile(join(value.repository, "app.ts"), "utf8")).toBe(
+            "export const app = true;\n",
+          );
+          throw new Error("stop after bare Git staging inspection");
+        },
+      },
+    );
+    await expect(
+      client.run(repository, { outputDir: join(root, "scan") }),
+    ).rejects.toThrow("stop after bare Git staging inspection");
+    expect(reached).toBe(true);
+    expect(await readdir(workspaceRoot)).toEqual([]);
+    await client.close();
+  });
+
+  test("preserves validated global and system Git excludes without exposing their secrets", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspaceRoot = join(root, "docker-workspaces");
+    const globalIgnore = join(root, "global-ignore");
+    const systemIgnore = join(root, "system-ignore");
+    const globalConfig = join(root, "global-gitconfig");
+    const systemConfig = join(root, "system-gitconfig");
+    await mkdir(repository);
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    await writeFile(
+      join(repository, "global.env"),
+      "GLOBAL_SECRET=must-not-stage\n",
+    );
+    await writeFile(
+      join(repository, "system.env"),
+      "SYSTEM_SECRET=must-not-stage\n",
+    );
+    await writeFile(globalIgnore, "global.env\n");
+    await writeFile(systemIgnore, "system.env\n");
+    await writeFile(globalConfig, `[core]\n  excludesFile = ${globalIgnore}\n`);
+    await writeFile(systemConfig, `[core]\n  excludesFile = ${systemIgnore}\n`);
+    execFileSync("git", ["init", "--quiet", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", repository, "add", "app.ts"]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "commit",
+      "--quiet",
+      "-m",
+      "initial",
+    ]);
+    const previousGlobal = process.env["GIT_CONFIG_GLOBAL"];
+    const previousSystem = process.env["GIT_CONFIG_SYSTEM"];
+    const previousNoSystem = process.env["GIT_CONFIG_NOSYSTEM"];
+    process.env["GIT_CONFIG_GLOBAL"] = globalConfig;
+    process.env["GIT_CONFIG_SYSTEM"] = systemConfig;
+    process.env["GIT_CONFIG_NOSYSTEM"] = "0";
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(existsSync(join(value.repository, "global.env"))).toBe(false);
+          expect(existsSync(join(value.repository, "system.env"))).toBe(false);
+          throw new Error("stop after external Git ignore inspection");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("stop after external Git ignore inspection");
+    } finally {
+      if (previousGlobal === undefined) delete process.env["GIT_CONFIG_GLOBAL"];
+      else process.env["GIT_CONFIG_GLOBAL"] = previousGlobal;
+      if (previousSystem === undefined) delete process.env["GIT_CONFIG_SYSTEM"];
+      else process.env["GIT_CONFIG_SYSTEM"] = previousSystem;
+      if (previousNoSystem === undefined)
+        delete process.env["GIT_CONFIG_NOSYSTEM"];
+      else process.env["GIT_CONFIG_NOSYSTEM"] = previousNoSystem;
+      await client.close();
+    }
+    expect(reached).toBe(true);
+    expect(await readdir(workspaceRoot)).toEqual([]);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "fails closed on symlinked Git metadata and ancestor Git ignore files",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const service = join(repository, "service");
+      const workspaceRoot = join(root, "docker-workspaces");
+      const externalIgnore = join(root, "external-ignore");
+      await mkdir(service, { recursive: true });
+      await writeFile(join(service, "app.ts"), "export const app = true;\n");
+      await writeFile(externalIgnore, "service/private.env\n");
+      execFileSync("git", ["init", "--quiet", repository]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "config",
+        "user.email",
+        "test@example.invalid",
+      ]);
+      execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+      execFileSync("git", ["-C", repository, "add", "."]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "commit",
+        "--quiet",
+        "-m",
+        "initial",
+      ]);
+      symlinkSync(externalIgnore, join(repository, ".gitignore"));
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+          },
+          runAgents: async () => {
+            throw new Error("sandbox must not start");
+          },
+        },
+      );
+      await expect(
+        client.run(service, { outputDir: join(root, "symlink-ignore-scan") }),
+      ).rejects.toThrow(
+        "Git ignore input must be a regular file before staging",
+      );
+      rmSync(join(repository, ".gitignore"));
+      execFileSync("mkfifo", [join(repository, ".gitignore")]);
+      await expect(
+        client.run(service, { outputDir: join(root, "fifo-ignore-scan") }),
+      ).rejects.toThrow(
+        "Git ignore input must be a regular file before staging",
+      );
+      rmSync(join(repository, ".gitignore"));
+      await rename(join(repository, ".git"), join(root, "git-metadata"));
+      symlinkSync(join(root, "git-metadata"), join(repository, ".git"));
+      await expect(
+        client.run(repository, { outputDir: join(root, "git-symlink-scan") }),
+      ).rejects.toThrow("Git worktree metadata must not be a symbolic link");
+      rmSync(join(repository, ".git"));
+      await rename(join(root, "git-metadata"), join(repository, ".git"));
+      await rename(
+        join(repository, ".git", "config"),
+        join(root, "saved-git-config"),
+      );
+      execFileSync("mkfifo", [join(repository, ".git", "config")]);
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "git-config-fifo-scan"),
+        }),
+      ).rejects.toThrow(
+        "Git worktree metadata must be a regular file before staging",
+      );
+      expect(await readdir(workspaceRoot)).toEqual([]);
+      await client.close();
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "does not copy or execute inherited Git template hooks while rebuilding snapshots",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const template = join(root, "template");
+      const marker = join(root, "template-hook-ran");
+      const workspaceRoot = join(root, "docker-workspaces");
+      await mkdir(repository);
+      await mkdir(join(template, "hooks"), { recursive: true });
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      execFileSync("git", ["init", "--quiet", repository]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "config",
+        "user.email",
+        "test@example.invalid",
+      ]);
+      execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+      execFileSync("git", ["-C", repository, "add", "."]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "commit",
+        "--quiet",
+        "-m",
+        "initial",
+      ]);
+      const hook = join(template, "hooks", "reference-transaction");
+      await writeFile(hook, `#!/bin/sh\nprintf hook-ran > '${marker}'\n`);
+      await chmod(hook, 0o755);
+      const previousTemplate = process.env["GIT_TEMPLATE_DIR"];
+      process.env["GIT_TEMPLATE_DIR"] = template;
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+          },
+          runAgents: async (value: AgentsScanRequest) => {
+            reached = true;
+            expect(
+              existsSync(
+                join(
+                  value.repository,
+                  ".git",
+                  "hooks",
+                  "reference-transaction",
+                ),
+              ),
+            ).toBe(false);
+            throw new Error("stop after Git template inspection");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: join(root, "scan") }),
+        ).rejects.toThrow("stop after Git template inspection");
+      } finally {
+        if (previousTemplate === undefined)
+          delete process.env["GIT_TEMPLATE_DIR"];
+        else process.env["GIT_TEMPLATE_DIR"] = previousTemplate;
+        await client.close();
+      }
+      expect(reached).toBe(true);
+      expect(existsSync(marker)).toBe(false);
+      expect(await readdir(workspaceRoot)).toEqual([]);
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "honors regular Git ignore inputs and fails closed on non-regular ignore files",
