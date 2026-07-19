@@ -882,8 +882,11 @@ async function stageTreeWithoutSymbolicLinks(
 ): Promise<string> {
   await cp(sourceRoot, destination, {
     recursive: true,
-    filter: async (source) =>
-      source !== omittedPath && !(await lstat(source)).isSymbolicLink(),
+    filter: async (source) => {
+      if (source === omittedPath) return false;
+      const metadata = await lstat(source);
+      return metadata.isFile() || metadata.isDirectory();
+    },
   });
   throwIfAborted(signal, destination);
   return destination;

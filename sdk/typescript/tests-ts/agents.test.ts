@@ -1,6 +1,7 @@
 import {
   chmod,
   cp,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -673,6 +674,47 @@ describe("AgentsSecurity orchestration", () => {
     ).toBe(true);
     await client.close();
   });
+
+  test.skipIf(process.platform === "win32")(
+    "omits repository FIFOs while staging Docker inputs",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      const workspaceRoot = join(root, "docker-workspaces");
+      await mkdir(repository);
+      await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+      execFileSync("mkfifo", [join(repository, "runtime.sock")]);
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+          },
+          repositoryRevision: async () => "deadbeef",
+          runAgents: async (value: AgentsScanRequest) => {
+            reached = true;
+            expect(
+              await readFile(join(value.repository, "app.ts"), "utf8"),
+            ).toBe("export const ok = true;\n");
+            expect(
+              await lstat(join(value.repository, "runtime.sock")).catch(
+                () => null,
+              ),
+            ).toBeNull();
+            await writeCompletedScan(value.scanDir);
+            return { responseId: "resp_fifo_1", finalResponse: "complete" };
+          },
+        },
+      );
+      await client.run(repository, { outputDir: scanDir });
+      expect(reached).toBe(true);
+      expect(await readdir(workspaceRoot)).toEqual([]);
+      await client.close();
+    },
+  );
 
   test("preserves the partial-output location when an Agents scan is canceled", async () => {
     const root = await temporaryDirectory();

@@ -49,9 +49,10 @@ sandbox, runs the standard `security-scan` workflow with bounded delegated
 workers, and transfers generated scan artifacts back to the output directory.
 Partial repository ranking uses one verified worker slot and preserves the
 static pool-plan and receipt contract without depending on Codex preflight.
-Repository symlinks are omitted, consistent with the scan inventory's
-no-symlink policy; executable files and linked Git worktree identity/status are
-preserved in the staged snapshot. The shell environment does not receive model
+Repository symlinks and special files such as FIFOs/sockets are omitted,
+consistent with the scan inventory's regular-file policy; executable files and
+linked Git worktree identity/status are preserved in the staged snapshot. The
+shell environment does not receive model
 API keys, and source/tool traces and sensitive SDK debug logging (including
 `OPENAI_LOG=debug` request bodies) are disabled for the scan. `--model`,
 `--reasoning-effort`, `--max-turns`,

@@ -85,8 +85,9 @@ an explicit delegated-worker tool, disables traces and sensitive debug logging
 data, keeps API keys outside the sandbox shell,
 and validates the same canonical output contract. `AgentsSecurity` requires an
 API key and does not consume file-backed Codex authentication. Repository
-symlinks are omitted because the deterministic scan inventory never follows
-them; executable files and linked Git worktree identity/status are preserved.
+symlinks and special files are omitted because the deterministic scan inventory
+only includes regular files; executable files and linked Git worktree
+identity/status are preserved.
 Partial repository ranking uses one verified worker slot with the unchanged
 static pool-plan and receipt contract instead of Codex capability preflight.
 `unsafe-local` is explicitly opt-in and is not a host isolation boundary.
