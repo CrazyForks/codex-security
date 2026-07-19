@@ -58,7 +58,7 @@ that omits local remotes,
 nested Git metadata, and Git configuration. Git-ignored files are
 not staged unless they are explicitly selected with `--path`; a Git-backed
 subdirectory is represented as the directory snapshot actually reviewed. The
-runtime rejects non-regular Git exclude inputs and bounds Git metadata commands
+runtime rejects non-regular Git ignore/exclude inputs and bounds Git metadata commands
 before staging so a malformed repository cannot stall the scan indefinitely.
 The shell environment does not receive model
 API keys, and source/tool traces and sensitive SDK debug logging (including

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
+import type { Dirent } from "node:fs";
 import {
   cp,
   lstat,
@@ -85,6 +86,7 @@ const MAX_OUTPUT_DEPTH = 128;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
 const MAX_NESTED_GIT_REPOSITORIES = 256;
+const MAX_GIT_IGNORE_DISCOVERY_ENTRIES = 2_000_000;
 const GIT_COMMAND_TIMEOUT_MS = 120_000;
 const execFile = promisify(execFileCallback);
 const REQUIRED_PLUGIN_DIRECTORIES = [
@@ -1037,6 +1039,7 @@ async function gitIncludedPaths(
   repository: string,
   signal: AbortSignal,
 ): Promise<Set<string>> {
+  await requireSafeGitIgnoreFiles(repository, signal);
   const paths = new Set<string>();
   const pending = [{ repository, prefix: "" }];
   const visited = new Set<string>();
@@ -1225,6 +1228,50 @@ async function requireSafeGitIgnoreInputs(
       throw new InvalidTargetError(
         `Git ignore input must be a regular file before staging: ${path}`,
       );
+    }
+  }
+}
+
+async function requireSafeGitIgnoreFiles(
+  repository: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const pending = [repository];
+  let entries = 0;
+  while (pending.length > 0) {
+    throwIfAborted(signal, repository);
+    const directory = pending.pop()!;
+    let children: Array<Dirent<string>>;
+    try {
+      children = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      throw new InvalidTargetError(
+        `Unable to inspect Git ignore inputs before staging: ${directory}`,
+        { cause: error },
+      );
+    }
+    entries += children.length;
+    if (entries > MAX_GIT_IGNORE_DISCOVERY_ENTRIES) {
+      throw new InvalidTargetError(
+        `Repository contains too many entries to inspect Git ignore inputs safely: ${repository}`,
+      );
+    }
+    for (const child of children) {
+      if (child.name === ".git") continue;
+      const path = join(directory, child.name);
+      if (child.name === ".gitignore") {
+        const metadata = await lstat(path).catch(() => null);
+        if (
+          metadata === null ||
+          !metadata.isFile() ||
+          metadata.isSymbolicLink()
+        ) {
+          throw new InvalidTargetError(
+            `Git ignore input must be a regular file before staging: ${path}`,
+          );
+        }
+      }
+      if (child.isDirectory() && !child.isSymbolicLink()) pending.push(path);
     }
   }
 }

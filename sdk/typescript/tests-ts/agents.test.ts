@@ -1360,7 +1360,7 @@ describe("AgentsSecurity orchestration", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "honors regular Git ignore inputs and fails closed on FIFO exclude files",
+    "honors regular Git ignore inputs and fails closed on non-regular ignore files",
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -1468,6 +1468,36 @@ describe("AgentsSecurity orchestration", () => {
       execFileSync("mkfifo", [infoExclude]);
       await expect(
         client.run(repository, { outputDir: join(root, "info-fifo-scan") }),
+      ).rejects.toThrow(
+        "Git ignore input must be a regular file before staging",
+      );
+      expect(reached).toBe(true);
+
+      rmSync(infoExclude);
+      await writeFile(infoExclude, "info.env\n");
+      const nested = join(repository, "nested");
+      await mkdir(nested);
+      await writeFile(
+        join(nested, "visible.ts"),
+        "export const visible = true;\n",
+      );
+      execFileSync("mkfifo", [join(nested, ".gitignore")]);
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "nested-gitignore-fifo-scan"),
+        }),
+      ).rejects.toThrow(
+        "Git ignore input must be a regular file before staging",
+      );
+      expect(reached).toBe(true);
+
+      rmSync(join(nested, ".gitignore"));
+      rmSync(join(repository, ".gitignore"));
+      symlinkSync(configuredExclude, join(repository, ".gitignore"));
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "gitignore-symlink-scan"),
+        }),
       ).rejects.toThrow(
         "Git ignore input must be a regular file before staging",
       );
