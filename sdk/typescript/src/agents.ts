@@ -972,7 +972,10 @@ async function readLocalSandboxOutputFile(
   }
   let handle;
   try {
-    handle = await open(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    handle = await open(
+      source,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
   } catch (error) {
     throw new OutputDirectoryError(
       `Agents SDK sandbox output changed while copying artifacts: ${path}`,
