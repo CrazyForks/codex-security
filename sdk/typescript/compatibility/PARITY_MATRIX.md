@@ -91,7 +91,8 @@ initialized-submodule source, and untracked nested Git source are preserved in
 a minimal, shallow, self-contained snapshot without local remotes, nested Git metadata, or Git
 configuration. Git-ignored files are omitted unless explicitly selected as
 a path target, and a Git-backed subdirectory is bound as the directory snapshot
-actually reviewed.
+actually reviewed. Non-regular Git exclude inputs are rejected and Git metadata
+commands are bounded before staging.
 Partial repository ranking uses one verified worker slot with the unchanged
 static pool-plan and receipt contract instead of Codex capability preflight.
 `unsafe-local` is explicitly opt-in and is not a host isolation boundary.

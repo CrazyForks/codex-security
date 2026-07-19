@@ -85,6 +85,7 @@ const MAX_OUTPUT_DEPTH = 128;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
 const MAX_NESTED_GIT_REPOSITORIES = 256;
+const GIT_COMMAND_TIMEOUT_MS = 120_000;
 const execFile = promisify(execFileCallback);
 const REQUIRED_PLUGIN_DIRECTORIES = [
   "references",
@@ -1049,6 +1050,7 @@ async function gitIncludedPaths(
         `Repository contains too many initialized nested Git repositories: ${repository}`,
       );
     }
+    await requireSafeGitIgnoreInputs(current.repository, signal, repository);
     const files = await gitListFiles(
       current.repository,
       ["--cached", "--others", "--exclude-standard"],
@@ -1133,6 +1135,7 @@ async function gitListFiles(
         encoding: "utf8",
         env: sanitizedGitEnvironment(),
         signal,
+        timeout: GIT_COMMAND_TIMEOUT_MS,
         maxBuffer: 64 * 1024 * 1024,
       },
     );
@@ -1143,6 +1146,86 @@ async function gitListFiles(
       `Unable to enumerate non-ignored repository files: ${repository}`,
       { cause: error },
     );
+  }
+}
+
+async function requireSafeGitIgnoreInputs(
+  repository: string,
+  signal: AbortSignal,
+  root: string,
+): Promise<void> {
+  const options = {
+    cwd: repository,
+    encoding: "utf8" as const,
+    env: sanitizedGitEnvironment(),
+    signal,
+    timeout: GIT_COMMAND_TIMEOUT_MS,
+    maxBuffer: 1024 * 1024,
+  };
+  let configuredExcludes = "";
+  try {
+    ({ stdout: configuredExcludes } = await execFile(
+      "git",
+      [
+        "--no-optional-locks",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "config",
+        "--null",
+        "--path",
+        "--get-all",
+        "core.excludesFile",
+      ],
+      options,
+    ));
+  } catch (error) {
+    throwIfAborted(signal, root);
+    if ((error as { code?: unknown }).code !== 1) {
+      throw new InvalidTargetError(
+        `Unable to inspect Git ignore configuration: ${repository}`,
+        { cause: error },
+      );
+    }
+  }
+  let gitDirectory: string;
+  try {
+    ({ stdout: gitDirectory } = await execFile(
+      "git",
+      [
+        "--no-optional-locks",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "rev-parse",
+        "--absolute-git-dir",
+      ],
+      options,
+    ));
+  } catch (error) {
+    throwIfAborted(signal, root);
+    throw new InvalidTargetError(
+      `Unable to inspect Git repository metadata: ${repository}`,
+      { cause: error },
+    );
+  }
+  const ignoreInputs = [
+    ...configuredExcludes
+      .split("\0")
+      .filter((value) => value.length > 0)
+      .map((value) => resolve(repository, value)),
+    join(gitDirectory.replace(/\r?\n$/u, ""), "info", "exclude"),
+  ];
+  for (const path of ignoreInputs) {
+    const metadata = await lstat(path).catch(() => null);
+    if (metadata === null) continue;
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new InvalidTargetError(
+        `Git ignore input must be a regular file before staging: ${path}`,
+      );
+    }
   }
 }
 
@@ -1207,6 +1290,7 @@ async function makeSelfContainedWorktreeSnapshot(
       encoding: "utf8",
       env: environment,
       signal,
+      timeout: GIT_COMMAND_TIMEOUT_MS,
     });
   };
   const objectFormat = revision.length === 64 ? "sha256" : "sha1";

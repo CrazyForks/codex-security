@@ -1360,6 +1360,124 @@ describe("AgentsSecurity orchestration", () => {
   });
 
   test.skipIf(process.platform === "win32")(
+    "honors regular Git ignore inputs and fails closed on FIFO exclude files",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const workspaceRoot = join(root, "docker-workspaces");
+      const configuredExclude = join(root, "configured-exclude");
+      const configuredFifo = join(root, "configured-exclude.fifo");
+      const infoExclude = join(repository, ".git", "info", "exclude");
+      await mkdir(repository);
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      await writeFile(join(repository, ".gitignore"), "gitignored.env\n");
+      execFileSync("git", ["init", "--quiet", repository]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "config",
+        "user.email",
+        "test@example.invalid",
+      ]);
+      execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+      execFileSync("git", ["-C", repository, "add", "."]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "commit",
+        "--quiet",
+        "-m",
+        "parent",
+      ]);
+      await writeFile(configuredExclude, "configured.env\n");
+      await writeFile(infoExclude, "info.env\n");
+      execFileSync("git", [
+        "-C",
+        repository,
+        "config",
+        "core.excludesFile",
+        "../configured-exclude",
+      ]);
+      await writeFile(
+        join(repository, "gitignored.env"),
+        "GITIGNORED_SECRET=must-not-stage\n",
+      );
+      await writeFile(
+        join(repository, "configured.env"),
+        "CONFIGURED_SECRET=must-not-stage\n",
+      );
+      await writeFile(
+        join(repository, "info.env"),
+        "INFO_SECRET=must-not-stage\n",
+      );
+
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+          },
+          runAgents: async (value: AgentsScanRequest) => {
+            reached = true;
+            expect(
+              await readFile(join(value.repository, "app.ts"), "utf8"),
+            ).toBe("export const app = true;\n");
+            expect(existsSync(join(value.repository, "gitignored.env"))).toBe(
+              false,
+            );
+            expect(existsSync(join(value.repository, "configured.env"))).toBe(
+              false,
+            );
+            expect(existsSync(join(value.repository, "info.env"))).toBe(false);
+            throw new Error("stop after regular Git ignore inspection");
+          },
+        },
+      );
+      await expect(
+        client.run(repository, { outputDir: join(root, "regular-scan") }),
+      ).rejects.toThrow("stop after regular Git ignore inspection");
+      expect(reached).toBe(true);
+
+      execFileSync("mkfifo", [configuredFifo]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "config",
+        "core.excludesFile",
+        "../configured-exclude.fifo",
+      ]);
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "configured-fifo-scan"),
+        }),
+      ).rejects.toThrow(
+        "Git ignore input must be a regular file before staging",
+      );
+      expect(reached).toBe(true);
+
+      execFileSync("git", [
+        "-C",
+        repository,
+        "config",
+        "core.excludesFile",
+        "../configured-exclude",
+      ]);
+      rmSync(infoExclude);
+      execFileSync("mkfifo", [infoExclude]);
+      await expect(
+        client.run(repository, { outputDir: join(root, "info-fifo-scan") }),
+      ).rejects.toThrow(
+        "Git ignore input must be a regular file before staging",
+      );
+      expect(reached).toBe(true);
+      expect(await readdir(workspaceRoot)).toEqual([]);
+      await client.close();
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "omits repository FIFOs while staging Docker inputs",
     async () => {
       const root = await temporaryDirectory();
