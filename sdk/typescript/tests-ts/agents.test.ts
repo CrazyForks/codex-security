@@ -716,10 +716,12 @@ describe("AgentsSecurity orchestration", () => {
     const previousDebug = createDebug.disable();
     const previousModel = process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
     const previousTool = process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+    const previousOpenAILog = process.env["OPENAI_LOG"];
     setTracingDisabled(false);
     createDebug.enable("openai-agents:*");
     process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "0";
     process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "0";
+    process.env["OPENAI_LOG"] = "debug";
     try {
       await expect(
         runAgentsScan(
@@ -734,6 +736,7 @@ describe("AgentsSecurity orchestration", () => {
           {
             modelProvider: {
               getModel() {
+                expect(process.env["OPENAI_LOG"]).toBe("warn");
                 throw new Error("expected model-provider failure");
               },
             },
@@ -743,6 +746,7 @@ describe("AgentsSecurity orchestration", () => {
       expect(createDebug.enabled("openai-agents:core")).toBe(true);
       expect(process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"]).toBe("0");
       expect(process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"]).toBe("0");
+      expect(process.env["OPENAI_LOG"]).toBe("debug");
       expect(
         traceProvider.createTrace({ name: "restored tracing state" }),
       ).not.toBeInstanceOf(NoopTrace);
@@ -758,6 +762,11 @@ describe("AgentsSecurity orchestration", () => {
         delete process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
       } else {
         process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = previousTool;
+      }
+      if (previousOpenAILog === undefined) {
+        delete process.env["OPENAI_LOG"];
+      } else {
+        process.env["OPENAI_LOG"] = previousOpenAILog;
       }
     }
   });

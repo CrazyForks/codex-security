@@ -81,7 +81,8 @@ Standard repository/path CLI scans use `@openai/agents@0.13.5`. The Agents
 runtime stages repository and plugin inputs in a Docker-isolated,
 network-disabled `node:22-bookworm` sandbox, uses the `security-scan` skill plus
 an explicit delegated-worker tool, disables traces and sensitive debug logging
-that could capture source/tool data, keeps API keys outside the sandbox shell,
+(including `OPENAI_LOG=debug` request bodies) that could capture source/tool
+data, keeps API keys outside the sandbox shell,
 and validates the same canonical output contract. `AgentsSecurity` requires an
 API key and does not consume file-backed Codex authentication. Repository
 symlinks are omitted because the deterministic scan inventory never follows

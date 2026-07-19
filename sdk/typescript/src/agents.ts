@@ -96,6 +96,7 @@ let sensitiveTelemetryUsers = 0;
 let savedDebugNamespaces = "";
 let savedDontLogModelData: string | undefined;
 let savedDontLogToolData: string | undefined;
+let savedOpenAILogLevel: string | undefined;
 let savedTracingDisabled = false;
 
 export type AgentsReasoningEffort =
@@ -1033,8 +1034,10 @@ function suppressSensitiveAgentsTelemetry(): () => void {
     );
     savedDontLogModelData = process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
     savedDontLogToolData = process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+    savedOpenAILogLevel = process.env["OPENAI_LOG"];
     process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1";
     process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1";
+    process.env["OPENAI_LOG"] = "warn";
     savedTracingDisabled =
       getGlobalTraceProvider().createTrace({
         name: "Codex Security tracing state probe",
@@ -1055,6 +1058,7 @@ function suppressSensitiveAgentsTelemetry(): () => void {
       "OPENAI_AGENTS_DONT_LOG_TOOL_DATA",
       savedDontLogToolData,
     );
+    restoreEnvironmentValue("OPENAI_LOG", savedOpenAILogLevel);
     setTracingDisabled(savedTracingDisabled);
   };
 }

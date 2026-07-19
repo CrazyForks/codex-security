@@ -52,8 +52,9 @@ static pool-plan and receipt contract without depending on Codex preflight.
 Repository symlinks are omitted, consistent with the scan inventory's
 no-symlink policy; executable files and linked Git worktree identity/status are
 preserved in the staged snapshot. The shell environment does not receive model
-API keys, and source/tool traces and sensitive SDK debug logging are disabled
-for the scan. `--model`, `--reasoning-effort`, `--max-turns`,
+API keys, and source/tool traces and sensitive SDK debug logging (including
+`OPENAI_LOG=debug` request bodies) are disabled for the scan. `--model`,
+`--reasoning-effort`, `--max-turns`,
 `--worker-max-turns`, and `--sandbox` control the Agents workflow.
 `--sandbox unsafe-local` is for trusted local development only and provides no
 host isolation.
