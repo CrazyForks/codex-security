@@ -1364,6 +1364,7 @@ describe("AgentsSecurity orchestration", () => {
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
+      const linkedRepository = join(root, "linked-worktree");
       const workspaceRoot = join(root, "docker-workspaces");
       const configuredExclude = join(root, "configured-exclude");
       const configuredFifo = join(root, "configured-exclude.fifo");
@@ -1388,6 +1389,18 @@ describe("AgentsSecurity orchestration", () => {
         "--quiet",
         "-m",
         "parent",
+      ]);
+      execFileSync("git", [
+        "-C",
+        repository,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "linked-scan",
+        linkedRepository,
       ]);
       await writeFile(configuredExclude, "configured.env\n");
       await writeFile(infoExclude, "info.env\n");
@@ -1467,7 +1480,9 @@ describe("AgentsSecurity orchestration", () => {
       rmSync(infoExclude);
       execFileSync("mkfifo", [infoExclude]);
       await expect(
-        client.run(repository, { outputDir: join(root, "info-fifo-scan") }),
+        client.run(linkedRepository, {
+          outputDir: join(root, "linked-info-fifo-scan"),
+        }),
       ).rejects.toThrow(
         "Git ignore input must be a regular file before staging",
       );

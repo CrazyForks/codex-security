@@ -1192,9 +1192,9 @@ async function requireSafeGitIgnoreInputs(
       );
     }
   }
-  let gitDirectory: string;
+  let gitCommonDirectory: string;
   try {
-    ({ stdout: gitDirectory } = await execFile(
+    ({ stdout: gitCommonDirectory } = await execFile(
       "git",
       [
         "--no-optional-locks",
@@ -1203,7 +1203,8 @@ async function requireSafeGitIgnoreInputs(
         "-c",
         "core.fsmonitor=false",
         "rev-parse",
-        "--absolute-git-dir",
+        "--path-format=absolute",
+        "--git-common-dir",
       ],
       options,
     ));
@@ -1219,7 +1220,7 @@ async function requireSafeGitIgnoreInputs(
       .split("\0")
       .filter((value) => value.length > 0)
       .map((value) => resolve(repository, value)),
-    join(gitDirectory.replace(/\r?\n$/u, ""), "info", "exclude"),
+    join(gitCommonDirectory.replace(/\r?\n$/u, ""), "info", "exclude"),
   ];
   for (const path of ignoreInputs) {
     const metadata = await lstat(path).catch(() => null);
