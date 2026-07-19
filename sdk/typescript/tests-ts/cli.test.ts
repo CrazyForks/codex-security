@@ -10,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import type { CodexSecurity, CodexSecurityConfig } from "../src/index.js";
+import type {
+  AgentsSecurityConfig,
+  CodexSecurity,
+  CodexSecurityConfig,
+} from "../src/index.js";
 import {
   CodexSecurityError,
   DiffTarget,
@@ -128,7 +132,8 @@ class FakeSignals {
 
 function dependencies(
   options: {
-    onConfig?: (config: CodexSecurityConfig) => void;
+    onConfig?: (config: CodexSecurityConfig | AgentsSecurityConfig) => void;
+    onEngine?: (engine: "agents" | "codex") => void;
     onTurn?: (repository: string, options: unknown) => void;
     onRun?: () => void;
     onInterrupt?: () => void;
@@ -152,8 +157,9 @@ function dependencies(
     close: async () => await options.onClose?.(),
   } as Pick<CodexSecurity, "run" | "close">;
   return {
-    createSecurity: (config) => {
+    createSecurity: (config, engine) => {
       options.onConfig?.(config);
+      options.onEngine?.(engine);
       return security;
     },
     currentDirectory: () => "/current/repository",
@@ -331,6 +337,27 @@ describe("CLI compatibility contract", () => {
       json: true,
     });
     expect(targetFromArguments(pathArguments)).toEqual(["src", "tests"]);
+
+    expect(
+      parseScanArguments([
+        "repo",
+        "--engine",
+        "agents",
+        "--model=gpt-test",
+        "--reasoning-effort",
+        "xhigh",
+        "--max-turns",
+        "42",
+        "--worker-max-turns=12",
+      ]),
+    ).toMatchObject({
+      repository: "repo",
+      engine: "agents",
+      model: "gpt-test",
+      reasoningEffort: "xhigh",
+      maxTurns: 42,
+      workerMaxTurns: 12,
+    });
 
     expect(
       targetFromArguments(
@@ -863,7 +890,10 @@ describe("CLI compatibility contract", () => {
   test("maps configuration and emits JSON only on stdout", async () => {
     const stdout = capture();
     const stderr = capture();
-    const captured: { config?: CodexSecurityConfig } = {};
+    const captured: {
+      config?: CodexSecurityConfig | AgentsSecurityConfig;
+      engine?: "agents" | "codex";
+    } = {};
     let repository = "";
     const exit = await main(
       [
@@ -886,6 +916,9 @@ describe("CLI compatibility contract", () => {
         onTurn: (value) => {
           repository = value;
         },
+        onEngine: (engine) => {
+          captured.engine = engine;
+        },
       }),
     );
     expect(exit).toBe(0);
@@ -898,7 +931,96 @@ describe("CLI compatibility contract", () => {
       pythonPath: "/managed/python",
       codexOverrides: { features: { goals: true } },
     });
+    expect(captured.engine).toBe("codex");
     expect(repository).toBe("repo");
+  });
+
+  test("uses Agents SDK by default for standard repository and path scans", async () => {
+    for (const argv of [
+      ["scan", "repo"],
+      ["scan", "repo", "--path", "src", "--path", "tests"],
+      [
+        "scan",
+        "repo",
+        "--engine",
+        "agents",
+        "--model",
+        "gpt-test",
+        "--reasoning-effort",
+        "medium",
+        "--max-turns",
+        "25",
+        "--worker-max-turns",
+        "7",
+      ],
+    ]) {
+      let engine: "agents" | "codex" | undefined;
+      let config: CodexSecurityConfig | AgentsSecurityConfig | undefined;
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          argv,
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onEngine: (value) => {
+              engine = value;
+            },
+            onConfig: (value) => {
+              config = value;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(engine).toBe("agents");
+      expect(config).not.toHaveProperty("codexOverrides");
+    }
+  });
+
+  test("keeps diff, working-tree, and deep scans on Codex and rejects incompatible engine options", async () => {
+    for (const argv of [
+      ["scan", "repo", "--diff", "HEAD"],
+      ["scan", "repo", "--working-tree"],
+      ["scan", "repo", "--mode", "deep"],
+      ["scan", "repo", "--codex", "features.goals=true"],
+    ]) {
+      let engine: "agents" | "codex" | undefined;
+      expect(
+        await main(
+          argv,
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onEngine: (value) => {
+              engine = value;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(engine).toBe("codex");
+    }
+
+    for (const [argv, message] of [
+      [
+        ["scan", "repo", "--engine", "agents", "--diff", "HEAD"],
+        "Agents SDK engine supports standard repository/path scans only",
+      ],
+      [
+        ["scan", "repo", "--engine", "agents", "--mode", "deep"],
+        "Agents SDK engine supports standard repository/path scans only",
+      ],
+      [
+        ["scan", "repo", "--engine", "codex", "--model", "gpt-test"],
+        "require the Agents SDK engine",
+      ],
+    ] as const) {
+      const stderr = capture();
+      expect(
+        await main(argv, capture().stream, stderr.stream, dependencies()),
+      ).toBe(1);
+      expect(stderr.text()).toContain(message);
+    }
   });
 
   test("emits the human result summary", async () => {

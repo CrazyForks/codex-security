@@ -37,6 +37,12 @@ In Codex CLI, including interactive and headless runs, or hosts without those ca
 
 Read `../../references/config-preflight.md` and dispatch and await the preflight execution described there with the `security_scan` capability profile before substantive scan work, including after an app wait, desktop prompt-only start, or direct continuation has produced a `scanId` and loaded its authoritative scan context. Follow the returned block/warn/suggest results. For an app-backed scan, ask before applying actionable remediation and wait without creating a scan goal or calling `fail_codex_security_scan`. Do not fail automatically for declined or unavailable remediation, helper errors, or a non-ready rerun; preserve the running scan and retry or hand off while recovery may still be possible. Call `fail_codex_security_scan` only after documented recovery is exhausted and the blocker is confirmed unrecoverable, or when the user explicitly cancels. Do not treat a config value that differs from a suggested patch as a warning unless the capability requirement itself is unmet.
 
+### Agents SDK CLI Runtime
+
+When the host explicitly identifies itself as the Agents SDK CLI runtime (`CODEX_SECURITY_AGENT_RUNTIME=agents-sdk`), the repository, plugin, and output are already staged in its sandbox and the host has already verified Python and the scan skill. Do not run the Codex capability preflight, create a Codex goal, open or wait for a Codex app workspace, or call Codex-only MCP/fanout tools on this path. Those capabilities are not present.
+
+Use the terminal/chat workflow with the workspace-relative paths supplied by the host. Whenever this workflow or a phase skill requires a ranking, file-review, validation, attack-path, write-up, or hardening subagent, call `delegate_security_task` with one explicit, bounded assignment and exact source/artifact/receipt ownership. The delegated worker shares the scan sandbox. Preserve the same phase order, coverage and candidate-ledger receipts, scope binding, and finalization contract; Agents SDK execution does not relax any completeness requirement.
+
 ## Phase Sequence
 
 Keep these phases distinct and run them in linear order:
@@ -84,7 +90,7 @@ Use the shared scan artifact path conventions in `../../references/scan-artifact
 
 ## Execution Plan
 
-Start this plan only after `Setup Workspace Routing` has loaded an app-generated or desktop prompt-only scan context with a `scanId`, or determined that the host is using the non-app terminal/chat workflow, and the `security_scan` capability preflight has returned `ready`.
+Start this plan only after `Setup Workspace Routing` has loaded an app-generated or desktop prompt-only scan context with a `scanId`, or determined that the host is using the non-app terminal/chat workflow, and the `security_scan` capability preflight has returned `ready`. In the explicitly identified Agents SDK CLI runtime, use the pre-staged terminal/chat context and skip only the Codex capability preflight and goal setup described above.
 
 Follow this plan in order. Do not skip ahead to a later phase until the current phase has produced its intended output.
 

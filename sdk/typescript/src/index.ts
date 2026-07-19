@@ -1,5 +1,20 @@
 export { CodexSecurity, ScanHandle } from "./api.js";
 export type { CodexSecurityMetadata, ScanEvent, ScanOptions } from "./api.js";
+export {
+  AgentsSecurity,
+  agentsManifest,
+  agentsScanPrompt,
+  copySandboxOutput,
+  runAgentsScan,
+} from "./agents.js";
+export type {
+  AgentsReasoningEffort,
+  AgentsRuntimeDependencies,
+  AgentsScanOptions,
+  AgentsScanRequest,
+  AgentsScanSummary,
+  AgentsSecurityConfig,
+} from "./agents.js";
 export { CodexLoginHandle } from "./auth.js";
 export type { AccountStatus, LoginResult } from "./auth.js";
 

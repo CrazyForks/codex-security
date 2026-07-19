@@ -4,6 +4,11 @@ import { realpathSync, writeSync } from "node:fs";
 import { cwd } from "node:process";
 import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
+import {
+  AgentsSecurity,
+  type AgentsReasoningEffort,
+  type AgentsSecurityConfig,
+} from "./agents.js";
 import { CodexSecurity, type ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 import { CodexSecurityError, ScanInterruptedError } from "./errors.js";
@@ -27,6 +32,11 @@ const SCAN_LONG_OPTIONS = [
   "--plugin-path",
   "--python",
   "--mode",
+  "--engine",
+  "--model",
+  "--reasoning-effort",
+  "--max-turns",
+  "--worker-max-turns",
   "--working-tree",
   "--json",
 ];
@@ -36,6 +46,7 @@ const SHOW_CURSOR = "\u001B[?25h";
 type Writable = Pick<NodeJS.WriteStream, "write"> &
   Partial<Pick<NodeJS.WriteStream, "isTTY">> & { readonly fd?: number };
 type SignalName = "SIGINT" | "SIGTERM";
+type ScanEngine = "agents" | "codex";
 
 export interface ParsedScanArguments {
   repository: string;
@@ -48,13 +59,19 @@ export interface ParsedScanArguments {
   outputDir?: string;
   pluginPath?: string;
   pythonPath?: string;
+  engine?: ScanEngine;
+  model?: string;
+  reasoningEffort?: AgentsReasoningEffort;
+  maxTurns?: number;
+  workerMaxTurns?: number;
   codex: string[];
   json: boolean;
 }
 
 interface CliDependencies {
   createSecurity(
-    config: CodexSecurityConfig,
+    config: CodexSecurityConfig | AgentsSecurityConfig,
+    engine: ScanEngine,
   ): Pick<CodexSecurity, "run" | "close">;
   currentDirectory(): string;
   now(): number;
@@ -67,7 +84,10 @@ interface CliDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
-  createSecurity: (config) => new CodexSecurity(config),
+  createSecurity: (config, engine) =>
+    engine === "agents"
+      ? new AgentsSecurity(config as AgentsSecurityConfig)
+      : new CodexSecurity(config as CodexSecurityConfig),
   currentDirectory: cwd,
   now: Date.now,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -105,7 +125,10 @@ export function scanHelp(): string {
     "                           [--head HEAD] [--base BASE]",
     "                           [--mode {standard,deep}] [--output-dir DIR]",
     "                           [--plugin-path PATH] [--python PATH]",
-    "                           [--codex KEY=VALUE] [--json] [repository]",
+    "                           [--engine {agents,codex}] [--model MODEL]",
+    "                           [--reasoning-effort EFFORT] [--max-turns N]",
+    "                           [--worker-max-turns N] [--codex KEY=VALUE]",
+    "                           [--json] [repository]",
     "",
     "positional arguments:",
     "  repository            Repository root to scan (default: current directory).",
@@ -128,6 +151,17 @@ export function scanHelp(): string {
     "  --plugin-path PATH    Use a Codex Security plugin directory or ZIP instead",
     "                        of the bundled plugin.",
     "  --python PATH         Python interpreter for the unchanged plugin runtime.",
+    "  --engine {agents,codex}",
+    "                        Execution engine. Repository/path standard scans",
+    "                        default to Agents SDK; diff/deep and --codex scans",
+    "                        default to Codex.",
+    "  --model MODEL         Agents SDK model (default: gpt-5.6).",
+    "  --reasoning-effort EFFORT",
+    "                        Agents SDK reasoning effort: none, minimal, low,",
+    "                        medium, high, xhigh, or max (default: high).",
+    "  --max-turns N         Maximum Agents SDK coordinator turns (default: 200).",
+    "  --worker-max-turns N  Maximum turns for one delegated Agents SDK scan",
+    "                        worker (default: 100).",
     "  --codex KEY=VALUE     Override isolated Codex config with a TOML KEY=VALUE;",
     "                        repeat as needed.",
     "  --json                Print manifest, findings, coverage, output paths, and",
@@ -272,14 +306,25 @@ async function runScan(
   let failure: unknown;
   try {
     const target = targetFromArguments(arguments_);
-    const config: CodexSecurityConfig = {
-      pluginPath: arguments_.pluginPath,
-      pythonPath: arguments_.pythonPath,
-      codexOverrides: parseCodexOverrides(arguments_.codex),
-    };
+    const engine = scanEngineFor(arguments_);
+    const config: CodexSecurityConfig | AgentsSecurityConfig =
+      engine === "agents"
+        ? {
+            pluginPath: arguments_.pluginPath,
+            pythonPath: arguments_.pythonPath,
+            model: arguments_.model,
+            reasoningEffort: arguments_.reasoningEffort,
+            maxTurns: arguments_.maxTurns,
+            workerMaxTurns: arguments_.workerMaxTurns,
+          }
+        : {
+            pluginPath: arguments_.pluginPath,
+            pythonPath: arguments_.pythonPath,
+            codexOverrides: parseCodexOverrides(arguments_.codex),
+          };
     progress = new Progress(errorOutput, dependencies);
     progress.stage("Preparing scan");
-    security = dependencies.createSecurity(config);
+    security = dependencies.createSecurity(config, engine);
     const options: ScanOptions = {
       target,
       mode: arguments_.mode,
@@ -411,6 +456,47 @@ export function parseScanArguments(
           throw new CliUsageError(`argument --mode: invalid choice: ${mode}`);
         }
         parsed.mode = mode;
+      } else if (option === "--engine") {
+        const engine = optionValue(values, index, option, inline);
+        if (inline === undefined) index += 1;
+        if (engine !== "agents" && engine !== "codex") {
+          throw new CliUsageError(
+            `argument --engine: invalid choice: ${engine}`,
+          );
+        }
+        parsed.engine = engine;
+      } else if (option === "--model") {
+        parsed.model = optionValue(values, index, option, inline);
+        if (inline === undefined) index += 1;
+      } else if (option === "--reasoning-effort") {
+        const effort = optionValue(values, index, option, inline);
+        if (inline === undefined) index += 1;
+        if (
+          effort !== "none" &&
+          effort !== "minimal" &&
+          effort !== "low" &&
+          effort !== "medium" &&
+          effort !== "high" &&
+          effort !== "xhigh" &&
+          effort !== "max"
+        ) {
+          throw new CliUsageError(
+            `argument --reasoning-effort: invalid choice: ${effort}`,
+          );
+        }
+        parsed.reasoningEffort = effort;
+      } else if (option === "--max-turns") {
+        parsed.maxTurns = positiveOptionValue(
+          optionValue(values, index, option, inline),
+          option,
+        );
+        if (inline === undefined) index += 1;
+      } else if (option === "--worker-max-turns") {
+        parsed.workerMaxTurns = positiveOptionValue(
+          optionValue(values, index, option, inline),
+          option,
+        );
+        if (inline === undefined) index += 1;
       } else {
         if (ignoreUnrecognized && !option.startsWith("-h-")) continue;
         throw new CliUsageError(`unrecognized argument: ${token}`);
@@ -470,6 +556,43 @@ export function targetFromArguments(
     return DiffTarget.workingTree({ base: arguments_.base ?? "HEAD" });
   }
   return "repository";
+}
+
+function scanEngineFor(arguments_: ParsedScanArguments): ScanEngine {
+  const implicitCodex =
+    arguments_.mode === "deep" ||
+    arguments_.diff !== undefined ||
+    arguments_.workingTree ||
+    arguments_.codex.length > 0;
+  const engine = arguments_.engine ?? (implicitCodex ? "codex" : "agents");
+  if (engine === "agents" && implicitCodex) {
+    throw new CodexSecurityError(
+      "The Agents SDK engine supports standard repository/path scans only and cannot be combined with diff, working-tree, deep mode, or --codex overrides.",
+    );
+  }
+  if (
+    engine === "codex" &&
+    (arguments_.model !== undefined ||
+      arguments_.reasoningEffort !== undefined ||
+      arguments_.maxTurns !== undefined ||
+      arguments_.workerMaxTurns !== undefined)
+  ) {
+    throw new CodexSecurityError(
+      "--model, --reasoning-effort, --max-turns, and --worker-max-turns require the Agents SDK engine.",
+    );
+  }
+  return engine;
+}
+
+function positiveOptionValue(value: string, option: string): number {
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new CliUsageError(`argument ${option}: expected a positive integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new CliUsageError(`argument ${option}: expected a positive integer`);
+  }
+  return parsed;
 }
 
 export function parseCodexOverrides(values: readonly string[]): JsonObject {

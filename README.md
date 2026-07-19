@@ -8,11 +8,13 @@ Run Codex Security scans from the command line or a TypeScript application.
 ## Requirements
 
 The SDK and CLI require Node.js 22 or later. Running a scan also requires a
-Python interpreter for the bundled Codex Security plugin. Python is not needed
-to install the package or run `--help` and `--version`.
+Python interpreter for the bundled Codex Security scan helpers. Python is not
+needed to install the package or run `--help` and `--version`.
 
-Before running a scan, set `OPENAI_API_KEY` or `CODEX_API_KEY`, or reuse an
-existing file-backed Codex sign-in.
+Standard repository and path scans run through the OpenAI Agents SDK by
+default. Set `OPENAI_API_KEY` or `CODEX_API_KEY` before scanning. Diff and deep
+scans continue to use Codex and can also reuse an existing file-backed Codex
+sign-in.
 
 ## Install and scan
 
@@ -25,20 +27,32 @@ Scan a subset of a repository or write machine-readable results:
 
 ```bash
 npx codex-security scan /path/to/repo --path src --path tests
+npx codex-security scan /path/to/repo --path src --model gpt-5.6 --reasoning-effort high
 npx codex-security scan /path/to/repo --diff origin/main --json
 npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results
+npx codex-security scan /path/to/repo --engine codex
 ```
 
 The output directory must be outside the scanned repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
 target, output, and runtime options.
 
+The Agents engine copies the target and the bundled scan skills/helpers into a
+local sandbox workspace, delegates bounded scan workers through Agents SDK, and
+copies only generated output back to the requested scan directory. Model API
+credentials are kept out of the sandbox shell. Use `--engine codex` to run the
+existing Codex-backed standard scan when needed; diff, working-tree, deep, and
+`--codex` scans select it automatically.
+
 ## TypeScript SDK
 
 ```ts
-import { CodexSecurity } from "@openai/codex-security";
+import { AgentsSecurity } from "@openai/codex-security";
 
-const security = new CodexSecurity();
+const security = new AgentsSecurity({
+  model: "gpt-5.6",
+  reasoningEffort: "high",
+});
 try {
   const result = await security.run("/path/to/repo");
   console.log(result.reportPath);
@@ -48,7 +62,8 @@ try {
 ```
 
 See the [TypeScript SDK and CLI reference](sdk/typescript/README.md) for
-authentication, targets, output, and API details. Product documentation is
+authentication, targets, output, and API details. `CodexSecurity` remains
+available for the Codex-backed standard, diff, and deep workflows. Product documentation is
 available in the [Codex Security guide](https://developers.openai.com/codex/security).
 
 ## Support and security

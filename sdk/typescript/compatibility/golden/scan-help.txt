@@ -2,7 +2,10 @@ usage: codex-security scan [-h] [--path PATH | --diff BASE | --working-tree]
                            [--head HEAD] [--base BASE]
                            [--mode {standard,deep}] [--output-dir DIR]
                            [--plugin-path PATH] [--python PATH]
-                           [--codex KEY=VALUE] [--json] [repository]
+                           [--engine {agents,codex}] [--model MODEL]
+                           [--reasoning-effort EFFORT] [--max-turns N]
+                           [--worker-max-turns N] [--codex KEY=VALUE]
+                           [--json] [repository]
 
 positional arguments:
   repository            Repository root to scan (default: current directory).
@@ -25,6 +28,17 @@ options:
   --plugin-path PATH    Use a Codex Security plugin directory or ZIP instead
                         of the bundled plugin.
   --python PATH         Python interpreter for the unchanged plugin runtime.
+  --engine {agents,codex}
+                        Execution engine. Repository/path standard scans
+                        default to Agents SDK; diff/deep and --codex scans
+                        default to Codex.
+  --model MODEL         Agents SDK model (default: gpt-5.6).
+  --reasoning-effort EFFORT
+                        Agents SDK reasoning effort: none, minimal, low,
+                        medium, high, xhigh, or max (default: high).
+  --max-turns N         Maximum Agents SDK coordinator turns (default: 200).
+  --worker-max-turns N  Maximum turns for one delegated Agents SDK scan
+                        worker (default: 100).
   --codex KEY=VALUE     Override isolated Codex config with a TOML KEY=VALUE;
                         repeat as needed.
   --json                Print manifest, findings, coverage, output paths, and

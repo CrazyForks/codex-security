@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
+import {
+  AgentsSecurity,
+  CodexSecurity,
+  CodexSecurityError,
+  VERSION,
+} from "../src/index.js";
 import type {
   Finding,
   FindingCodeEvidence,
@@ -55,6 +60,9 @@ describe("TypeScript package skeleton", () => {
     expect(client.config.pluginPath).toBe("/tmp/plugin");
     expect(new CodexSecurityError("failure").name).toBe("CodexSecurityError");
     await client.close();
+    const agents = new AgentsSecurity({ model: "gpt-test" });
+    expect(agents.config.model).toBe("gpt-test");
+    await agents.close();
   });
 
   test("provides executable help and version behavior", async () => {

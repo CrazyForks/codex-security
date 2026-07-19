@@ -197,6 +197,7 @@ const allowedRoot = new Set([
 ]);
 const distFiles = new Set(
   [
+    "agents",
     "api",
     "auth",
     "cli",
