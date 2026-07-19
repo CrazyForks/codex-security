@@ -40,7 +40,7 @@ options:
   --max-turns N         Maximum Agents SDK coordinator turns (default: 200).
   --worker-max-turns N  Maximum turns for one delegated Agents SDK scan
                         worker (default: 100).
-  --sandbox BACKEND     Agents SDK sandbox: docker (default, isolated) or
+  --sandbox BACKEND     Agents SDK sandbox: docker (default, no network) or
                         unsafe-local (development only; no host isolation).
   --codex KEY=VALUE     Override isolated Codex config with a TOML KEY=VALUE;
                         repeat as needed.

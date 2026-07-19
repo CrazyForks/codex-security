@@ -78,14 +78,15 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | SIGTERM                        | empty                                                      | termination and partial-output location  | 143  |
 
 Standard repository/path CLI scans use `@openai/agents@0.13.5`. The Agents
-runtime stages repository and plugin inputs in a Docker-isolated
-`node:22-bookworm` sandbox, uses the
-`security-scan` skill plus an explicit delegated-worker tool, disables traces
+runtime stages repository and plugin inputs in a Docker-isolated,
+network-disabled `node:22-bookworm` sandbox, uses the `security-scan` skill plus
+an explicit delegated-worker tool, disables traces and sensitive debug logging
 that could capture source/tool data, keeps API keys outside the sandbox shell,
 and validates the same canonical output contract. `AgentsSecurity` requires an
 API key and does not consume file-backed Codex authentication. Repository
 symlinks are omitted because the deterministic scan inventory never follows
-them. `unsafe-local` is explicitly opt-in and is not a host isolation boundary.
+them; executable files and linked Git worktree identity/status are preserved.
+`unsafe-local` is explicitly opt-in and is not a host isolation boundary.
 Native Windows paths are unsupported by the Agents sandbox and route to Codex;
 WSL can be used for Agents execution. Docker staging defaults to
 `~/.cache/codex-security/sandboxes`; set

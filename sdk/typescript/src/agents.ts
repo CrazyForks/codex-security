@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import {
   cp,
   lstat,
@@ -11,9 +12,13 @@ import {
 } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
+import { promisify } from "node:util";
+import createDebug from "debug";
 import {
+  NoopTrace,
   OpenAIProvider,
   Runner,
+  getGlobalTraceProvider,
   setTracingDisabled,
   type ModelProvider,
 } from "@openai/agents";
@@ -29,6 +34,7 @@ import {
 } from "@openai/agents/sandbox";
 import {
   DockerSandboxClient,
+  type DockerSandboxSession,
   UnixLocalSandboxClient,
   localDirLazySkillSource,
 } from "@openai/agents/sandbox/local";
@@ -74,6 +80,7 @@ const DEFAULT_WORKER_MAX_TURNS = 100;
 const MAX_OUTPUT_FILES = 20_000;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
+const execFile = promisify(execFileCallback);
 const REQUIRED_PLUGIN_DIRECTORIES = [
   "references",
   "schemas",
@@ -84,6 +91,12 @@ const OPTIONAL_PLUGIN_DIRECTORIES = [
   "examples",
   "preflight",
 ] as const;
+
+let sensitiveTelemetryUsers = 0;
+let savedDebugNamespaces = "";
+let savedDontLogModelData: string | undefined;
+let savedDontLogToolData: string | undefined;
+let savedTracingDisabled = false;
 
 export type AgentsReasoningEffort =
   | "none"
@@ -326,6 +339,7 @@ export class AgentsSecurity {
         staging,
         controller.signal,
         sandbox === "docker",
+        expectedRevision,
       );
       const stagedPlugin =
         sandbox === "docker"
@@ -407,10 +421,13 @@ export class AgentsSecurity {
     } finally {
       removeExternalAbort();
       this.#controllers.delete(controller);
-      this.#runs.delete(running);
-      finish();
-      if (staging !== null) {
-        await rm(staging, { recursive: true, force: true });
+      try {
+        if (staging !== null) {
+          await rm(staging, { recursive: true, force: true });
+        }
+      } finally {
+        this.#runs.delete(running);
+        finish();
       }
     }
   }
@@ -431,7 +448,6 @@ export async function runAgentsScan(
   request: AgentsScanRequest,
   dependencies: AgentsRuntimeDependencies = {},
 ): Promise<AgentsScanSummary> {
-  setTracingDisabled(true);
   const manifest = await agentsManifest(request);
   const client =
     request.sandbox === "docker"
@@ -443,26 +459,33 @@ export async function runAgentsScan(
           workspaceBaseDir: request.sandboxBaseDir,
         });
   const session = await client.create({ manifest });
-  const provider =
-    dependencies.modelProvider ??
-    new OpenAIProvider({
-      apiKey: request.apiKey,
-      baseURL: request.baseURL,
-      organization: request.organization,
-      project: request.project,
-    });
+  const releaseTelemetry = suppressSensitiveAgentsTelemetry();
+  let ownedProvider: OpenAIProvider | undefined;
   let summary: AgentsScanSummary | undefined;
   let failure: unknown;
   try {
+    if (request.sandbox === "docker") {
+      await isolateDockerSession(session as DockerSandboxSession);
+    }
+    const provider =
+      dependencies.modelProvider ??
+      (ownedProvider = new OpenAIProvider({
+        apiKey: request.apiKey,
+        baseURL: request.baseURL,
+        organization: request.organization,
+        project: request.project,
+      }));
     const preflight = await session.exec({
       cmd: [
         'command -v "$PYTHON" >/dev/null',
+        '"$PYTHON" -c \'import json,os,stat; root=os.path.realpath("repository"); entries=json.load(open("repository-executables.json",encoding="utf-8")); [(lambda p,m: os.chmod(p,(os.lstat(p).st_mode & 0o666) | m) if stat.S_ISREG(os.lstat(p).st_mode) and os.path.commonpath((root,os.path.realpath(p))) == root else (_ for _ in ()).throw(RuntimeError("unsafe executable entry")))(os.path.join(root,*path.split("/")),mode) for path,mode in entries]\'',
         "command -v git >/dev/null",
         "command -v grep >/dev/null",
         "command -v find >/dev/null",
         "test -f plugin/scripts/finalize_scan_contract.py",
         "test -f plugin/scripts/generate_rank_input.py",
         "test -r target-paths.json",
+        "test -r repository-executables.json",
       ].join(" && "),
       workdir: "/workspace",
       login: false,
@@ -572,9 +595,8 @@ export async function runAgentsScan(
     if (failure === undefined) failure = error;
   } finally {
     await session.close().catch(() => undefined);
-    if (provider instanceof OpenAIProvider) {
-      await provider.close().catch(() => undefined);
-    }
+    await ownedProvider?.close().catch(() => undefined);
+    releaseTelemetry();
   }
   if (failure !== undefined) throw failure;
   if (summary === undefined) {
@@ -602,6 +624,10 @@ export async function agentsManifest(
       content: `${JSON.stringify(
         request.target.kind === "paths" ? request.target.paths : ["."],
       )}\n`,
+    }),
+    "repository-executables.json": file({
+      permissions: 0o400,
+      content: `${JSON.stringify(await repositoryExecutablePaths(request.repository))}\n`,
     }),
   };
   for (const name of REQUIRED_PLUGIN_DIRECTORIES) {
@@ -799,6 +825,7 @@ async function stageRepositoryWithoutSymbolicLinks(
   staging: string,
   signal: AbortSignal,
   forceSnapshot = false,
+  expectedRevision: string | null = null,
 ): Promise<string> {
   const containsSymbolicLink = async (directory: string): Promise<boolean> => {
     throwIfAborted(signal, staging);
@@ -816,24 +843,225 @@ async function stageRepositoryWithoutSymbolicLinks(
     return false;
   };
 
-  if (!forceSnapshot && !(await containsSymbolicLink(repository))) {
+  const gitMetadata = await lstat(join(repository, ".git")).catch(() => null);
+  const linkedWorktree = gitMetadata?.isFile() === true;
+  if (
+    !forceSnapshot &&
+    !linkedWorktree &&
+    !(await containsSymbolicLink(repository))
+  ) {
     return repository;
   }
   const snapshot = join(staging, "repository-input");
-  return await stageTreeWithoutSymbolicLinks(repository, snapshot, signal);
+  await stageTreeWithoutSymbolicLinks(
+    repository,
+    snapshot,
+    signal,
+    linkedWorktree ? join(repository, ".git") : undefined,
+  );
+  if (linkedWorktree && expectedRevision !== null) {
+    await makeSelfContainedWorktreeSnapshot(
+      repository,
+      snapshot,
+      expectedRevision,
+      signal,
+    );
+  }
+  return snapshot;
 }
 
 async function stageTreeWithoutSymbolicLinks(
   sourceRoot: string,
   destination: string,
   signal: AbortSignal,
+  omittedPath?: string,
 ): Promise<string> {
   await cp(sourceRoot, destination, {
     recursive: true,
-    filter: async (source) => !(await lstat(source)).isSymbolicLink(),
+    filter: async (source) =>
+      source !== omittedPath && !(await lstat(source)).isSymbolicLink(),
   });
   throwIfAborted(signal, destination);
   return destination;
+}
+
+async function repositoryExecutablePaths(
+  repository: string,
+): Promise<Array<[string, number]>> {
+  const result: Array<[string, number]> = [];
+  const visit = async (directory: string, relative = ""): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      const child = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(child, childRelative);
+      } else if (entry.isFile()) {
+        const executeBits = (await lstat(child)).mode & 0o111;
+        if (executeBits !== 0) result.push([childRelative, executeBits]);
+      }
+    }
+  };
+  await visit(repository);
+  return result;
+}
+
+async function makeSelfContainedWorktreeSnapshot(
+  repository: string,
+  snapshot: string,
+  revision: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(revision)) {
+    throw new InvalidTargetError(
+      `Cannot stage an invalid Git worktree revision: ${revision}`,
+    );
+  }
+  const environment: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+  ]) {
+    delete environment[name];
+  }
+  environment["GIT_CONFIG_NOSYSTEM"] = "1";
+  environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
+  environment["GIT_TERMINAL_PROMPT"] = "0";
+  environment["GIT_ALLOW_PROTOCOL"] = "file";
+  environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  const runGit = async (args: string[]): Promise<void> => {
+    await execFile("git", args, {
+      cwd: snapshot,
+      encoding: "utf8",
+      env: environment,
+      signal,
+    });
+  };
+  const objectFormat = revision.length === 64 ? "sha256" : "sha1";
+  await runGit(["init", "--quiet", `--object-format=${objectFormat}`]);
+  await runGit([
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "uploadpack.packObjectsHook=",
+    "-c",
+    "protocol.file.allow=always",
+    "fetch",
+    "--quiet",
+    "--depth=1",
+    "--no-tags",
+    "--no-recurse-submodules",
+    repository,
+    revision,
+  ]);
+  await runGit([
+    "update-ref",
+    "refs/heads/codex-security-snapshot",
+    "FETCH_HEAD",
+  ]);
+  await runGit(["symbolic-ref", "HEAD", "refs/heads/codex-security-snapshot"]);
+  await runGit(["reset", "--quiet", "--mixed", "HEAD"]);
+  await rm(join(snapshot, ".git", "FETCH_HEAD"), { force: true });
+}
+
+async function isolateDockerSession(
+  session: DockerSandboxSession,
+): Promise<void> {
+  const inspectNetworks = async (): Promise<string[]> => {
+    const { stdout } = await execFile(
+      "docker",
+      [
+        "inspect",
+        "--type",
+        "container",
+        "--format",
+        "{{json .NetworkSettings.Networks}}",
+        session.state.containerId,
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    const parsed = JSON.parse(stdout) as unknown;
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error("Docker returned invalid container network metadata.");
+    }
+    return Object.keys(parsed);
+  };
+  try {
+    for (const network of await inspectNetworks()) {
+      await execFile(
+        "docker",
+        ["network", "disconnect", "-f", network, session.state.containerId],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+    }
+    const remaining = await inspectNetworks();
+    if (remaining.length > 0) {
+      throw new Error(
+        `Docker networks still attached: ${remaining.join(", ")}`,
+      );
+    }
+  } catch (error) {
+    throw new IncompleteScanError(
+      "Unable to disable Docker sandbox network access before scanning.",
+      { cause: error },
+    );
+  }
+}
+
+function suppressSensitiveAgentsTelemetry(): () => void {
+  if (sensitiveTelemetryUsers++ === 0) {
+    savedDebugNamespaces = createDebug.disable();
+    createDebug.enable(
+      [savedDebugNamespaces, "-openai-agents:*"].filter(Boolean).join(","),
+    );
+    savedDontLogModelData = process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
+    savedDontLogToolData = process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+    process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1";
+    process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1";
+    savedTracingDisabled =
+      getGlobalTraceProvider().createTrace({
+        name: "Codex Security tracing state probe",
+      }) instanceof NoopTrace;
+    setTracingDisabled(true);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--sensitiveTelemetryUsers !== 0) return;
+    createDebug.enable(savedDebugNamespaces);
+    restoreEnvironmentValue(
+      "OPENAI_AGENTS_DONT_LOG_MODEL_DATA",
+      savedDontLogModelData,
+    );
+    restoreEnvironmentValue(
+      "OPENAI_AGENTS_DONT_LOG_TOOL_DATA",
+      savedDontLogToolData,
+    );
+    setTracingDisabled(savedTracingDisabled);
+  };
+}
+
+function restoreEnvironmentValue(
+  name: string,
+  value: string | undefined,
+): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
 }
 
 async function dockerWorkspaceRoot(

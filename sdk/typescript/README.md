@@ -44,14 +44,17 @@ repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
 The default Agents engine stages a copy of the repository plus the scan
-skills/helpers in a Docker-isolated `node:22-bookworm` sandbox, runs the
-standard `security-scan` workflow with bounded delegated workers, and transfers
-generated scan artifacts back to the output directory. Repository symlinks are
-omitted, consistent with the scan inventory's no-symlink policy. The shell
-environment does not receive model API keys, and source/tool traces are
-disabled. `--model`, `--reasoning-effort`, `--max-turns`, `--worker-max-turns`,
-and `--sandbox` control the Agents workflow. `--sandbox unsafe-local` is for
-trusted local development only and provides no host isolation.
+skills/helpers in a Docker-isolated, network-disabled `node:22-bookworm`
+sandbox, runs the standard `security-scan` workflow with bounded delegated
+workers, and transfers generated scan artifacts back to the output directory.
+Repository symlinks are omitted, consistent with the scan inventory's
+no-symlink policy; executable files and linked Git worktree identity/status are
+preserved in the staged snapshot. The shell environment does not receive model
+API keys, and source/tool traces and sensitive SDK debug logging are disabled
+for the scan. `--model`, `--reasoning-effort`, `--max-turns`,
+`--worker-max-turns`, and `--sandbox` control the Agents workflow.
+`--sandbox unsafe-local` is for trusted local development only and provides no
+host isolation.
 
 Docker staging defaults to `~/.cache/codex-security/sandboxes`, which works with
 Docker Desktop and Colima's default shared-user-directory mount. Set

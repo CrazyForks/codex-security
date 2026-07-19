@@ -1,4 +1,5 @@
 import {
+  chmod,
   cp,
   mkdir,
   mkdtemp,
@@ -14,13 +15,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  NoopTrace,
   Usage,
+  getGlobalTraceProvider,
+  setTracingDisabled,
   type Model,
   type ModelProvider,
   type ModelRequest,
   type ModelResponse,
   type StreamEvent,
 } from "@openai/agents";
+import createDebug from "debug";
 import { localDir } from "@openai/agents/sandbox";
 import {
   UnixLocalSandboxClient,
@@ -224,6 +229,11 @@ describe("Agents SDK scan workspace", () => {
       join(repository, "src", "app.ts"),
       "export const ok = true;\n",
     );
+    await writeFile(
+      join(repository, "src", "validate.sh"),
+      "#!/bin/sh\nexit 0\n",
+    );
+    await chmod(join(repository, "src", "validate.sh"), 0o751);
     const scanRequest = request(repository, {
       target: { kind: "paths", paths: ["src"] },
     });
@@ -254,6 +264,8 @@ describe("Agents SDK scan workspace", () => {
           "test -d output",
           "test \"$(tr -d '\\n' < target-paths.json)\" = '[\"src\"]'",
           "test ! -w target-paths.json",
+          "test ! -w repository-executables.json",
+          `test "$(tr -d '\\n' < repository-executables.json)" = '[["src/validate.sh",73]]'`,
           'test "${CODEX_SECURITY_AGENT_RUNTIME-}" = agents-sdk',
           'test "${CODEX_SECURITY_TARGET_PATHS_FILE-}" = target-paths.json',
           'test -z "${OPENAI_API_KEY-}"',
@@ -449,6 +461,7 @@ describe("Agents SDK scan workspace", () => {
       "repository",
       "output",
       "target-paths.json",
+      "repository-executables.json",
       "plugin/references",
       "plugin/schemas",
       "plugin/scripts",
@@ -685,6 +698,66 @@ describe("AgentsSecurity orchestration", () => {
     await client.close();
   });
 
+  test("restores host tracing and debug settings after a failed Agents run", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir);
+    await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+    const traceProvider = getGlobalTraceProvider();
+    const previouslyDisabled =
+      traceProvider.createTrace({ name: "prior tracing state" }) instanceof
+      NoopTrace;
+    const previousDebug = createDebug.disable();
+    const previousModel = process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
+    const previousTool = process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+    setTracingDisabled(false);
+    createDebug.enable("openai-agents:*");
+    process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "0";
+    process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "0";
+    try {
+      await expect(
+        runAgentsScan(
+          request(repository, {
+            scanDir,
+            python: execFileSync(
+              "python3",
+              ["-c", "import sys; print(sys.executable)"],
+              { encoding: "utf8" },
+            ).trim(),
+          }),
+          {
+            modelProvider: {
+              getModel() {
+                throw new Error("expected model-provider failure");
+              },
+            },
+          },
+        ),
+      ).rejects.toThrow("expected model-provider failure");
+      expect(createDebug.enabled("openai-agents:core")).toBe(true);
+      expect(process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"]).toBe("0");
+      expect(process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"]).toBe("0");
+      expect(
+        traceProvider.createTrace({ name: "restored tracing state" }),
+      ).not.toBeInstanceOf(NoopTrace);
+    } finally {
+      createDebug.enable(previousDebug);
+      setTracingDisabled(previouslyDisabled);
+      if (previousModel === undefined) {
+        delete process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
+      } else {
+        process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = previousModel;
+      }
+      if (previousTool === undefined) {
+        delete process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+      } else {
+        process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = previousTool;
+      }
+    }
+  });
+
   test("drops repository symlinks before sandbox materialization and preserves the scan revision", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -715,6 +788,173 @@ describe("AgentsSecurity orchestration", () => {
     expect(stagedRepository).not.toBe(repository);
     expect(model.requests.length).toBeGreaterThan(0);
     await client.close();
+  });
+
+  test("materializes a self-contained linked Git worktree and restores executable files in the sandbox", async () => {
+    const root = await temporaryDirectory();
+    const main = join(root, "main");
+    const repository = join(root, "worktree");
+    const scanDir = join(root, "scan");
+    await mkdir(main);
+    execFileSync("git", ["init", "--quiet"], { cwd: main });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: main,
+    });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: main });
+    await writeFile(join(main, "app.ts"), "export const value = 'clean';\n");
+    await writeFile(
+      join(main, "validate.sh"),
+      "#!/bin/sh\nprintf '%s\\n' worktree-executable-ok\n",
+    );
+    await chmod(join(main, "validate.sh"), 0o755);
+    execFileSync("git", ["add", "."], { cwd: main });
+    execFileSync("git", ["commit", "--quiet", "-m", "initial"], { cwd: main });
+    execFileSync(
+      "git",
+      ["worktree", "add", "--quiet", "-b", "scan-target", repository],
+      { cwd: main },
+    );
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repository,
+      encoding: "utf8",
+    }).trim();
+    await writeFile(
+      join(repository, "app.ts"),
+      "export const value = 'modified';\n",
+    );
+    await writeFile(
+      join(repository, "untracked.ts"),
+      "export const extra = 1;\n",
+    );
+
+    let turn = 0;
+    const requests: ModelRequest[] = [];
+    const model: Model = {
+      async getResponse(): Promise<ModelResponse> {
+        return { usage: new Usage(), output: [] };
+      },
+      async *getStreamedResponse(
+        value: ModelRequest,
+      ): AsyncIterable<StreamEvent> {
+        requests.push(value);
+        turn += 1;
+        yield { type: "response_started" };
+        yield {
+          type: "response_done",
+          response: {
+            id: `resp_worktree_${turn}`,
+            usage: {
+              requests: 1,
+              inputTokens: 2,
+              outputTokens: 2,
+              totalTokens: 4,
+            },
+            output:
+              turn === 1
+                ? [
+                    {
+                      id: "fc_worktree",
+                      type: "function_call",
+                      callId: "call_worktree",
+                      name: "exec_command",
+                      status: "completed",
+                      arguments: JSON.stringify({
+                        cmd: [
+                          "test -x repository/validate.sh",
+                          "repository/validate.sh",
+                          `test \"$(git -C repository rev-parse --verify 'HEAD^{commit}')\" = ${revision}`,
+                          "test \"$(git -C repository status --porcelain=v1 --untracked-files=all | tr '\\n' ',')\" = ' M app.ts,?? untracked.ts,'",
+                          'test -z "$(git -C repository remote)"',
+                          "cp -R plugin/examples/completed-scan/. output/",
+                          `"$PYTHON" -c 'import json,subprocess,pathlib; p=pathlib.Path("output/scan-manifest.json"); d=json.loads(p.read_text()); d["scan"]["producer"]["version"]="0.1.14"; d["scan"]["target"]["revision"]=subprocess.check_output(["git","-C","repository","rev-parse","HEAD"],text=True).strip(); p.write_text(json.dumps(d,indent=2)+"\\n")'`,
+                          "printf '%s\\n' '# Scan report' > output/report.md",
+                        ].join(" && "),
+                        workdir: "/workspace",
+                        login: false,
+                        tty: false,
+                        yield_time_ms: 10_000,
+                      }),
+                    },
+                  ]
+                : [
+                    {
+                      id: "msg_worktree",
+                      type: "message",
+                      role: "assistant",
+                      status: "completed",
+                      content: [
+                        { type: "output_text", text: "worktree scan complete" },
+                      ],
+                    },
+                  ],
+          },
+        };
+      },
+    };
+    const provider: ModelProvider = { getModel: () => model };
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "unsafe-local", maxTurns: 8 },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-agents-key" },
+        resolvePluginPython: async () =>
+          execFileSync("python3", ["-c", "import sys; print(sys.executable)"], {
+            encoding: "utf8",
+          }).trim(),
+        runAgents: async (value: AgentsScanRequest) => {
+          expect(value.repository).not.toBe(repository);
+          expect(value.repositoryRevision).toBe(revision);
+          return await runAgentsScan(value, { modelProvider: provider });
+        },
+      },
+    );
+    const result = await client.run(repository, { outputDir: scanDir });
+    expect(result.turnResult.finalResponse).toBe("worktree scan complete");
+    expect(JSON.stringify(requests)).toContain("worktree-executable-ok");
+    await client.close();
+  });
+
+  test("waits for sensitive staging cleanup before close resolves", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspaceRoot = join(root, "docker-workspaces");
+    await mkdir(repository);
+    await writeFile(join(repository, "app.ts"), "export const value = 1;\n");
+    let releaseStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      releaseStarted = resolve;
+    });
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        repositoryRevision: async () => "deadbeef",
+        runAgents: async ({ sandboxBaseDir, signal }: AgentsScanRequest) => {
+          const bulk = join(sandboxBaseDir, "sensitive-staging");
+          await mkdir(bulk);
+          await Promise.all(
+            Array.from({ length: 2_000 }, async (_, index) =>
+              writeFile(join(bulk, `${index}.txt`), "sensitive\n"),
+            ),
+          );
+          releaseStarted();
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else
+              signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw new DOMException("aborted", "AbortError");
+        },
+      },
+    );
+    const running = client.run(repository).catch((error: unknown) => error);
+    await started;
+    expect((await readdir(workspaceRoot)).length).toBe(1);
+    await client.close();
+    expect(await readdir(workspaceRoot)).toEqual([]);
+    expect(await running).toBeInstanceOf(ScanInterruptedError);
   });
 
   test("rejects an output directory retargeted by the readiness callback before sandbox work", async () => {
