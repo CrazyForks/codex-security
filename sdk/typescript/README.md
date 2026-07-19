@@ -47,6 +47,8 @@ The default Agents engine stages a copy of the repository plus the scan
 skills/helpers in a Docker-isolated, network-disabled `node:22-bookworm`
 sandbox, runs the standard `security-scan` workflow with bounded delegated
 workers, and transfers generated scan artifacts back to the output directory.
+Partial repository ranking uses one verified worker slot and preserves the
+static pool-plan and receipt contract without depending on Codex preflight.
 Repository symlinks are omitted, consistent with the scan inventory's
 no-symlink policy; executable files and linked Git worktree identity/status are
 preserved in the staged snapshot. The shell environment does not receive model

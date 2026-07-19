@@ -295,6 +295,10 @@ describe("Agents SDK scan workspace", () => {
     );
     expect(prompt).toContain("delegate_security_task");
     expect(prompt).toContain("--scopes-file target-paths.json");
+    expect(prompt).toContain("--usable-worker-slots 1");
+    expect(prompt).toContain(
+      "do not wait for a Codex capability-preflight result",
+    );
     expect(prompt).toContain("Repository revision: deadbeef");
     expect(prompt).toContain(
       '"$PYTHON" plugin/scripts/finalize_scan_contract.py',

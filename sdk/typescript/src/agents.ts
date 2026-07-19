@@ -514,6 +514,7 @@ export async function runAgentsScan(
         "You are a bounded Codex Security scan worker running inside an Agents SDK sandbox.",
         "Follow the exact assignment from the coordinator and the referenced phase skill under plugin/skills.",
         "Use repository, plugin, output, and target-paths.json as workspace-relative paths. Never edit repository files.",
+        "The Agents runtime verifies one usable ranking-worker slot; process an assigned ranking slot completely before returning its exact receipt.",
         "Write only the requested worker-local artifacts and receipts, then return a concise evidence-backed summary.",
       ].join("\n"),
       capabilities: Capabilities.default(),
@@ -542,6 +543,7 @@ export async function runAgentsScan(
         'Use "$PYTHON" for every plugin helper invocation; its value is supplied by the trusted host environment.',
         "The full plugin helper/reference tree is under plugin and all phase skills are under plugin/skills.",
         "When the scan skill calls for a subagent, call delegate_security_task with one bounded assignment; the tool shares this sandbox and cannot recursively delegate.",
+        "For repository ranking, the Agents runtime verifies one usable worker slot. Set usable_worker_slots to 1 when creating the static rank-worker plan; the Codex capability-preflight result is not available in this runtime.",
         "The Agents host has no Codex app, MCP workbench, goals, native fanout, or config-preflight tools. Use the terminal/chat workflow and do not wait for UI or invoke Codex-only tools.",
         "Complete all required phase, coverage, and candidate-ledger receipts, then run the terminal finalizer exactly once. Never claim complete coverage when a required worker or receipt is missing.",
       ].join("\n"),
@@ -719,6 +721,7 @@ export function agentsScanPrompt(
       : `Repository revision: ${request.repositoryRevision}`,
     targetInstruction,
     "Use delegate_security_task for every required subagent assignment and preserve all phase/coverage receipts.",
+    "For partial repository ranking, the Agents runtime has verified one usable worker slot; create the static rank-worker plan with --usable-worker-slots 1 and do not wait for a Codex capability-preflight result.",
     'Complete and seal the canonical JSON contract with "$PYTHON" plugin/scripts/finalize_scan_contract.py --scan-dir output --source-root repository before returning.',
   ].join("\n");
 }

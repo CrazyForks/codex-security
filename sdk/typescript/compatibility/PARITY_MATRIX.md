@@ -86,6 +86,8 @@ and validates the same canonical output contract. `AgentsSecurity` requires an
 API key and does not consume file-backed Codex authentication. Repository
 symlinks are omitted because the deterministic scan inventory never follows
 them; executable files and linked Git worktree identity/status are preserved.
+Partial repository ranking uses one verified worker slot with the unchanged
+static pool-plan and receipt contract instead of Codex capability preflight.
 `unsafe-local` is explicitly opt-in and is not a host isolation boundary.
 Native Windows paths are unsupported by the Agents sandbox and route to Codex;
 WSL can be used for Agents execution. Docker staging defaults to
