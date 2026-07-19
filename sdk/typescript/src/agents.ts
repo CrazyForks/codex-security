@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { constants as fsConstants, type Dirent } from "node:fs";
 import {
@@ -12,7 +12,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { promisify } from "node:util";
 import createDebug from "debug";
@@ -42,6 +42,7 @@ import {
   DockerSandboxClient,
   type DockerSandboxSession,
   UnixLocalSandboxClient,
+  type UnixLocalSandboxSession,
   localDirLazySkillSource,
 } from "@openai/agents/sandbox/local";
 import {
@@ -87,8 +88,13 @@ const MAX_OUTPUT_ENTRIES = 20_000;
 const MAX_OUTPUT_DEPTH = 128;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
+const MAX_INPUT_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
+const MAX_INPUT_ENTRIES = 2_000_000;
 const MAX_NESTED_GIT_REPOSITORIES = 256;
 const MAX_GIT_IGNORE_DISCOVERY_ENTRIES = 2_000_000;
+const MAX_GIT_CONFIG_FILES = 128;
+const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
 const GIT_COMMAND_TIMEOUT_MS = 120_000;
 const execFile = promisify(execFileCallback);
 const REQUIRED_PLUGIN_DIRECTORIES = [
@@ -149,6 +155,7 @@ export interface AgentsScanRequest {
   sandboxBaseDir: string;
   sandboxInputRoot?: string;
   repositoryRevision: string | null;
+  repositoryIdentity?: string;
   apiKey: string;
   baseURL?: string;
   organization?: string;
@@ -347,10 +354,25 @@ export class AgentsSecurity {
       check();
 
       await requireSafeGitWorktreeMetadata(protectedRoot, controller.signal);
-      const sourceRevision = await (
-        this.#dependencies.repositoryRevision ?? repositoryRevision
-      )(repo, controller.signal);
-      const expectedRevision = protectedRoot === repo ? sourceRevision : null;
+      if (protectedRoot !== repo) {
+        await requireSafeGitWorktreeMetadata(repo, controller.signal);
+      }
+      const selectedGitMetadata = await lstat(join(repo, ".git")).catch(
+        () => null,
+      );
+      const selectedGitBacked =
+        selectedGitMetadata?.isFile() === true ||
+        selectedGitMetadata?.isDirectory() === true;
+      const revisionResolver =
+        this.#dependencies.repositoryRevision ?? safeRepositoryRevision;
+      const sourceRevision = await revisionResolver(repo, controller.signal);
+      const expectedRevision =
+        (selectedGitBacked || protectedRoot === repo) &&
+        (!selectedGitBacked ||
+          !(await isPartialGitRepository(repo, controller.signal)))
+          ? sourceRevision
+          : null;
+      const repositoryIdentity = stableRepositoryIdentity(repo);
       const stagedRepository = await stageRepositoryWithoutSymbolicLinks(
         repo,
         staging,
@@ -368,9 +390,7 @@ export class AgentsSecurity {
               controller.signal,
             )
           : pluginRoot;
-      const currentRevision = await (
-        this.#dependencies.repositoryRevision ?? repositoryRevision
-      )(repo, controller.signal);
+      const currentRevision = await revisionResolver(repo, controller.signal);
       if (currentRevision !== sourceRevision) {
         throw new InvalidTargetError(
           `Repository revision changed during scan preparation: ${repo}`,
@@ -383,6 +403,11 @@ export class AgentsSecurity {
       await writeFile(
         join(sandboxInputRoot, "target-paths.json"),
         `${JSON.stringify(target.kind === "paths" ? target.paths : ["."])}\n`,
+        { flag: "wx", mode: 0o400 },
+      );
+      await writeFile(
+        join(sandboxInputRoot, "repository-identity.json"),
+        `${JSON.stringify({ targetId: repositoryIdentity })}\n`,
         { flag: "wx", mode: 0o400 },
       );
       await writeFile(
@@ -401,6 +426,7 @@ export class AgentsSecurity {
         sandboxBaseDir: staging,
         sandboxInputRoot,
         repositoryRevision: expectedRevision,
+        repositoryIdentity,
         apiKey,
         baseURL: environmentValue(
           this.#dependencies.environment,
@@ -440,14 +466,10 @@ export class AgentsSecurity {
         controller.signal,
       );
     } catch (error) {
-      if (
-        controller.signal.aborted &&
-        !(error instanceof ScanInterruptedError)
-      ) {
+      if (controller.signal.aborted) {
         throw new ScanInterruptedError(
           `Codex Security scan was interrupted${scanDir ? `; partial output remains at ${scanDir}` : ""}.`,
           scanDir,
-          { cause: error },
         );
       }
       throw error;
@@ -496,7 +518,12 @@ export async function runAgentsScan(
       : new UnixLocalSandboxClient({
           workspaceBaseDir: request.sandboxBaseDir,
         });
-  const session = await client.create({ manifest });
+  const session = await createSandboxSession(
+    client,
+    manifest,
+    request.signal,
+    request.scanDir,
+  );
   const releaseTelemetry = suppressSensitiveAgentsTelemetry();
   const releaseSandboxTimeouts = suppressReferencedSandboxTimeouts();
   let ownedProvider: OpenAIProvider | undefined;
@@ -524,6 +551,7 @@ export async function runAgentsScan(
         "test -f plugin/scripts/generate_rank_input.py",
         "test -r scan-inputs/target-paths.json",
         "test -r scan-inputs/repository-executables.json",
+        "test -r scan-inputs/repository-identity.json",
       ].join(" && "),
       workdir: "/workspace",
       login: false,
@@ -671,11 +699,53 @@ export async function runAgentsScan(
     releaseSandboxTimeouts();
     releaseTelemetry();
   }
-  if (failure !== undefined) throw failure;
+  if (failure !== undefined) throw sanitizeAgentsRuntimeFailure(failure);
   if (summary === undefined) {
     throw new IncompleteScanError("Agents SDK scan ended without a result.");
   }
   return summary;
+}
+
+async function createSandboxSession(
+  client: DockerSandboxClient | UnixLocalSandboxClient,
+  manifest: Manifest,
+  signal: AbortSignal,
+  scanDir: string,
+): Promise<DockerSandboxSession | UnixLocalSandboxSession> {
+  throwIfAborted(signal, scanDir);
+  const creation = client.create({ manifest });
+  let removeAbort = (): void => undefined;
+  const interrupted = new Promise<never>((_, reject) => {
+    const abort = (): void => {
+      void creation.then((session) => session.close()).catch(() => undefined);
+      reject(
+        new ScanInterruptedError(
+          `Codex Security scan was interrupted; partial output remains at ${scanDir}.`,
+          scanDir,
+        ),
+      );
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    removeAbort = () => signal.removeEventListener("abort", abort);
+  });
+  try {
+    return await Promise.race([creation, interrupted]);
+  } finally {
+    removeAbort();
+  }
+}
+
+function sanitizeAgentsRuntimeFailure(error: unknown): unknown {
+  if (typeof error !== "object" || error === null || !("state" in error)) {
+    return error;
+  }
+  const name =
+    "name" in error && typeof error.name === "string"
+      ? error.name
+      : "runtime error";
+  return new IncompleteScanError(
+    `Agents SDK scan ended without a complete result (${name}).`,
+  );
 }
 
 export function agentsModelProvider(
@@ -700,7 +770,12 @@ export function agentsModelProvider(
 export async function agentsManifest(
   request: Pick<
     AgentsScanRequest,
-    "repository" | "target" | "pluginRoot" | "python" | "sandboxInputRoot"
+    | "repository"
+    | "target"
+    | "pluginRoot"
+    | "python"
+    | "sandboxInputRoot"
+    | "repositoryIdentity"
   > & { sandbox?: AgentsSandbox },
 ): Promise<Manifest> {
   const entries: Record<
@@ -732,6 +807,14 @@ export async function agentsManifest(
               "repository-executables.json": file({
                 permissions: 0o400,
                 content: `${JSON.stringify(await repositoryExecutablePaths(request.repository))}\n`,
+              }),
+              "repository-identity.json": file({
+                permissions: 0o400,
+                content: `${JSON.stringify({
+                  targetId:
+                    request.repositoryIdentity ??
+                    stableRepositoryIdentity(request.repository),
+                })}\n`,
               }),
             },
           }),
@@ -810,6 +893,8 @@ export async function agentsManifest(
       PYTHONDONTWRITEBYTECODE: "1",
       CODEX_SECURITY_AGENT_RUNTIME: "agents-sdk",
       CODEX_SECURITY_TARGET_PATHS_FILE: "scan-inputs/target-paths.json",
+      CODEX_SECURITY_REPOSITORY_IDENTITY_FILE:
+        "scan-inputs/repository-identity.json",
       GIT_OPTIONAL_LOCKS: "0",
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "safe.directory",
@@ -819,7 +904,10 @@ export async function agentsManifest(
 }
 
 export function agentsScanPrompt(
-  request: Pick<AgentsScanRequest, "target" | "repositoryRevision">,
+  request: Pick<
+    AgentsScanRequest,
+    "target" | "repositoryRevision" | "repositoryIdentity"
+  >,
 ): string {
   const targetInstruction =
     request.target.kind === "paths"
@@ -839,6 +927,7 @@ export function agentsScanPrompt(
     request.repositoryRevision === null
       ? "Repository identity: unversioned directory snapshot."
       : `Repository revision: ${request.repositoryRevision}`,
+    `Repository targetId: ${request.repositoryIdentity ?? "read scan-inputs/repository-identity.json"}. Use this exact stable targetId in scan-manifest.json; never derive identity from the staged workspace path or revision.`,
     targetInstruction,
     "Use delegate_security_task for every required subagent assignment and preserve all phase/coverage receipts.",
     "For partial repository ranking, the Agents runtime has verified one usable worker slot; create the static rank-worker plan with --usable-worker-slots 1 and do not wait for a Codex capability-preflight result.",
@@ -1135,11 +1224,20 @@ async function stageRepositoryWithoutSymbolicLinks(
   }
   const gitBacked =
     gitMetadata?.isFile() === true || gitMetadata?.isDirectory() === true;
+  const caseInsensitive =
+    gitBacked || withinGitWorktree
+      ? await isCaseInsensitiveGitRepository(repository, signal)
+      : false;
   const stageFilter =
     gitBacked || withinGitWorktree
       ? {
-          includedPaths: await gitIncludedPaths(repository, signal),
+          includedPaths: new Set(
+            [...(await gitIncludedPaths(repository, signal))].map((path) =>
+              stagedPathKey(path, caseInsensitive),
+            ),
+          ),
           explicitScopes: target.kind === "paths" ? target.paths : [],
+          caseInsensitive,
         }
       : undefined;
   if (
@@ -1178,23 +1276,38 @@ async function stageTreeWithoutSymbolicLinks(
   stageFilter?: {
     includedPaths: ReadonlySet<string>;
     explicitScopes: readonly string[];
+    caseInsensitive: boolean;
   },
   omitBareGit = false,
 ): Promise<string> {
+  let entries = 0;
+  let bytes = 0;
   await cp(sourceRoot, destination, {
     recursive: true,
     filter: async (source) => {
+      throwIfAborted(signal, destination);
+      entries += 1;
+      if (entries > MAX_INPUT_ENTRIES) {
+        throw new InvalidTargetError(
+          `Repository contains too many entries to stage safely: ${sourceRoot}`,
+        );
+      }
       if (source === omittedPath || basename(source) === ".git") return false;
       if (omitBareGit && (await isBareGitDirectory(source))) return false;
       if (stageFilter !== undefined) {
-        const path = relative(sourceRoot, source).split(sep).join("/");
-        const explicitlyRequested = stageFilter.explicitScopes.some(
-          (scope) =>
+        const path = stagedPathKey(
+          relative(sourceRoot, source).split(sep).join("/"),
+          stageFilter.caseInsensitive,
+        );
+        const explicitlyRequested = stageFilter.explicitScopes.some((value) => {
+          const scope = stagedPathKey(value, stageFilter.caseInsensitive);
+          return (
             scope === "." ||
             path === scope ||
             path.startsWith(`${scope}/`) ||
-            scope.startsWith(`${path}/`),
-        );
+            scope.startsWith(`${path}/`)
+          );
+        });
         if (
           path.length > 0 &&
           !stageFilter.includedPaths.has(path) &&
@@ -1204,11 +1317,30 @@ async function stageTreeWithoutSymbolicLinks(
         }
       }
       const metadata = await lstat(source);
-      return metadata.isFile() || metadata.isDirectory();
+      if (metadata.isFile()) {
+        if (metadata.size > MAX_INPUT_FILE_BYTES) {
+          throw new InvalidTargetError(
+            `Repository input file is too large to stage safely: ${source}`,
+          );
+        }
+        bytes += metadata.size;
+        if (bytes > MAX_INPUT_BYTES) {
+          throw new InvalidTargetError(
+            `Repository inputs are too large to stage safely: ${sourceRoot}`,
+          );
+        }
+        return true;
+      }
+      return metadata.isDirectory();
     },
   });
   throwIfAborted(signal, destination);
   return destination;
+}
+
+function stagedPathKey(path: string, caseInsensitive: boolean): string {
+  const normalized = path.normalize("NFC");
+  return caseInsensitive ? normalized.toLocaleLowerCase("en-US") : normalized;
 }
 
 async function requireSafeGitWorktreeMetadata(
@@ -1257,15 +1389,124 @@ async function requireSafeGitWorktreeMetadata(
       );
     }
   }
+  await requireSafeGitConfigIncludes(join(commonDirectory, "config"), signal);
 }
 
-async function readSmallGitMetadata(path: string): Promise<string> {
+async function requireSafeGitConfigIncludes(
+  configPath: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const pending = [configPath];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    throwIfAborted(signal, configPath);
+    const current = pending.pop()!;
+    const canonical = await realpath(current).catch(() => current);
+    if (visited.has(canonical)) continue;
+    visited.add(canonical);
+    if (visited.size > MAX_GIT_CONFIG_FILES) {
+      throw new InvalidTargetError(
+        `Git configuration contains too many included files: ${configPath}`,
+      );
+    }
+    const contents = await readSmallGitMetadata(current, MAX_GIT_CONFIG_BYTES);
+    let includeSection = false;
+    for (const line of contents.split(/\r?\n/u)) {
+      const section = /^\s*\[\s*([^\s\]"]+)(?:\s+.*)?\]\s*(?:[#;].*)?$/u.exec(
+        line,
+      );
+      if (section !== null) {
+        includeSection = /^(?:include|includeif)$/iu.test(section[1]!);
+        continue;
+      }
+      if (!includeSection) continue;
+      const setting = /^\s*path\s*=\s*(.*)$/iu.exec(line);
+      if (setting === null) continue;
+      const include = parseGitConfigIncludePath(setting[1]!, current);
+      if (include.length === 0 || /[\r\n\0]/u.test(include)) {
+        throw new InvalidTargetError(
+          `Git configuration contains an invalid include path: ${current}`,
+        );
+      }
+      const includedPath = include.startsWith("~/")
+        ? join(homedir(), include.slice(2))
+        : resolve(dirname(current), include);
+      const metadata = await lstat(includedPath).catch(() => null);
+      if (metadata === null) continue;
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new InvalidTargetError(
+          `Git configuration include must be a regular file before staging: ${includedPath}`,
+        );
+      }
+      pending.push(includedPath);
+    }
+  }
+}
+
+function parseGitConfigIncludePath(value: string, configPath: string): string {
+  const input = value.trimStart();
+  const quoted = input.startsWith('"');
+  let result = "";
+  let escaped = false;
+  let closed = !quoted;
+  for (let index = quoted ? 1 : 0; index < input.length; index += 1) {
+    const character = input[index]!;
+    if (escaped) {
+      const decoded: Record<string, string> = {
+        '"': '"',
+        "\\": "\\",
+        b: "\b",
+        n: "\n",
+        t: "\t",
+      };
+      if (!(character in decoded)) {
+        throw new InvalidTargetError(
+          `Git configuration contains an invalid include escape: ${configPath}`,
+        );
+      }
+      result += decoded[character]!;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quoted && character === '"') {
+      closed = true;
+      const suffix = input.slice(index + 1).trimStart();
+      if (suffix.length > 0 && !/^[#;]/u.test(suffix)) {
+        throw new InvalidTargetError(
+          `Git configuration contains an invalid include path: ${configPath}`,
+        );
+      }
+      break;
+    }
+    if (!quoted && /[#;]/u.test(character)) break;
+    result += character;
+  }
+  if (
+    !closed ||
+    escaped ||
+    (result.startsWith("~") && !result.startsWith("~/"))
+  ) {
+    throw new InvalidTargetError(
+      `Git configuration contains an unsupported include path: ${configPath}`,
+    );
+  }
+  return quoted ? result : result.trimEnd();
+}
+
+async function readSmallGitMetadata(
+  path: string,
+  maxBytes = 8192,
+): Promise<string> {
   const metadata = await lstat(path).catch(() => null);
   if (
     metadata === null ||
     !metadata.isFile() ||
     metadata.isSymbolicLink() ||
-    metadata.size > 8192
+    metadata.size > maxBytes
   ) {
     throw new InvalidTargetError(
       `Git worktree metadata must be a small regular file before staging: ${path}`,
@@ -1287,11 +1528,23 @@ async function readSmallGitMetadata(path: string): Promise<string> {
       throw new InvalidTargetError(`Git worktree metadata changed: ${path}`);
     }
     const data = new Uint8Array(opened.size + 1);
-    const { bytesRead } = await handle.read(data, 0, data.byteLength, 0);
+    let bytesRead = 0;
+    while (bytesRead < data.byteLength) {
+      const result = await handle.read(
+        data,
+        bytesRead,
+        data.byteLength - bytesRead,
+        bytesRead,
+      );
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
     if (bytesRead !== opened.size) {
       throw new InvalidTargetError(`Git worktree metadata changed: ${path}`);
     }
-    return new TextDecoder().decode(data.subarray(0, bytesRead));
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      data.subarray(0, bytesRead),
+    );
   } catch (error) {
     if (error instanceof InvalidTargetError) throw error;
     throw new InvalidTargetError(
@@ -1310,12 +1563,46 @@ async function isBareGitDirectory(path: string): Promise<boolean> {
   if (metadata?.isDirectory() !== true || metadata.isSymbolicLink()) {
     return false;
   }
-  const markers = await Promise.all(
+  const [head, config, objects, refs] = await Promise.all(
     ["HEAD", "config", "objects", "refs"].map(async (name) =>
       lstat(join(path, name)).catch(() => null),
     ),
   );
-  return markers.every((marker) => marker !== null);
+  if (
+    head?.isFile() !== true ||
+    head.isSymbolicLink() ||
+    config?.isFile() !== true ||
+    config.isSymbolicLink() ||
+    objects?.isDirectory() !== true ||
+    objects.isSymbolicLink() ||
+    refs?.isDirectory() !== true ||
+    refs.isSymbolicLink()
+  ) {
+    return false;
+  }
+  const headText = await readSmallGitMetadata(join(path, "HEAD"));
+  if (!/^(?:ref:\s+refs\/\S+|[0-9a-f]{40}|[0-9a-f]{64})\s*$/iu.test(headText)) {
+    return false;
+  }
+  const configText = await readSmallGitMetadata(
+    join(path, "config"),
+    MAX_GIT_CONFIG_BYTES,
+  );
+  let inCore = false;
+  for (const line of configText.split(/\r?\n/u)) {
+    const section = /^\s*\[([^\]]+)\]\s*(?:[#;].*)?$/u.exec(line);
+    if (section !== null) {
+      inCore = section[1]!.trim().toLowerCase() === "core";
+      continue;
+    }
+    if (
+      inCore &&
+      /^\s*bare\s*(?:=\s*(?:true|yes|on|1))?\s*(?:[#;].*)?$/iu.test(line)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function gitIncludedPaths(
@@ -1329,6 +1616,7 @@ async function gitIncludedPaths(
   const visited = new Set<string>();
   while (pending.length > 0) {
     const current = pending.pop()!;
+    await requireSafeGitWorktreeMetadata(current.repository, signal);
     const canonical = await realpath(current.repository);
     if (visited.has(canonical)) continue;
     visited.add(canonical);
@@ -1364,7 +1652,11 @@ async function gitIncludedPaths(
       const gitMetadata = await lstat(join(nestedRepository, ".git")).catch(
         () => null,
       );
-      if (metadata?.isDirectory() !== true || gitMetadata === null) {
+      if (
+        metadata?.isDirectory() !== true ||
+        gitMetadata === null ||
+        gitMetadata.isSymbolicLink()
+      ) {
         throw new InvalidTargetError(
           `Git returned an invalid nested repository path while staging: ${repository}`,
         );
@@ -1395,7 +1687,15 @@ async function gitIncludedPaths(
       const gitMetadata = await lstat(join(nestedRepository, ".git")).catch(
         () => null,
       );
-      if (metadata?.isDirectory() !== true || gitMetadata === null) continue;
+      if (
+        metadata?.isDirectory() !== true ||
+        gitMetadata === null ||
+        gitMetadata.isSymbolicLink()
+      ) {
+        throw new InvalidTargetError(
+          `Git returned an invalid nested repository path while staging: ${repository}`,
+        );
+      }
       pending.push({
         repository: nestedRepository,
         prefix: current.prefix ? `${current.prefix}/${value}` : value,
@@ -1420,6 +1720,8 @@ async function gitListFiles(
         "core.hooksPath=/dev/null",
         "-c",
         "core.fsmonitor=false",
+        "-c",
+        `safe.directory=${repository}`,
         "ls-files",
         ...options,
         "-z",
@@ -1468,6 +1770,8 @@ async function requireSafeGitIgnoreInputs(
         "core.hooksPath=/dev/null",
         "-c",
         "core.fsmonitor=false",
+        "-c",
+        `safe.directory=${repository}`,
         "config",
         "--null",
         "--path",
@@ -1495,6 +1799,8 @@ async function requireSafeGitIgnoreInputs(
         "core.hooksPath=/dev/null",
         "-c",
         "core.fsmonitor=false",
+        "-c",
+        `safe.directory=${repository}`,
         "rev-parse",
         "--path-format=absolute",
         "--git-common-dir",
@@ -1527,6 +1833,146 @@ async function requireSafeGitIgnoreInputs(
     safeIgnoreInputs.push(path);
   }
   return safeIgnoreInputs;
+}
+
+async function isCaseInsensitiveGitRepository(
+  repository: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    const { stdout } = await execFile(
+      "git",
+      [
+        "--no-optional-locks",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        `safe.directory=${repository}`,
+        "config",
+        "--type=bool",
+        "--get",
+        "core.ignorecase",
+      ],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        env: configuredGitEnvironment(),
+        signal,
+        timeout: GIT_COMMAND_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    return stdout.trim() === "true";
+  } catch (error) {
+    throwIfAborted(signal, repository);
+    if ((error as { code?: unknown }).code === 1) return false;
+    throw new InvalidTargetError(
+      `Unable to inspect Git path configuration: ${repository}`,
+      { cause: error },
+    );
+  }
+}
+
+async function isPartialGitRepository(
+  repository: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    const { stdout } = await execFile(
+      "git",
+      [
+        "--no-optional-locks",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        `safe.directory=${repository}`,
+        "config",
+        "--null",
+        "--get-regexp",
+        "^(extensions\\.partialclone|remote\\..*\\.promisor)$",
+      ],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        env: configuredGitEnvironment(),
+        signal,
+        timeout: GIT_COMMAND_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    return stdout.split("\0").some((record) => {
+      if (record.length === 0) return false;
+      const separator = record.indexOf("\n");
+      if (separator < 0) return false;
+      const key = record.slice(0, separator).toLowerCase();
+      const value = record
+        .slice(separator + 1)
+        .trim()
+        .toLowerCase();
+      return key === "extensions.partialclone"
+        ? value.length > 0
+        : /^(?:true|yes|on|1)$/u.test(value);
+    });
+  } catch (error) {
+    throwIfAborted(signal, repository);
+    if ((error as { code?: unknown }).code === 1) return false;
+    throw new InvalidTargetError(
+      `Unable to inspect Git partial-clone configuration: ${repository}`,
+      { cause: error },
+    );
+  }
+}
+
+async function safeRepositoryRevision(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "git",
+      [
+        "--no-optional-locks",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        `safe.directory=${repository}`,
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
+      ],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        env: sanitizedGitEnvironment(),
+        signal,
+        timeout: GIT_COMMAND_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    return stdout.trim();
+  } catch (error) {
+    throwIfAborted(signal, repository);
+    const failed = error as { killed?: unknown; signal?: unknown };
+    if (failed.killed === true || failed.signal === "SIGTERM") {
+      throw new InvalidTargetError(
+        `Unable to inspect Git revision within the staging time limit: ${repository}`,
+        { cause: error },
+      );
+    }
+    return null;
+  }
+}
+
+function stableRepositoryIdentity(repository: string): string {
+  return `codex-security-target/v1:sha256:${createHash("sha256")
+    .update(repository.normalize("NFC"))
+    .digest("hex")}`;
 }
 
 async function requireSafeAncestorGitIgnoreFiles(
@@ -1655,13 +2101,25 @@ async function makeSelfContainedWorktreeSnapshot(
   }
   const environment = sanitizedGitEnvironment();
   const runGit = async (args: string[]): Promise<void> => {
-    await execFile("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-      cwd: snapshot,
-      encoding: "utf8",
-      env: environment,
-      signal,
-      timeout: GIT_COMMAND_TIMEOUT_MS,
-    });
+    await execFile(
+      "git",
+      [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        `safe.directory=${snapshot}`,
+        "-c",
+        `safe.directory=${repository}`,
+        ...args,
+      ],
+      {
+        cwd: snapshot,
+        encoding: "utf8",
+        env: environment,
+        signal,
+        timeout: GIT_COMMAND_TIMEOUT_MS,
+      },
+    );
   };
   const objectFormat = revision.length === 64 ? "sha256" : "sha1";
   await runGit(["init", "--quiet", `--object-format=${objectFormat}`]);
@@ -1688,31 +2146,36 @@ async function makeSelfContainedWorktreeSnapshot(
   await runGit(["symbolic-ref", "HEAD", "refs/heads/codex-security-snapshot"]);
   await runGit(["reset", "--quiet", "--mixed", "HEAD"]);
   await rm(join(snapshot, ".git", "FETCH_HEAD"), { force: true });
+  await rm(join(snapshot, ".git", "logs"), { recursive: true, force: true });
 }
 
 function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { ...process.env };
+  const environment: NodeJS.ProcessEnv = {};
   for (const name of [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_TEMPLATE_DIR",
-    "GIT_SSH_COMMAND",
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "XDG_CONFIG_HOME",
+    "GIT_CONFIG_SYSTEM",
   ]) {
-    delete environment[name];
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
   environment["GIT_CONFIG_NOSYSTEM"] = "1";
   environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_ALLOW_PROTOCOL"] = "file";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  environment["GIT_NO_LAZY_FETCH"] = "1";
+  environment["GIT_COMMITTER_NAME"] = "Codex Security";
+  environment["GIT_COMMITTER_EMAIL"] = "codex-security@invalid";
+  environment["GIT_AUTHOR_NAME"] = "Codex Security";
+  environment["GIT_AUTHOR_EMAIL"] = "codex-security@invalid";
   return environment;
 }
 

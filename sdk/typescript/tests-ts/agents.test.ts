@@ -290,9 +290,11 @@ describe("Agents SDK scan workspace", () => {
           "test \"$(tr -d '\\n' < scan-inputs/target-paths.json)\" = '[\"src\"]'",
           "test ! -w scan-inputs/target-paths.json",
           "test ! -w scan-inputs/repository-executables.json",
+          "test ! -w scan-inputs/repository-identity.json",
           `test "$(tr -d '\\n' < scan-inputs/repository-executables.json)" = '[["src/validate.sh",73]]'`,
           'test "${CODEX_SECURITY_AGENT_RUNTIME-}" = agents-sdk',
           'test "${CODEX_SECURITY_TARGET_PATHS_FILE-}" = scan-inputs/target-paths.json',
+          'test "${CODEX_SECURITY_REPOSITORY_IDENTITY_FILE-}" = scan-inputs/repository-identity.json',
           'test -z "${OPENAI_API_KEY-}"',
           'test -z "${CODEX_API_KEY-}"',
         ].join(" && "),
@@ -325,6 +327,9 @@ describe("Agents SDK scan workspace", () => {
       "do not wait for a Codex capability-preflight result",
     );
     expect(prompt).toContain("Repository revision: deadbeef");
+    expect(prompt).toContain(
+      "Repository targetId: read scan-inputs/repository-identity.json",
+    );
     expect(prompt).toContain(
       '"$PYTHON" plugin/scripts/finalize_scan_contract.py',
     );

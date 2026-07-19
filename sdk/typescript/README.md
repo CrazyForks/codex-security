@@ -44,22 +44,26 @@ repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
 The default Agents engine stages a copy of the repository, the scan
-skills/helpers, and immutable scan-control inputs, then bind-mounts them read-only in a Docker-isolated,
-network-disabled `node:22-bookworm`
-sandbox, runs the standard `security-scan` workflow with bounded delegated
-workers, stops the sandbox before transferring generated scan artifacts back to the output directory.
+skills/helpers, and immutable scan-control inputs, then bind-mounts them
+read-only in a Docker-isolated, network-disabled `node:22-bookworm` sandbox,
+runs the standard `security-scan` workflow with bounded delegated workers, and
+stops the sandbox before transferring generated scan artifacts back to the
+output directory.
 Partial repository ranking uses one verified worker slot and preserves the
 static pool-plan and receipt contract without depending on Codex preflight.
 Repository symlinks and special files such as FIFOs/sockets are omitted,
 consistent with the scan inventory's regular-file policy; executable files and
 Git worktree identity/status, initialized-submodule source, and untracked nested
 Git source are preserved in a minimal, shallow, self-contained staged snapshot
-that omits local remotes,
-nested Git metadata, and Git configuration. Git-ignored files are
-not staged unless they are explicitly selected with `--path`; a Git-backed
-subdirectory is represented as the directory snapshot actually reviewed. The
-runtime rejects non-regular Git ignore/exclude inputs and bounds Git metadata commands
-before staging so a malformed repository cannot stall the scan indefinitely.
+that omits local remotes, nested Git metadata, Git configuration, and reflogs.
+A stable, one-way-hashed workspace identity is supplied as an immutable input
+so finding identities do not collide across repositories or change between
+scans. Git-ignored files are not staged unless they are explicitly selected with
+`--path`; a Git-backed subdirectory or sparse partial clone is represented as
+the directory snapshot actually reviewed. Staging rejects non-regular Git
+ignore/exclude/config-include inputs, bounds Git metadata commands, and limits
+repository inputs to 2,000,000 entries, 256 MiB per file, and 4 GiB total so a
+malformed repository cannot stall or exhaust the host before isolation.
 The shell environment does not receive model
 API keys, and source/tool traces and sensitive SDK debug logging (including
 `OPENAI_LOG=debug` request bodies) are disabled for the scan. `--model`,
