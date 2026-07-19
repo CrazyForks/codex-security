@@ -84,7 +84,7 @@ const MAX_OUTPUT_ENTRIES = 20_000;
 const MAX_OUTPUT_DEPTH = 128;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
-const MAX_GIT_SUBMODULES = 256;
+const MAX_NESTED_GIT_REPOSITORIES = 256;
 const execFile = promisify(execFileCallback);
 const REQUIRED_PLUGIN_DIRECTORIES = [
   "references",
@@ -1044,9 +1044,9 @@ async function gitIncludedPaths(
     const canonical = await realpath(current.repository);
     if (visited.has(canonical)) continue;
     visited.add(canonical);
-    if (visited.size > MAX_GIT_SUBMODULES + 1) {
+    if (visited.size > MAX_NESTED_GIT_REPOSITORIES + 1) {
       throw new InvalidTargetError(
-        `Repository contains too many initialized Git submodules: ${repository}`,
+        `Repository contains too many initialized nested Git repositories: ${repository}`,
       );
     }
     const files = await gitListFiles(
@@ -1057,7 +1057,24 @@ async function gitIncludedPaths(
     );
     for (const value of files.split("\0")) {
       if (value.length === 0) continue;
-      addGitIncludedPath(paths, current.prefix, value, repository);
+      const nested = value.endsWith("/");
+      const listedPath = nested ? value.slice(0, -1) : value;
+      addGitIncludedPath(paths, current.prefix, listedPath, repository);
+      if (!nested) continue;
+      const nestedRepository = join(current.repository, listedPath);
+      const metadata = await lstat(nestedRepository).catch(() => null);
+      const gitMetadata = await lstat(join(nestedRepository, ".git")).catch(
+        () => null,
+      );
+      if (metadata?.isDirectory() !== true || gitMetadata === null) {
+        throw new InvalidTargetError(
+          `Git returned an invalid nested repository path while staging: ${repository}`,
+        );
+      }
+      pending.push({
+        repository: nestedRepository,
+        prefix: current.prefix ? `${current.prefix}/${listedPath}` : listedPath,
+      });
     }
     const staged = await gitListFiles(
       current.repository,

@@ -1228,6 +1228,137 @@ describe("AgentsSecurity orchestration", () => {
     await client.close();
   });
 
+  test("stages source from an untracked nested Git repository without its metadata or ignored secrets", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const nested = join(repository, "services", "nested");
+    const scanDir = join(root, "scan");
+    const workspaceRoot = join(root, "docker-workspaces");
+    await mkdir(repository);
+    await writeFile(
+      join(repository, "app.ts"),
+      "export const parent = true;\n",
+    );
+    execFileSync("git", ["init", "--quiet", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", repository, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", repository, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "commit",
+      "--quiet",
+      "-m",
+      "parent",
+    ]);
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, "source.ts"), "export const nested = true;\n");
+    await writeFile(join(nested, ".gitignore"), ".env\n");
+    execFileSync("git", ["init", "--quiet", nested]);
+    execFileSync("git", [
+      "-C",
+      nested,
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    execFileSync("git", ["-C", nested, "config", "user.name", "test"]);
+    execFileSync("git", ["-C", nested, "add", "."]);
+    execFileSync("git", ["-C", nested, "commit", "--quiet", "-m", "nested"]);
+    execFileSync("git", [
+      "-C",
+      nested,
+      "config",
+      "remote.origin.url",
+      "https://synthetic-nested-token@example.invalid/private/service.git",
+    ]);
+    await writeFile(join(nested, "local.ts"), "export const local = true;\n");
+    await writeFile(join(nested, ".env"), "LOCAL_SECRET=must-not-stage\n");
+    expect(
+      execFileSync(
+        "git",
+        [
+          "-C",
+          repository,
+          "ls-files",
+          "--cached",
+          "--others",
+          "--exclude-standard",
+          "-z",
+          "--",
+          ".",
+        ],
+        { encoding: "utf8" },
+      ),
+    ).toContain("services/nested/\0");
+
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "docker" },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(
+            await readFile(
+              join(value.repository, "services", "nested", "source.ts"),
+              "utf8",
+            ),
+          ).toBe("export const nested = true;\n");
+          expect(
+            await readFile(
+              join(value.repository, "services", "nested", "local.ts"),
+              "utf8",
+            ),
+          ).toBe("export const local = true;\n");
+          expect(
+            existsSync(join(value.repository, "services", "nested", ".env")),
+          ).toBe(false);
+          expect(
+            existsSync(join(value.repository, "services", "nested", ".git")),
+          ).toBe(false);
+          expect(
+            await readFile(join(value.repository, ".git", "config"), "utf8"),
+          ).not.toContain("synthetic-nested-token");
+          const rankInput = join(value.scanDir, "nested-rank.jsonl");
+          execFileSync(
+            "python3",
+            [
+              join(value.pluginRoot, "scripts", "generate_rank_input.py"),
+              "make-repo-rank-input",
+              "--repo",
+              value.repository,
+              "--scope",
+              ".",
+              "--out",
+              rankInput,
+            ],
+            { env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } },
+          );
+          const inventory = await readFile(rankInput, "utf8");
+          expect(inventory).toContain("services/nested/source.ts");
+          expect(inventory).toContain("services/nested/local.ts");
+          throw new Error("stop after untracked nested Git staging inspection");
+        },
+      },
+    );
+    await expect(
+      client.run(repository, { outputDir: scanDir }),
+    ).rejects.toThrow("stop after untracked nested Git staging inspection");
+    expect(reached).toBe(true);
+    expect(await readdir(workspaceRoot)).toEqual([]);
+    await client.close();
+  });
+
   test.skipIf(process.platform === "win32")(
     "omits repository FIFOs while staging Docker inputs",
     async () => {

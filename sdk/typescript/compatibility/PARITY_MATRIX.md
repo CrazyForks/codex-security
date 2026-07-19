@@ -86,9 +86,9 @@ data, keeps API keys outside the sandbox shell,
 and validates the same canonical output contract. `AgentsSecurity` requires an
 API key and does not consume file-backed Codex authentication. Repository
 symlinks and special files are omitted because the deterministic scan inventory
-only includes regular files; executable files, Git worktree identity/status, and
-initialized-submodule source are preserved in a minimal, shallow,
-self-contained snapshot without local remotes, nested Git metadata, or Git
+only includes regular files; executable files, Git worktree identity/status,
+initialized-submodule source, and untracked nested Git source are preserved in
+a minimal, shallow, self-contained snapshot without local remotes, nested Git metadata, or Git
 configuration. Git-ignored files are omitted unless explicitly selected as
 a path target, and a Git-backed subdirectory is bound as the directory snapshot
 actually reviewed.
