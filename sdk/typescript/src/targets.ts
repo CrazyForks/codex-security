@@ -345,6 +345,14 @@ async function gitOutput(
     cwd: repository,
     encoding: "utf8",
     signal,
+    env: {
+      ...process.env,
+      OPENAI_API_KEY: undefined,
+      CODEX_API_KEY: undefined,
+      GIT_NO_LAZY_FETCH: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_OPTIONAL_LOCKS: "0",
+    },
   });
   return stdout.trim();
 }

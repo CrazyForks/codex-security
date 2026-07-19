@@ -39,12 +39,12 @@ The output directory must be outside the scanned repository. When SARIF is produ
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
 target, output, and runtime options.
 
-The Agents engine mounts the repository and bundled scan skills/helpers
-read-only in a network-disabled `node:22-bookworm` Docker workspace, writes
-results directly to the requested output directory, and delegates bounded scan
-workers through Agents SDK. This is a thin adapter intended for trusted local
-repositories: ignored files and Git metadata remain visible to the sandbox. SDK
-tracing is suppressed during the scan.
+The Agents engine stages a Git-visible, regular-file snapshot and the bundled
+scan skills/helpers into a network-disabled `node:22-bookworm` Docker
+workspace, mounts them read-only, and delegates bounded scan workers through
+Agents SDK. Ignored files, symlinks, and Git credentials/history are excluded;
+bounded results are copied to the requested output directory. SDK tracing and
+sensitive debug logging are suppressed during the scan.
 Docker must be running for the default Agents engine. Use
 `--engine codex` to run the existing Codex-backed standard scan when needed;
 diff, working-tree, deep, `--codex`, and native Windows scans select it

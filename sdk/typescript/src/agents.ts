@@ -1,8 +1,18 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import OpenAI from "openai";
 import {
@@ -18,8 +28,6 @@ import {
   Capabilities,
   Manifest,
   SandboxAgent,
-  dir,
-  file,
   mount,
 } from "@openai/agents/sandbox";
 import {
@@ -55,7 +63,6 @@ import {
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
-  repositoryRevision,
   resolveRepositoryPath,
   type NormalizedTarget,
   type ScanTarget,
@@ -69,8 +76,15 @@ const DEFAULT_WORKER_MAX_TURNS = 100;
 const DEFAULT_DOCKER_IMAGE = "node:22-bookworm";
 const REQUIRED_PLUGIN_DIRECTORIES = ["references", "schemas", "scripts"];
 const OPTIONAL_PLUGIN_DIRECTORIES = [".codex-plugin", "examples", "preflight"];
+const MAX_OUTPUT_ENTRIES = 20_000;
+const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
 let tracingUsers = 0;
 let tracingWasDisabled = false;
+let savedModelLogGuard: string | undefined;
+let savedToolLogGuard: string | undefined;
+let timeoutUsers = 0;
+let savedSetTimeout: typeof setTimeout | undefined;
 
 export type AgentsReasoningEffort =
   | "none"
@@ -104,6 +118,7 @@ export interface AgentsScanRequest {
   pluginRoot: string;
   python: string;
   sandboxBaseDir: string;
+  sandboxInputRoot: string;
   repositoryRevision: string | null;
   repositoryIdentity: string;
   apiKey: string;
@@ -131,7 +146,6 @@ interface ClientDependencies {
   environment: ProcessEnvironment;
   runAgents?: (request: AgentsScanRequest) => Promise<AgentsScanSummary>;
   prepareOutputDir?: typeof prepareOutputDir;
-  repositoryRevision?: typeof repositoryRevision;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = { environment: process.env };
@@ -220,60 +234,75 @@ export class AgentsSecurity {
         (path) => requireOutsideRepository(protectedRoot, path),
         outputMetadata,
       );
-      const revision = await (
-        this.#dependencies.repositoryRevision ?? repositoryRevision
-      )(repo, controller.signal);
       const repositoryIdentity = `codex-security-target/v1:sha256:${createHash(
         "sha256",
       )
         .update(repo.normalize("NFC"))
         .digest("hex")}`;
-      const summary = await (this.#dependencies.runAgents ?? runAgentsScan)({
-        repository: repo,
-        target,
-        scanDir,
-        pluginRoot,
-        python: this.config.pythonPath ?? "python3",
-        sandboxBaseDir: staging,
-        repositoryRevision: revision,
-        repositoryIdentity,
-        apiKey,
-        baseURL: environmentValue(
-          this.#dependencies.environment,
-          "OPENAI_BASE_URL",
-        ),
-        organization: environmentValue(
-          this.#dependencies.environment,
-          "OPENAI_ORG_ID",
-        ),
-        project: environmentValue(
-          this.#dependencies.environment,
-          "OPENAI_PROJECT_ID",
-        ),
-        model: nonEmpty(this.config.model, "model") ?? DEFAULT_MODEL,
-        reasoningEffort:
-          this.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
-        maxTurns: positiveInteger(this.config.maxTurns, DEFAULT_MAX_TURNS),
-        workerMaxTurns: positiveInteger(
-          this.config.workerMaxTurns,
-          DEFAULT_WORKER_MAX_TURNS,
-        ),
-        signal: controller.signal,
+      const stagedRepository = join(staging, "repository");
+      const stagedPlugin = join(staging, "plugin");
+      const sandboxOutput = join(staging, "output");
+      const sandboxInputRoot = join(staging, "scan-inputs");
+      await stageRepository(repo, stagedRepository, controller.signal);
+      await stageTree(pluginRoot, stagedPlugin, controller.signal, {
+        skip: (name) => name === "__pycache__" || name.endsWith(".pyc"),
       });
-      const currentRevision = await (
-        this.#dependencies.repositoryRevision ?? repositoryRevision
-      )(repo, controller.signal);
-      if (revision !== currentRevision) {
-        throw new InvalidTargetError(
-          `Repository revision changed during scan: ${repo}`,
-        );
+      await mkdir(sandboxOutput, { mode: 0o700 });
+      await mkdir(sandboxInputRoot, { mode: 0o700 });
+      await writeFile(
+        join(sandboxInputRoot, "target-paths.json"),
+        `${JSON.stringify(target.kind === "paths" ? target.paths : ["."])}\n`,
+        { flag: "wx", mode: 0o400 },
+      );
+      await writeFile(
+        join(sandboxInputRoot, "repository-identity.json"),
+        `${JSON.stringify({ targetId: repositoryIdentity })}\n`,
+        { flag: "wx", mode: 0o400 },
+      );
+      let summary: AgentsScanSummary;
+      try {
+        summary = await (this.#dependencies.runAgents ?? runAgentsScan)({
+          repository: stagedRepository,
+          target,
+          scanDir: sandboxOutput,
+          pluginRoot: stagedPlugin,
+          python: this.config.pythonPath ?? "python3",
+          sandboxBaseDir: staging,
+          sandboxInputRoot,
+          repositoryRevision: null,
+          repositoryIdentity,
+          apiKey,
+          baseURL: environmentValue(
+            this.#dependencies.environment,
+            "OPENAI_BASE_URL",
+          ),
+          organization: environmentValue(
+            this.#dependencies.environment,
+            "OPENAI_ORG_ID",
+          ),
+          project: environmentValue(
+            this.#dependencies.environment,
+            "OPENAI_PROJECT_ID",
+          ),
+          model: nonEmpty(this.config.model, "model") ?? DEFAULT_MODEL,
+          reasoningEffort:
+            this.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+          maxTurns: positiveInteger(this.config.maxTurns, DEFAULT_MAX_TURNS),
+          workerMaxTurns: positiveInteger(
+            this.config.workerMaxTurns,
+            DEFAULT_WORKER_MAX_TURNS,
+          ),
+          signal: controller.signal,
+        });
+      } finally {
+        await copyStagedOutput(sandboxOutput, scanDir);
       }
       return await collectAgentsResult(
         scanDir,
         pluginRoot,
         {
           repository: repo,
-          repositoryRevision: revision,
+          repositoryRevision: null,
           repositoryIdentity,
           target,
           mode: "standard",
@@ -287,17 +316,19 @@ export class AgentsSecurity {
         throw new ScanInterruptedError(
           `Codex Security scan was interrupted${scanDir ? `; partial output remains at ${scanDir}` : ""}.`,
           scanDir,
-          { cause: error },
         );
       }
       throw error;
     } finally {
       removeAbort();
       this.#controllers.delete(controller);
-      this.#runs.delete(running);
-      finish();
-      if (staging !== undefined) {
-        await rm(staging, { recursive: true, force: true });
+      try {
+        if (staging !== undefined) {
+          await rm(staging, { recursive: true, force: true });
+        }
+      } finally {
+        this.#runs.delete(running);
+        finish();
       }
     }
   }
@@ -317,12 +348,19 @@ export async function runAgentsScan(
   request: AgentsScanRequest,
   dependencies: AgentsRuntimeDependencies = {},
 ): Promise<AgentsScanSummary> {
+  if (request.target.kind !== "repository" && request.target.kind !== "paths") {
+    throw new InvalidTargetError(
+      "Agents SDK scans support repository and path targets only; use the Codex engine for diff scans.",
+    );
+  }
   const manifest = await agentsManifest(request);
-  const session = await new DockerSandboxClient({
+  const client = new DockerSandboxClient({
     image: DEFAULT_DOCKER_IMAGE,
     workspaceBaseDir: request.sandboxBaseDir,
-  }).create({ manifest });
+  });
+  const session = await createDockerSession(client, manifest, request.signal);
   const releaseTracing = suppressAgentsTracing();
+  const releaseTimeouts = suppressReferencedSandboxTimeouts();
   let ownedProvider: OpenAIProvider | undefined;
   try {
     await isolateDockerSession(session);
@@ -448,11 +486,14 @@ export async function runAgentsScan(
         typeof stream.finalOutput === "string" ? stream.finalOutput : undefined,
       usage: stream.runContext.usage,
     };
+  } catch (error) {
+    throw sanitizeAgentsRuntimeFailure(error);
   } finally {
     try {
       await session.close().catch(() => undefined);
       await ownedProvider?.close().catch(() => undefined);
     } finally {
+      releaseTimeouts();
       releaseTracing();
     }
   }
@@ -465,46 +506,109 @@ function suppressAgentsTracing(): () => void {
         name: "Codex Security tracing state probe",
       }) instanceof NoopTrace;
     setTracingDisabled(true);
+    savedModelLogGuard = process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
+    savedToolLogGuard = process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+    process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1";
+    process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1";
   }
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    if (--tracingUsers === 0) setTracingDisabled(tracingWasDisabled);
+    if (--tracingUsers !== 0) return;
+    setTracingDisabled(tracingWasDisabled);
+    restoreEnvironmentValue(
+      "OPENAI_AGENTS_DONT_LOG_MODEL_DATA",
+      savedModelLogGuard,
+    );
+    restoreEnvironmentValue(
+      "OPENAI_AGENTS_DONT_LOG_TOOL_DATA",
+      savedToolLogGuard,
+    );
   };
+}
+
+function suppressReferencedSandboxTimeouts(): () => void {
+  if (timeoutUsers++ === 0) {
+    const previous = globalThis.setTimeout;
+    savedSetTimeout = previous;
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      const timeout = previous(...args);
+      if (
+        /[\\/]sandbox[\\/]sandboxes[\\/]unixLocal\./.test(
+          new Error().stack ?? "",
+        )
+      ) {
+        timeout.unref();
+      }
+      return timeout;
+    }) as typeof setTimeout;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--timeoutUsers !== 0) return;
+    if (savedSetTimeout !== undefined) globalThis.setTimeout = savedSetTimeout;
+    savedSetTimeout = undefined;
+  };
+}
+
+function restoreEnvironmentValue(
+  name: string,
+  value: string | undefined,
+): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+async function createDockerSession(
+  client: DockerSandboxClient,
+  manifest: Manifest,
+  signal: AbortSignal,
+): Promise<DockerSandboxSession> {
+  if (signal.aborted)
+    throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  const creation = client.create({ manifest });
+  let removeAbort = (): void => undefined;
+  const interrupted = new Promise<never>((_, reject) => {
+    const abort = (): void => {
+      void creation.then((session) => session.close()).catch(() => undefined);
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    removeAbort = () => signal.removeEventListener("abort", abort);
+  });
+  try {
+    return await Promise.race([creation, interrupted]);
+  } finally {
+    removeAbort();
+  }
+}
+
+function sanitizeAgentsRuntimeFailure(error: unknown): unknown {
+  if (typeof error !== "object" || error === null || !("state" in error)) {
+    return error;
+  }
+  const name =
+    "name" in error && typeof error.name === "string"
+      ? error.name
+      : "runtime error";
+  return new IncompleteScanError(
+    `Agents SDK scan ended without a complete result (${name}).`,
+  );
 }
 
 export async function agentsManifest(
   request: Pick<
     AgentsScanRequest,
-    | "repository"
-    | "target"
-    | "scanDir"
-    | "pluginRoot"
-    | "python"
-    | "repositoryIdentity"
+    "repository" | "scanDir" | "pluginRoot" | "python" | "sandboxInputRoot"
   >,
 ): Promise<Manifest> {
-  const entries: Record<
-    string,
-    ReturnType<typeof mount> | ReturnType<typeof dir>
-  > = {
+  const entries: Record<string, ReturnType<typeof mount>> = {
     repository: mount({ source: request.repository, readOnly: true }),
     output: mount({ source: request.scanDir, readOnly: false }),
-    "scan-inputs": dir({
-      children: {
-        "target-paths.json": file({
-          permissions: 0o400,
-          content: `${JSON.stringify(
-            request.target.kind === "paths" ? request.target.paths : ["."],
-          )}\n`,
-        }),
-        "repository-identity.json": file({
-          permissions: 0o400,
-          content: `${JSON.stringify({ targetId: request.repositoryIdentity })}\n`,
-        }),
-      },
-    }),
+    "scan-inputs": mount({ source: request.sandboxInputRoot, readOnly: true }),
   };
   for (const name of REQUIRED_PLUGIN_DIRECTORIES) {
     const source = join(request.pluginRoot, name);
@@ -544,6 +648,7 @@ export async function agentsManifest(
       { path: request.repository, readOnly: true },
       { path: request.pluginRoot, readOnly: true },
       { path: request.scanDir, readOnly: false },
+      { path: request.sandboxInputRoot, readOnly: true },
     ],
     environment: {
       PYTHON: request.python,
@@ -582,7 +687,7 @@ export function agentsScanPrompt(
     "Plugin root: plugin",
     "Use this exact scan directory for all output: output",
     request.repositoryRevision === null
-      ? "Repository identity: unversioned directory snapshot."
+      ? "Repository identity: Git-visible directory snapshot; history metadata is unavailable."
       : `Repository revision: ${request.repositoryRevision}`,
     `Repository targetId: ${request.repositoryIdentity}. Use this exact stable targetId in scan-manifest.json.`,
     ...target,
@@ -590,6 +695,175 @@ export function agentsScanPrompt(
     "The Agents runtime provides one ranking-worker slot; create the static rank-worker plan with --usable-worker-slots 1 and do not wait for a Codex capability-preflight result.",
     'Complete and seal the canonical JSON contract with "$PYTHON" plugin/scripts/finalize_scan_contract.py --scan-dir output --source-root repository before returning.',
   ].join("\n");
+}
+
+async function stageRepository(
+  source: string,
+  destination: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const environment = {
+    ...process.env,
+    OPENAI_API_KEY: undefined,
+    CODEX_API_KEY: undefined,
+    GIT_NO_LAZY_FETCH: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
+  };
+  const isGit = await execFile(
+    "git",
+    [
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "rev-parse",
+      "--is-inside-work-tree",
+    ],
+    {
+      cwd: source,
+      encoding: "utf8",
+      env: environment,
+      signal,
+      timeout: 30_000,
+    },
+  )
+    .then(({ stdout }) => stdout.trim() === "true")
+    .catch(() => false);
+  if (!isGit) {
+    await stageTree(source, destination, signal, {
+      skip: (name) =>
+        name === ".git" ||
+        name === ".env" ||
+        name.startsWith(".env.") ||
+        name.endsWith(".pem") ||
+        name.endsWith(".key"),
+    });
+    return;
+  }
+  const { stdout } = await execFile(
+    "git",
+    [
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "--deduplicate",
+      "-z",
+      "--",
+      ".",
+    ],
+    {
+      cwd: source,
+      encoding: "buffer",
+      env: environment,
+      signal,
+      timeout: 120_000,
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+  await mkdir(destination, { recursive: true, mode: 0o700 });
+  for (const path of stdout.toString("utf8").split("\0")) {
+    if (path.length === 0) continue;
+    if (
+      path.startsWith("/") ||
+      path.includes("\\") ||
+      path
+        .split("/")
+        .some((part) => part === "" || part === "." || part === "..")
+    ) {
+      throw new InvalidTargetError(
+        `Git returned an unsafe repository path: ${path}`,
+      );
+    }
+    throwIfAborted(signal);
+    const entry = join(source, path);
+    const metadata = await lstat(entry).catch(() => null);
+    if (metadata?.isFile() !== true || metadata.isSymbolicLink()) continue;
+    const target = join(destination, path);
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    await copyFile(entry, target);
+    await chmod(target, metadata.mode & 0o777);
+  }
+}
+
+async function stageTree(
+  source: string,
+  destination: string,
+  signal: AbortSignal,
+  options: { skip?: (name: string) => boolean } = {},
+): Promise<void> {
+  throwIfAborted(signal);
+  await mkdir(destination, { recursive: true, mode: 0o700 });
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    if (options.skip?.(entry.name) === true) continue;
+    const from = join(source, entry.name);
+    const to = join(destination, entry.name);
+    const metadata = await lstat(from);
+    if (metadata.isSymbolicLink()) continue;
+    if (metadata.isDirectory()) {
+      await stageTree(from, to, signal, options);
+      continue;
+    }
+    if (!metadata.isFile()) continue;
+    throwIfAborted(signal);
+    await copyFile(from, to);
+    await chmod(to, metadata.mode & 0o777);
+  }
+}
+
+async function copyStagedOutput(
+  source: string,
+  destination: string,
+): Promise<void> {
+  let entries = 0;
+  let bytes = 0;
+  const copy = async (
+    from: string,
+    to: string,
+    depth: number,
+  ): Promise<void> => {
+    if (depth > 128 || ++entries > MAX_OUTPUT_ENTRIES) {
+      throw new OutputDirectoryError(
+        "Agents SDK scan output exceeds the entry limit.",
+      );
+    }
+    const metadata = await lstat(from);
+    if (metadata.isDirectory()) {
+      await mkdir(to, { recursive: true, mode: 0o700 });
+      for (const entry of await readdir(from, { withFileTypes: true })) {
+        await copy(join(from, entry.name), join(to, entry.name), depth + 1);
+      }
+      return;
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new OutputDirectoryError(
+        "Agents SDK scan output contains a non-regular file.",
+      );
+    }
+    if (metadata.size > MAX_OUTPUT_FILE_BYTES) {
+      throw new OutputDirectoryError(
+        "Agents SDK scan output contains an oversized file.",
+      );
+    }
+    bytes += metadata.size;
+    if (bytes > MAX_OUTPUT_BYTES) {
+      throw new OutputDirectoryError(
+        "Agents SDK scan output exceeds the total size limit.",
+      );
+    }
+    await copyFile(from, to);
+  };
+  await copy(source, destination, 0);
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted)
+    throw signal.reason ?? new DOMException("Aborted", "AbortError");
 }
 
 async function isolateDockerSession(
@@ -670,7 +944,9 @@ async function collectAgentsResult(
       "exports/results.sarif",
       signal,
     );
-  } catch {}
+  } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
+  }
   const turnResult: TurnResultMetadata = {
     id: summary.responseId ?? `agents_${manifest.scan.id}`,
     engine: "agents",
@@ -697,8 +973,9 @@ async function dockerWorkspaceRoot(
     environment,
     "CODEX_SECURITY_DOCKER_WORKSPACE_ROOT",
   );
-  const candidate =
-    configured ?? join(homedir(), ".cache", "codex-security", "sandboxes");
+  const candidate = resolve(
+    configured ?? join(homedir(), ".cache", "codex-security", "sandboxes"),
+  );
   requireOutsideRepository(protectedRoot, candidate);
   await mkdir(candidate, { recursive: true, mode: 0o700 });
   const root = await realpath(candidate);

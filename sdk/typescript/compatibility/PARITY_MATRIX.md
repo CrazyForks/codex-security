@@ -76,18 +76,20 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | SIGTERM                        | empty                                                      | termination and partial-output location  | 143  |
 
 Standard repository/path CLI scans use `@openai/agents@0.13.5`. The thin Agents
-adapter mounts repository and plugin directories read-only and the output
-directory writable in a network-disabled `node:22-bookworm` Docker sandbox,
-runs the `security-scan` skill with one delegated ranking worker, and validates
-the canonical output contract against a stable repository identity. SDK tracing
-is suppressed during the scan. It requires
-an API key and does not consume file-backed Codex authentication.
+adapter stages Git-visible regular files and the plugin into a
+network-disabled `node:22-bookworm` Docker sandbox, excludes ignored files,
+symlinks, and Git credentials/history, and mounts the inputs read-only. Bounded
+output is copied to the requested directory. It runs the `security-scan` skill
+with one delegated ranking worker and validates the canonical output contract
+against a stable repository identity. SDK tracing and sensitive debug logging
+are suppressed. It requires an API key and does not consume file-backed Codex
+authentication.
 
-The adapter deliberately does not duplicate Git filtering, source staging, or
-resource management. Ignored files, symlinks, and Git metadata are visible in
-the read-only repository mount, and Docker-host limits apply; use it with
-trusted local repositories. Native Windows paths route to Codex; WSL can be
-used for Agents execution. Docker workspaces default to
+Git-backed targets are deliberately treated as directory snapshots, so history
+and advisory lookup is unavailable; unversioned targets omit common `.env` and
+key files but remain trusted-local input. Docker-host limits apply. Native
+Windows paths route to Codex; WSL can be used for Agents execution. Docker
+workspaces default to
 `~/.cache/codex-security/sandboxes`; set
 `CODEX_SECURITY_DOCKER_WORKSPACE_ROOT` when a custom Docker mount policy needs a
 different shared directory.

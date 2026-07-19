@@ -42,20 +42,21 @@ repository and path targets. The output directory must be outside the scanned
 repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
-The default Agents engine uses the SDK Docker sandbox directly: repository and
-plugin directories are mounted read-only, the requested output directory is
-mounted writable, and network access is disabled before tool execution. The
-standard `security-scan` skill runs with one bounded delegated ranking worker
-and preserves the existing pool-plan, receipt, and canonical output contract.
-A stable one-way-hashed repository identity is bound during validation, and SDK
-tracing is suppressed for the duration of the scan.
+The default Agents engine stages a compact Git-visible, regular-file snapshot
+and the plugin into the SDK Docker workspace, mounts them read-only, and
+disables network access before tool execution. Ignored files, symlinks, and Git
+credentials/history are excluded. Results are size/type bounded and copied to
+the requested output directory. The standard `security-scan` skill runs with
+one bounded delegated ranking worker and preserves the existing pool-plan,
+receipt, and canonical output contract. A stable one-way-hashed repository
+identity is bound during validation, while SDK tracing and sensitive debug
+logging are suppressed.
 
-This intentionally avoids a second Git, staging, and artifact-copy
-implementation in the CLI. It is a trusted-local-repository adapter, not an
-adversarial multi-tenant sandbox: ignored files, symlinks, and Git metadata are
-visible inside the read-only repository mount, and resource limits are owned by
-the Docker host. `--model`, `--reasoning-effort`, `--max-turns`, and
-`--worker-max-turns` control the Agents workflow.
+This intentionally keeps staging small: Git-backed targets are treated as
+directory snapshots, so history/advisory lookup is unavailable; unversioned
+directories omit common `.env` and key files but remain a trusted-local input.
+Docker-host resource limits apply. `--model`, `--reasoning-effort`,
+`--max-turns`, and `--worker-max-turns` control the Agents workflow.
 
 Docker workspaces default to `~/.cache/codex-security/sandboxes`, which works with
 Docker Desktop and Colima's default shared-user-directory mount. Set

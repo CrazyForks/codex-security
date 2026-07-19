@@ -31,6 +31,8 @@ import {
   DiffTarget,
   InvalidTargetError,
   ScanInterruptedError,
+  IncompleteScanError,
+  OutputDirectoryError,
   agentsManifest,
   agentsScanPrompt,
   runAgentsScan,
@@ -68,6 +70,7 @@ function request(root: string): AgentsScanRequest {
     pluginRoot: PLUGIN_ROOT,
     python: "python3",
     sandboxBaseDir: join(root, "workspace"),
+    sandboxInputRoot: join(root, "scan-inputs"),
     repositoryRevision: "deadbeef",
     repositoryIdentity: `codex-security-target/v1:sha256:${"a".repeat(64)}`,
     apiKey: "synthetic-agents-key",
@@ -88,19 +91,25 @@ async function completedScan(scanDir: string, targetId: string): Promise<void> {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
     scan: {
       producer: { version: string };
-      target: { targetId: string };
+      target: Record<string, unknown>;
       sealedAt?: string;
       artifacts?: unknown[];
     };
   };
   manifest.scan.producer.version = "0.1.14";
-  manifest.scan.target.targetId = targetId;
+  manifest.scan.target = {
+    kind: "directory_snapshot",
+    targetId,
+    displayName: "repository",
+    snapshotDigest: `codex-security-snapshot/v1:sha256:${"b".repeat(64)}`,
+  };
   delete manifest.scan.sealedAt;
   delete manifest.scan.artifacts;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   execFileSync(
     "python3",
     [
+      "-B",
       join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
       "--scan-dir",
       scanDir,
@@ -115,10 +124,8 @@ describe("Agents SDK thin scan adapter", () => {
     const value = request(root);
     await mkdir(value.repository);
     await mkdir(value.scanDir);
-    const manifest = await agentsManifest({
-      ...value,
-      target: { kind: "paths", paths: ["src", "tests"] },
-    });
+    await mkdir(value.sandboxInputRoot);
+    const manifest = await agentsManifest(value);
     expect(manifest.root).toBe("/workspace");
     expect(manifest.entries["repository"]).toMatchObject({
       type: "mount",
@@ -129,6 +136,11 @@ describe("Agents SDK thin scan adapter", () => {
       type: "mount",
       source: value.scanDir,
       readOnly: false,
+    });
+    expect(manifest.entries["scan-inputs"]).toMatchObject({
+      type: "mount",
+      source: value.sandboxInputRoot,
+      readOnly: true,
     });
     for (const name of ["scripts", "references", "schemas", "skills"]) {
       expect(manifest.entries[`plugin/${name}`]).toMatchObject({
@@ -195,6 +207,12 @@ describe("Agents SDK thin scan adapter", () => {
     ).rejects.toBeInstanceOf(InvalidTargetError);
     expect(reached).toBe(false);
     await client.close();
+    await expect(
+      runAgentsScan({
+        ...request(root),
+        target: { kind: "refs", base: "base", head: "head", paths: [] },
+      }),
+    ).rejects.toBeInstanceOf(InvalidTargetError);
   });
 
   test("runs the standard adapter and validates the canonical contract and stable target identity", async () => {
@@ -204,6 +222,18 @@ describe("Agents SDK thin scan adapter", () => {
     const scanDir = join(root, "scan");
     await mkdir(repository);
     await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+    await writeFile(
+      join(repository, ".gitignore"),
+      "private-generated/\n.env\n",
+    );
+    await mkdir(join(repository, "private-generated"));
+    await writeFile(
+      join(repository, "private-generated", "secret.ts"),
+      "export const secret = 'ignored';\n",
+    );
+    await writeFile(join(repository, ".env"), "SYNTHETIC_SECRET=ignored\n");
+    execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    execFileSync("git", ["add", "app.ts", ".gitignore"], { cwd: repository });
     const identities: string[] = [];
     const client = new TestClient(
       { pluginPath: PLUGIN_ROOT, model: "gpt-test", maxTurns: 12 },
@@ -212,11 +242,21 @@ describe("Agents SDK thin scan adapter", () => {
           OPENAI_API_KEY: "synthetic-agents-key",
           CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
         },
-        repositoryRevision: async () => "deadbeef",
         runAgents: async (value: AgentsScanRequest) => {
           identities.push(value.repositoryIdentity);
-          expect(value.repository).toBe(repository);
-          expect(value.pluginRoot).toBe(await realpath(PLUGIN_ROOT));
+          expect(value.repository).not.toBe(repository);
+          expect(value.pluginRoot).not.toBe(await realpath(PLUGIN_ROOT));
+          expect(existsSync(join(value.repository, ".git"))).toBe(false);
+          expect(existsSync(join(value.repository, ".env"))).toBe(false);
+          expect(
+            existsSync(
+              join(value.repository, "private-generated", "secret.ts"),
+            ),
+          ).toBe(false);
+          expect(await readFile(join(value.repository, "app.ts"), "utf8")).toBe(
+            "export const ok = true;\n",
+          );
+          expect(value.repositoryRevision).toBeNull();
           expect(value.python).toBe("python3");
           expect(value.sandboxBaseDir.startsWith(`${workspace}/`)).toBe(true);
           await completedScan(value.scanDir, value.repositoryIdentity);
@@ -259,7 +299,6 @@ describe("Agents SDK thin scan adapter", () => {
           OPENAI_API_KEY: "synthetic-agents-key",
           CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
         },
-        repositoryRevision: async () => "deadbeef",
         runAgents: async (value: AgentsScanRequest) => {
           await writeFile(join(value.scanDir, "partial.txt"), "partial\n");
           controller.abort();
@@ -283,6 +322,41 @@ describe("Agents SDK thin scan adapter", () => {
     }
   });
 
+  test("bounds staged output before loading the canonical contract", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspace = join(root, "workspaces");
+    await mkdir(repository);
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          execFileSync("truncate", [
+            "-s",
+            String(64 * 1024 * 1024 + 1),
+            join(value.scanDir, "scan-manifest.json"),
+          ]);
+          return { finalResponse: "complete" };
+        },
+      },
+    );
+    try {
+      await expect(client.run(repository)).rejects.toBeInstanceOf(
+        OutputDirectoryError,
+      );
+      expect(await readdir(workspace)).toHaveLength(1);
+      expect((await readdir(workspace))[0]!).toStartWith(
+        "codex-security-repository-",
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
   test.skipIf(process.platform === "win32")(
     "uses the SDK Docker runner, loads the scan skill, delegates a worker, and disconnects the network",
     async () => {
@@ -293,6 +367,15 @@ describe("Agents SDK thin scan adapter", () => {
       await mkdir(value.repository);
       await mkdir(value.scanDir);
       await mkdir(value.sandboxBaseDir);
+      await mkdir(value.sandboxInputRoot);
+      await writeFile(
+        join(value.sandboxInputRoot, "target-paths.json"),
+        '["."]\n',
+      );
+      await writeFile(
+        join(value.sandboxInputRoot, "repository-identity.json"),
+        `${JSON.stringify({ targetId: value.repositoryIdentity })}\n`,
+      );
       await mkdir(bin);
       await writeFile(
         join(value.repository, "app.ts"),
@@ -316,6 +399,12 @@ describe("Agents SDK thin scan adapter", () => {
         getGlobalTraceProvider().createTrace({ name: "before scan" }) instanceof
         NoopTrace;
       setTracingDisabled(false);
+      const previousModelLogGuard =
+        process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
+      const previousToolLogGuard =
+        process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+      delete process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
+      delete process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
       const requests: ModelRequest[] = [];
       let coordinatorTurn = 0;
       let workerTurn = 0;
@@ -330,6 +419,8 @@ describe("Agents SDK thin scan adapter", () => {
           expect(
             getGlobalTraceProvider().createTrace({ name: "during scan" }),
           ).toBeInstanceOf(NoopTrace);
+          expect(process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"]).toBe("1");
+          expect(process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"]).toBe("1");
           requests.push(modelRequest);
           response += 1;
           const coordinator = modelRequest.tools.some(
@@ -417,8 +508,67 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).toContain("<disconnect>");
         expect(calls).toContain("<bridge>");
         expect(existsSync(value.scanDir)).toBe(true);
+
+        const stateToken = "SYNTHETIC_SOURCE_STATE_TOKEN";
+        const stateModel: Model = {
+          async getResponse(_request: ModelRequest): Promise<ModelResponse> {
+            return { usage: new Usage(), output: [] };
+          },
+          async *getStreamedResponse(): AsyncIterable<StreamEvent> {
+            yield { type: "response_started" };
+            yield {
+              type: "response_done",
+              response: {
+                id: "resp_state",
+                usage: {
+                  requests: 1,
+                  inputTokens: 1,
+                  outputTokens: 1,
+                  totalTokens: 2,
+                },
+                output: [
+                  {
+                    id: "fc_state",
+                    type: "function_call",
+                    callId: "call_state",
+                    name: "exec_command",
+                    status: "completed",
+                    arguments: JSON.stringify({
+                      cmd: `printf %s ${stateToken}`,
+                      workdir: "/workspace",
+                      login: false,
+                      tty: false,
+                      yield_time_ms: 1000,
+                    }),
+                  },
+                ],
+              },
+            };
+          },
+        };
+        let failure: unknown;
+        try {
+          await runAgentsScan(
+            { ...value, maxTurns: 1 },
+            { modelProvider: { getModel: () => stateModel } },
+          );
+        } catch (error) {
+          failure = error;
+        }
+        expect(failure).toBeInstanceOf(IncompleteScanError);
+        expect(JSON.stringify(failure)).not.toContain(stateToken);
       } finally {
         setTracingDisabled(tracingWasDisabled);
+        if (previousModelLogGuard === undefined)
+          delete process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
+        else
+          process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] =
+            previousModelLogGuard;
+        if (previousToolLogGuard === undefined)
+          delete process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+        else
+          process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] =
+            previousToolLogGuard;
         if (previousPath === undefined) delete process.env["PATH"];
         else process.env["PATH"] = previousPath;
       }
