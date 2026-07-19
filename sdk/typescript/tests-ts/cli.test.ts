@@ -140,6 +140,7 @@ function dependencies(
     onClose?: () => void | Promise<void>;
     signals?: FakeSignals;
     result?: ScanResult;
+    platform?: NodeJS.Platform;
   } = {},
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
@@ -163,6 +164,7 @@ function dependencies(
       return security;
     },
     currentDirectory: () => "/current/repository",
+    platform: () => options.platform ?? "linux",
     now: () => 0,
     setInterval: () => ({}) as NodeJS.Timeout,
     clearInterval: () => {},
@@ -349,6 +351,8 @@ describe("CLI compatibility contract", () => {
         "--max-turns",
         "42",
         "--worker-max-turns=12",
+        "--sandbox",
+        "unsafe-local",
       ]),
     ).toMatchObject({
       repository: "repo",
@@ -357,6 +361,7 @@ describe("CLI compatibility contract", () => {
       reasoningEffort: "xhigh",
       maxTurns: 42,
       workerMaxTurns: 12,
+      sandbox: "unsafe-local",
     });
 
     expect(
@@ -952,6 +957,8 @@ describe("CLI compatibility contract", () => {
         "25",
         "--worker-max-turns",
         "7",
+        "--sandbox",
+        "docker",
       ],
     ]) {
       let engine: "agents" | "codex" | undefined;
@@ -1014,6 +1021,10 @@ describe("CLI compatibility contract", () => {
         ["scan", "repo", "--engine", "codex", "--model", "gpt-test"],
         "require the Agents SDK engine",
       ],
+      [
+        ["scan", "repo", "--engine", "codex", "--sandbox", "docker"],
+        "require the Agents SDK engine",
+      ],
     ] as const) {
       const stderr = capture();
       expect(
@@ -1021,6 +1032,35 @@ describe("CLI compatibility contract", () => {
       ).toBe(1);
       expect(stderr.text()).toContain(message);
     }
+
+    let windowsEngine: "agents" | "codex" | undefined;
+    expect(
+      await main(
+        ["scan", "repo"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          platform: "win32",
+          onEngine: (value) => {
+            windowsEngine = value;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(windowsEngine).toBe("codex");
+
+    const windowsError = capture();
+    expect(
+      await main(
+        ["scan", "repo", "--engine", "agents"],
+        capture().stream,
+        windowsError.stream,
+        dependencies({ platform: "win32" }),
+      ),
+    ).toBe(1);
+    expect(windowsError.text()).toContain(
+      "does not support native Windows host paths",
+    );
   });
 
   test("emits the human result summary", async () => {

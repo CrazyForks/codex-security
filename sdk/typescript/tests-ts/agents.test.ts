@@ -2,12 +2,14 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -73,6 +75,9 @@ function request(
     scanDir: join(repository, "..", "scan"),
     pluginRoot: PLUGIN_ROOT,
     python: process.execPath,
+    sandbox: "unsafe-local",
+    sandboxBaseDir: join(repository, ".."),
+    repositoryRevision: "deadbeef",
     apiKey: "synthetic-agents-key",
     model: "gpt-test",
     reasoningEffort: "low",
@@ -248,7 +253,9 @@ describe("Agents SDK scan workspace", () => {
           "test -f plugin/skills/security-scan/SKILL.md",
           "test -d output",
           "test \"$(tr -d '\\n' < target-paths.json)\" = '[\"src\"]'",
+          "test ! -w target-paths.json",
           'test "${CODEX_SECURITY_AGENT_RUNTIME-}" = agents-sdk',
+          'test "${CODEX_SECURITY_TARGET_PATHS_FILE-}" = target-paths.json',
           'test -z "${OPENAI_API_KEY-}"',
           'test -z "${CODEX_API_KEY-}"',
         ].join(" && "),
@@ -276,6 +283,7 @@ describe("Agents SDK scan workspace", () => {
     );
     expect(prompt).toContain("delegate_security_task");
     expect(prompt).toContain("--scopes-file target-paths.json");
+    expect(prompt).toContain("Repository revision: deadbeef");
     expect(prompt).toContain(
       '"$PYTHON" plugin/scripts/finalize_scan_contract.py',
     );
@@ -331,6 +339,67 @@ describe("Agents SDK scan workspace", () => {
           },
         },
         unsafeDestination,
+      ),
+    ).rejects.toBeInstanceOf(OutputDirectoryError);
+
+    const swappedDestination = join(root, "swapped");
+    await mkdir(swappedDestination);
+    await expect(
+      copySandboxOutput(
+        {
+          async listDir() {
+            return [
+              { name: "report.md", path: "output/report.md", type: "file" },
+            ];
+          },
+          async readFile() {
+            rmSync(swappedDestination, { recursive: true, force: true });
+            symlinkSync(destination, swappedDestination, "dir");
+            return "unexpected";
+          },
+        },
+        swappedDestination,
+      ),
+    ).rejects.toBeInstanceOf(OutputDirectoryError);
+
+    const oversizedDestination = join(root, "oversized");
+    await mkdir(oversizedDestination);
+    const oversized = new Uint8Array(64 * 1024 * 1024 + 1);
+    await expect(
+      copySandboxOutput(
+        {
+          async listDir() {
+            return [
+              {
+                name: "results.sarif",
+                path: "output/results.sarif",
+                type: "file",
+              },
+            ];
+          },
+          async readFile({ maxBytes }) {
+            return oversized.subarray(0, maxBytes);
+          },
+        },
+        oversizedDestination,
+      ),
+    ).rejects.toBeInstanceOf(OutputDirectoryError);
+
+    const redirectedDestination = join(root, "redirected");
+    symlinkSync(destination, redirectedDestination, "dir");
+    await expect(
+      copySandboxOutput(
+        {
+          async listDir() {
+            return [
+              { name: "report.md", path: "output/report.md", type: "file" },
+            ];
+          },
+          async readFile() {
+            return "unexpected";
+          },
+        },
+        redirectedDestination,
       ),
     ).rejects.toBeInstanceOf(OutputDirectoryError);
 
@@ -426,6 +495,7 @@ describe("AgentsSecurity orchestration", () => {
         reasoningEffort: "medium",
         maxTurns: 32,
         workerMaxTurns: 12,
+        sandbox: "unsafe-local",
       },
       {
         environment: {
@@ -464,6 +534,8 @@ describe("AgentsSecurity orchestration", () => {
       reasoningEffort: "medium",
       maxTurns: 32,
       workerMaxTurns: 12,
+      sandbox: "unsafe-local",
+      repositoryRevision: "deadbeef",
     });
     expect(result.threadId).toBe("resp_agents_1");
     expect(result.turnResult).toMatchObject({
@@ -476,6 +548,58 @@ describe("AgentsSecurity orchestration", () => {
     await client.close();
   });
 
+  test("stages Docker inputs under the configured shared workspace root and uses container Python", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const workspaceRoot = join(root, "docker-workspaces");
+    await mkdir(repository);
+    await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+    let captured: AgentsScanRequest | null = null;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspaceRoot,
+        },
+        repositoryRevision: async () => "deadbeef",
+        runAgents: async (value: AgentsScanRequest) => {
+          captured = value;
+          expect(await readFile(join(value.repository, "app.ts"), "utf8")).toBe(
+            "export const ok = true;\n",
+          );
+          expect(
+            await readFile(
+              join(value.pluginRoot, "scripts", "finalize_scan_contract.py"),
+              "utf8",
+            ),
+          ).toContain("def finalize_scan");
+          await writeCompletedScan(value.scanDir);
+          return { responseId: "resp_docker_1", finalResponse: "complete" };
+        },
+      },
+    );
+    await client.run(repository, { outputDir: scanDir });
+    expect(captured).toMatchObject({
+      sandbox: "docker",
+      python: "python3",
+      repositoryRevision: "deadbeef",
+    });
+    const capturedRequest = captured as unknown as AgentsScanRequest;
+    expect(capturedRequest.repository.startsWith(`${workspaceRoot}/`)).toBe(
+      true,
+    );
+    expect(capturedRequest.pluginRoot.startsWith(`${workspaceRoot}/`)).toBe(
+      true,
+    );
+    expect(capturedRequest.sandboxBaseDir.startsWith(`${workspaceRoot}/`)).toBe(
+      true,
+    );
+    expect(await readdir(workspaceRoot)).toEqual([]);
+    await client.close();
+  });
+
   test("executes the migrated skill, delegated worker, sandbox shell, and output handoff through a real Agents runner", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -485,7 +609,12 @@ describe("AgentsSecurity orchestration", () => {
     const model = new ScriptedScanModel();
     const provider: ModelProvider = { getModel: () => model };
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT, model: "gpt-scripted", maxTurns: 12 },
+      {
+        pluginPath: PLUGIN_ROOT,
+        model: "gpt-scripted",
+        maxTurns: 12,
+        sandbox: "unsafe-local",
+      },
       {
         environment: { OPENAI_API_KEY: "synthetic-agents-key" },
         resolvePluginPython: async () =>
@@ -520,6 +649,7 @@ describe("AgentsSecurity orchestration", () => {
     expect(
       model.requests.every(
         (value) =>
+          value.tracing === false &&
           !value.systemInstructions?.includes("synthetic-agents-key") &&
           !JSON.stringify(value.input).includes("synthetic-agents-key"),
       ),
@@ -534,7 +664,7 @@ describe("AgentsSecurity orchestration", () => {
     await mkdir(repository);
     const external = new AbortController();
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
+      { pluginPath: PLUGIN_ROOT, sandbox: "unsafe-local" },
       {
         environment: { OPENAI_API_KEY: "synthetic-agents-key" },
         resolvePluginPython: async () => "/managed/python",
@@ -552,6 +682,94 @@ describe("AgentsSecurity orchestration", () => {
     await expect(
       client.run(repository, { outputDir: scanDir, signal: external.signal }),
     ).rejects.toMatchObject({ name: ScanInterruptedError.name, scanDir });
+    await client.close();
+  });
+
+  test("drops repository symlinks before sandbox materialization and preserves the scan revision", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await writeFile(join(repository, "app.ts"), "export const ok = true;\n");
+    symlinkSync("app.ts", join(repository, "app-link.ts"));
+    const model = new ScriptedScanModel();
+    const provider: ModelProvider = { getModel: () => model };
+    let stagedRepository: string | undefined;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "unsafe-local", maxTurns: 12 },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-agents-key" },
+        resolvePluginPython: async () =>
+          execFileSync("python3", ["-c", "import sys; print(sys.executable)"], {
+            encoding: "utf8",
+          }).trim(),
+        repositoryRevision: async () => "deadbeef",
+        runAgents: async (value: AgentsScanRequest) => {
+          stagedRepository = value.repository;
+          expect(value.repositoryRevision).toBe("deadbeef");
+          return await runAgentsScan(value, { modelProvider: provider });
+        },
+      },
+    );
+    await client.run(repository, { outputDir: scanDir });
+    expect(stagedRepository).not.toBe(repository);
+    expect(model.requests.length).toBeGreaterThan(0);
+    await client.close();
+  });
+
+  test("rejects an output directory retargeted by the readiness callback before sandbox work", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    let runReached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "unsafe-local" },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-agents-key" },
+        resolvePluginPython: async () => "/managed/python",
+        runAgents: async () => {
+          runReached = true;
+          throw new Error("unexpected");
+        },
+      },
+    );
+    await expect(
+      client.run(repository, {
+        outputDir: scanDir,
+        onOutputDirReady: (path) => {
+          rmSync(path, { recursive: true, force: true });
+          symlinkSync(repository, path, "dir");
+        },
+      }),
+    ).rejects.toBeInstanceOf(OutputDirectoryError);
+    expect(runReached).toBe(false);
+    await client.close();
+  });
+
+  test("rejects a repository revision changed while staging before sandbox work", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let revisionReads = 0;
+    let runReached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, sandbox: "unsafe-local" },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-agents-key" },
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () =>
+          ++revisionReads === 1 ? "deadbeef" : "ffffffff",
+        runAgents: async () => {
+          runReached = true;
+          throw new Error("unexpected");
+        },
+      },
+    );
+    await expect(client.run(repository)).rejects.toBeInstanceOf(
+      InvalidTargetError,
+    );
+    expect(runReached).toBe(false);
     await client.close();
   });
 });

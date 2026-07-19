@@ -9,6 +9,7 @@ export {
 } from "./agents.js";
 export type {
   AgentsReasoningEffort,
+  AgentsSandbox,
   AgentsRuntimeDependencies,
   AgentsScanOptions,
   AgentsScanRequest,

@@ -4,7 +4,8 @@ usage: codex-security scan [-h] [--path PATH | --diff BASE | --working-tree]
                            [--plugin-path PATH] [--python PATH]
                            [--engine {agents,codex}] [--model MODEL]
                            [--reasoning-effort EFFORT] [--max-turns N]
-                           [--worker-max-turns N] [--codex KEY=VALUE]
+                           [--worker-max-turns N] [--sandbox BACKEND]
+                           [--codex KEY=VALUE]
                            [--json] [repository]
 
 positional arguments:
@@ -27,11 +28,11 @@ options:
                         when produced, is written to <scan-dir>/exports/results.sarif.
   --plugin-path PATH    Use a Codex Security plugin directory or ZIP instead
                         of the bundled plugin.
-  --python PATH         Python interpreter for the unchanged plugin runtime.
+  --python PATH         Plugin Python interpreter (in-container for Docker).
   --engine {agents,codex}
                         Execution engine. Repository/path standard scans
-                        default to Agents SDK; diff/deep and --codex scans
-                        default to Codex.
+                        default to Agents SDK; diff/deep, --codex, and native
+                        Windows scans default to Codex.
   --model MODEL         Agents SDK model (default: gpt-5.6).
   --reasoning-effort EFFORT
                         Agents SDK reasoning effort: none, minimal, low,
@@ -39,6 +40,8 @@ options:
   --max-turns N         Maximum Agents SDK coordinator turns (default: 200).
   --worker-max-turns N  Maximum turns for one delegated Agents SDK scan
                         worker (default: 100).
+  --sandbox BACKEND     Agents SDK sandbox: docker (default, isolated) or
+                        unsafe-local (development only; no host isolation).
   --codex KEY=VALUE     Override isolated Codex config with a TOML KEY=VALUE;
                         repeat as needed.
   --json                Print manifest, findings, coverage, output paths, and

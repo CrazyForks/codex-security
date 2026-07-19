@@ -8,7 +8,7 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | Historical surface                           | Supported behavior                                  | TypeScript contract                                                                               |
 | -------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `CodexSecurity(config)`                      | Eager isolated-runtime preparation; context manager | `new CodexSecurity(config)` with lazy async preparation; `await close()` / async disposal         |
-| `AgentsSecurity(config)`                     | n/a                                                 | Standard repository/path scans through OpenAI Agents SDK with local sandbox and delegated workers |
+| `AgentsSecurity(config)`                     | n/a                                                 | Standard repository/path scans using OpenAI Agents SDK with Docker sandbox and delegated workers. |
 | `AsyncCodexSecurity(config)`                 | Async mirror of the synchronous client              | Folded into the single async `CodexSecurity` class                                                |
 | `.metadata`                                  | Codex SDK runtime metadata                          | Exact aligned npm SDK/executable package names and versions                                       |
 | `.run(repository, target, mode, output_dir)` | Start, await, validate, and return a scan           | `await run(repository, options)`                                                                  |
@@ -34,6 +34,7 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | `AgentsSecurityConfig.reasoningEffort`       | n/a                                                 | Agents reasoning effort, default `high`                                                           |
 | `AgentsSecurityConfig.maxTurns`              | n/a                                                 | Coordinator turn limit, default `200`                                                             |
 | `AgentsSecurityConfig.workerMaxTurns`        | n/a                                                 | Per-worker turn limit, default `100`                                                              |
+| `AgentsSecurityConfig.sandbox`               | n/a                                                 | `docker` default; `unsafe-local` is an explicit development-only escape hatch                     |
 | n/a                                          | Explicit plugin Python interpreter                  | `pythonPath` and CLI `--python`                                                                   |
 | `ScanResult` paths/properties                | Canonical contract plus paths and turn result       | Readonly camelCase fields and path getters                                                        |
 | Contract Pydantic models                     | Typed nested documents; unknown fields retained     | TypeScript interfaces plus Ajv 2020 validation; parsed JSON objects retain unknown fields         |
@@ -53,11 +54,12 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | `--head REF`                   | Valid only with `--diff`                                                           |
 | `--base REF`                   | Valid only with `--working-tree`                                                   |
 | `--mode standard\|deep`        | Deep rejects diff targets                                                          |
-| `--engine agents\|codex`       | Standard repository/path defaults to Agents; diff/deep/`--codex` defaults to Codex |
+| `--engine agents\|codex`       | Standard repo/path defaults to Agents; diff/deep/`--codex`/Win32 defaults to Codex |
 | `--model MODEL`                | Agents model, default `gpt-5.6`                                                    |
 | `--reasoning-effort EFFORT`    | Agents reasoning effort, default `high`                                            |
 | `--max-turns N`                | Agents coordinator turn limit, default `200`                                       |
 | `--worker-max-turns N`         | Agents per-worker turn limit, default `100`                                        |
+| `--sandbox BACKEND`            | Agents sandbox: isolated `docker` by default or development-only `unsafe-local`    |
 | `--output-dir DIR`             | Must be absent or empty and outside the repository; preserved on interruption      |
 | `--plugin-path PATH`           | Plugin directory or safe ZIP override                                              |
 | repeatable `--codex KEY=VALUE` | Parse TOML literals, reject duplicate/conflicting/owned keys                       |
@@ -76,11 +78,19 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | SIGTERM                        | empty                                                      | termination and partial-output location  | 143  |
 
 Standard repository/path CLI scans use `@openai/agents@0.13.5`. The Agents
-runtime stages repository and plugin inputs in a local sandbox, uses the
+runtime stages repository and plugin inputs in a Docker-isolated
+`node:22-bookworm` sandbox, uses the
 `security-scan` skill plus an explicit delegated-worker tool, disables traces
 that could capture source/tool data, keeps API keys outside the sandbox shell,
 and validates the same canonical output contract. `AgentsSecurity` requires an
-API key and does not consume file-backed Codex authentication.
+API key and does not consume file-backed Codex authentication. Repository
+symlinks are omitted because the deterministic scan inventory never follows
+them. `unsafe-local` is explicitly opt-in and is not a host isolation boundary.
+Native Windows paths are unsupported by the Agents sandbox and route to Codex;
+WSL can be used for Agents execution. Docker staging defaults to
+`~/.cache/codex-security/sandboxes`; set
+`CODEX_SECURITY_DOCKER_WORKSPACE_ROOT` when a custom Docker mount policy needs a
+different shared directory.
 
 `@openai/codex-sdk@0.142.0` provides run, streaming, and `AbortSignal`
 cancellation. The aligned public Codex executable provides login, account-status, and

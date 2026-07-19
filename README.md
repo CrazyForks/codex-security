@@ -7,9 +7,11 @@ Run Codex Security scans from the command line or a TypeScript application.
 
 ## Requirements
 
-The SDK and CLI require Node.js 22 or later. Running a scan also requires a
-Python interpreter for the bundled Codex Security scan helpers. Python is not
-needed to install the package or run `--help` and `--version`.
+The SDK and CLI require Node.js 22 or later. Standard Agents scans require a
+running Docker daemon; the default sandbox image includes Python for the
+bundled scan helpers. Codex and `unsafe-local` scans require a host Python
+interpreter. Docker and Python are not needed to install the package or run
+`--help` and `--version`.
 
 Standard repository and path scans run through the OpenAI Agents SDK by
 default. Set `OPENAI_API_KEY` or `CODEX_API_KEY` before scanning. Diff and deep
@@ -38,11 +40,14 @@ The output directory must be outside the scanned repository. When SARIF is produ
 target, output, and runtime options.
 
 The Agents engine copies the target and the bundled scan skills/helpers into a
-local sandbox workspace, delegates bounded scan workers through Agents SDK, and
-copies only generated output back to the requested scan directory. Model API
-credentials are kept out of the sandbox shell. Use `--engine codex` to run the
-existing Codex-backed standard scan when needed; diff, working-tree, deep, and
-`--codex` scans select it automatically.
+Docker-isolated `node:22-bookworm` workspace, delegates bounded scan workers
+through Agents SDK, and copies only generated output back to the requested scan
+directory. Model API credentials are kept out of the sandbox shell. Docker must
+be running for the default Agents engine. `--sandbox unsafe-local` is available
+only for trusted local development and does not isolate the host. Use
+`--engine codex` to run the existing Codex-backed standard scan when needed;
+diff, working-tree, deep, `--codex`, and native Windows scans select it
+automatically.
 
 ## TypeScript SDK
 

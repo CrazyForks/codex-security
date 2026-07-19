@@ -1,15 +1,22 @@
 import { randomUUID } from "node:crypto";
 import {
+  cp,
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { basename, join, sep } from "node:path";
-import { tmpdir } from "node:os";
-import { OpenAIProvider, Runner, type ModelProvider } from "@openai/agents";
+import { basename, join, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import {
+  OpenAIProvider,
+  Runner,
+  setTracingDisabled,
+  type ModelProvider,
+} from "@openai/agents";
 import {
   Capabilities,
   Manifest,
@@ -21,6 +28,7 @@ import {
   type SandboxSessionLike,
 } from "@openai/agents/sandbox";
 import {
+  DockerSandboxClient,
   UnixLocalSandboxClient,
   localDirLazySkillSource,
 } from "@openai/agents/sandbox/local";
@@ -45,6 +53,7 @@ import {
   resolvePluginPath,
   resolvePluginPython,
   validateOutputDir,
+  validatePreparedOutputDir,
   type ProcessEnvironment,
 } from "./runtime.js";
 import {
@@ -58,6 +67,7 @@ import {
 } from "./targets.js";
 
 const DEFAULT_MODEL = "gpt-5.6";
+const DEFAULT_DOCKER_IMAGE = "node:22-bookworm";
 const DEFAULT_REASONING_EFFORT: AgentsReasoningEffort = "high";
 const DEFAULT_MAX_TURNS = 200;
 const DEFAULT_WORKER_MAX_TURNS = 100;
@@ -84,6 +94,8 @@ export type AgentsReasoningEffort =
   | "xhigh"
   | "max";
 
+export type AgentsSandbox = "docker" | "unsafe-local";
+
 export interface AgentsSecurityConfig {
   pluginPath?: string;
   pythonPath?: string;
@@ -91,6 +103,7 @@ export interface AgentsSecurityConfig {
   reasoningEffort?: AgentsReasoningEffort;
   maxTurns?: number;
   workerMaxTurns?: number;
+  sandbox?: AgentsSandbox;
 }
 
 export interface AgentsScanOptions {
@@ -106,6 +119,9 @@ export interface AgentsScanRequest {
   scanDir: string;
   pluginRoot: string;
   python: string;
+  sandbox: AgentsSandbox;
+  sandboxBaseDir: string;
+  repositoryRevision: string | null;
   apiKey: string;
   baseURL?: string;
   organization?: string;
@@ -187,6 +203,11 @@ export class AgentsSecurity {
           "Agents SDK scans support repository and path targets only; use the Codex engine for diff scans.",
         );
       }
+      if (process.platform === "win32") {
+        throw new CodexSecurityError(
+          "The Agents SDK sandbox does not support native Windows host paths; use the Codex engine or run the Agents engine from WSL.",
+        );
+      }
       const protectedRoot =
         (await enclosingGitWorktreeRoot(repo, controller.signal)) ?? repo;
       const repositoryMetadata = await lstat(repo);
@@ -210,8 +231,21 @@ export class AgentsSecurity {
           "Agents SDK scans require OPENAI_API_KEY or CODEX_API_KEY. File-backed Codex authentication is available only with the Codex engine.",
         );
       }
+      const sandbox = this.config.sandbox ?? "docker";
+      if (sandbox !== "docker" && sandbox !== "unsafe-local") {
+        throw new CodexSecurityError(
+          "Agents SDK sandbox must be docker or unsafe-local.",
+        );
+      }
+      const stagingRoot =
+        sandbox === "docker"
+          ? await dockerWorkspaceRoot(
+              this.#dependencies.environment,
+              protectedRoot,
+            )
+          : temporaryRoot;
       staging = await mkdtemp(
-        join(temporaryRoot, "codex-security-agents-runtime-"),
+        join(stagingRoot, "codex-security-agents-runtime-"),
       );
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,
@@ -219,13 +253,16 @@ export class AgentsSecurity {
         controller.signal,
       );
       const plugin = await pluginMetadata(pluginRoot);
-      const python = await (
-        this.#dependencies.resolvePluginPython ?? resolvePluginPython
-      )({
-        configuredPath: this.config.pythonPath,
-        environment: withoutApiKeys(this.#dependencies.environment),
-        signal: controller.signal,
-      });
+      const python =
+        sandbox === "docker"
+          ? nonEmpty(this.config.pythonPath, "pythonPath") ?? "python3"
+          : await (
+              this.#dependencies.resolvePluginPython ?? resolvePluginPython
+            )({
+              configuredPath: this.config.pythonPath,
+              environment: withoutApiKeys(this.#dependencies.environment),
+              signal: controller.signal,
+            });
       check();
       const currentRepository = await normalizeRepository(
         repositoryPath,
@@ -272,15 +309,51 @@ export class AgentsSecurity {
       );
       requireOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
+      const scanDirectoryMetadata = await lstat(scanDir);
       options.onOutputDirReady?.(scanDir);
+      scanDir = await validatePreparedOutputDir(
+        scanDir,
+        (path) => requireOutsideRepository(protectedRoot, path),
+        scanDirectoryMetadata,
+      );
+      check();
+
+      const expectedRevision = await (
+        this.#dependencies.repositoryRevision ?? repositoryRevision
+      )(repo, controller.signal);
+      const stagedRepository = await stageRepositoryWithoutSymbolicLinks(
+        repo,
+        staging,
+        controller.signal,
+        sandbox === "docker",
+      );
+      const stagedPlugin =
+        sandbox === "docker"
+          ? await stageTreeWithoutSymbolicLinks(
+              pluginRoot,
+              join(staging, "plugin-input"),
+              controller.signal,
+            )
+          : pluginRoot;
+      const currentRevision = await (
+        this.#dependencies.repositoryRevision ?? repositoryRevision
+      )(repo, controller.signal);
+      if (currentRevision !== expectedRevision) {
+        throw new InvalidTargetError(
+          `Repository revision changed during scan preparation: ${repo}`,
+        );
+      }
       check();
 
       const summary = await (this.#dependencies.runAgents ?? runAgentsScan)({
-        repository: repo,
+        repository: stagedRepository,
         target,
         scanDir,
-        pluginRoot,
+        pluginRoot: stagedPlugin,
         python,
+        sandbox,
+        sandboxBaseDir: staging,
+        repositoryRevision: expectedRevision,
         apiKey,
         baseURL: environmentValue(
           this.#dependencies.environment,
@@ -307,9 +380,7 @@ export class AgentsSecurity {
       check();
       const expectation: ScanExpectation = {
         repository: repo,
-        repositoryRevision: await (
-          this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(repo, controller.signal),
+        repositoryRevision: expectedRevision,
         target,
         mode: "standard",
         pluginVersion: plugin.version,
@@ -360,8 +431,17 @@ export async function runAgentsScan(
   request: AgentsScanRequest,
   dependencies: AgentsRuntimeDependencies = {},
 ): Promise<AgentsScanSummary> {
+  setTracingDisabled(true);
   const manifest = await agentsManifest(request);
-  const client = new UnixLocalSandboxClient();
+  const client =
+    request.sandbox === "docker"
+      ? new DockerSandboxClient({
+          image: DEFAULT_DOCKER_IMAGE,
+          workspaceBaseDir: request.sandboxBaseDir,
+        })
+      : new UnixLocalSandboxClient({
+          workspaceBaseDir: request.sandboxBaseDir,
+        });
   const session = await client.create({ manifest });
   const provider =
     dependencies.modelProvider ??
@@ -374,6 +454,24 @@ export async function runAgentsScan(
   let summary: AgentsScanSummary | undefined;
   let failure: unknown;
   try {
+    const preflight = await session.exec({
+      cmd: [
+        'command -v "$PYTHON" >/dev/null',
+        "command -v git >/dev/null",
+        "command -v grep >/dev/null",
+        "command -v find >/dev/null",
+        "test -f plugin/scripts/finalize_scan_contract.py",
+        "test -f plugin/scripts/generate_rank_input.py",
+        "test -r target-paths.json",
+      ].join(" && "),
+      workdir: "/workspace",
+      login: false,
+    });
+    if (preflight.exitCode !== 0) {
+      throw new IncompleteScanError(
+        `Agents SDK sandbox is missing required scan tools or inputs: ${preflight.stderr.trim() || preflight.stdout.trim() || `exit ${preflight.exitCode}`}`,
+      );
+    }
     const runnerConfig = {
       modelProvider: provider,
       tracingDisabled: true,
@@ -500,6 +598,7 @@ export async function agentsManifest(
     repository: localDir({ src: request.repository }),
     output: dir(),
     "target-paths.json": file({
+      permissions: 0o400,
       content: `${JSON.stringify(
         request.target.kind === "paths" ? request.target.paths : ["."],
       )}\n`,
@@ -566,12 +665,13 @@ export async function agentsManifest(
       PYTHONUNBUFFERED: "1",
       PYTHONDONTWRITEBYTECODE: "1",
       CODEX_SECURITY_AGENT_RUNTIME: "agents-sdk",
+      CODEX_SECURITY_TARGET_PATHS_FILE: "target-paths.json",
     },
   });
 }
 
 export function agentsScanPrompt(
-  request: Pick<AgentsScanRequest, "target">,
+  request: Pick<AgentsScanRequest, "target" | "repositoryRevision">,
 ): string {
   const targetInstruction =
     request.target.kind === "paths"
@@ -588,6 +688,9 @@ export function agentsScanPrompt(
     "Repository root: repository",
     "Plugin root: plugin",
     "Use this exact scan directory for all output: output",
+    request.repositoryRevision === null
+      ? "Repository identity: unversioned directory snapshot."
+      : `Repository revision: ${request.repositoryRevision}`,
     targetInstruction,
     "Use delegate_security_task for every required subagent assignment and preserve all phase/coverage receipts.",
     'Complete and seal the canonical JSON contract with "$PYTHON" plugin/scripts/finalize_scan_contract.py --scan-dir output --source-root repository before returning.',
@@ -606,8 +709,33 @@ export async function copySandboxOutput(
   }
   let files = 0;
   let bytes = 0;
+  const destinationMetadata = await lstat(destination).catch(() => null);
+  if (
+    destinationMetadata === null ||
+    !destinationMetadata.isDirectory() ||
+    destinationMetadata.isSymbolicLink()
+  ) {
+    throw new OutputDirectoryError(
+      `Agents SDK scan output directory is not a regular directory: ${destination}`,
+    );
+  }
+  const requireUnchangedDestination = async (): Promise<void> => {
+    const current = await lstat(destination).catch(() => null);
+    if (
+      current === null ||
+      !current.isDirectory() ||
+      current.isSymbolicLink() ||
+      current.dev !== destinationMetadata.dev ||
+      current.ino !== destinationMetadata.ino
+    ) {
+      throw new OutputDirectoryError(
+        `Agents SDK scan output directory changed while copying artifacts: ${destination}`,
+      );
+    }
+  };
   const visit = async (source: string, target: string): Promise<void> => {
     throwIfAborted(signal, destination);
+    await requireUnchangedDestination();
     const entries = await session.listDir!({ path: source });
     for (const entry of entries) {
       throwIfAborted(signal, destination);
@@ -625,6 +753,7 @@ export async function copySandboxOutput(
       const childSource = `${source}/${entry.name}`;
       const childTarget = join(target, entry.name);
       if (entry.type === "dir") {
+        await requireUnchangedDestination();
         await mkdir(childTarget, { recursive: false, mode: 0o700 });
         await visit(childSource, childTarget);
       } else if (entry.type === "file") {
@@ -636,7 +765,7 @@ export async function copySandboxOutput(
         }
         const content = await session.readFile!({
           path: childSource,
-          maxBytes: MAX_OUTPUT_FILE_BYTES,
+          maxBytes: MAX_OUTPUT_FILE_BYTES + 1,
         });
         const data =
           typeof content === "string"
@@ -653,6 +782,7 @@ export async function copySandboxOutput(
             "Agents SDK sandbox produced too much scan output.",
           );
         }
+        await requireUnchangedDestination();
         await writeFile(childTarget, data, { flag: "wx", mode: 0o600 });
       } else {
         throw new OutputDirectoryError(
@@ -662,6 +792,66 @@ export async function copySandboxOutput(
     }
   };
   await visit("output", destination);
+}
+
+async function stageRepositoryWithoutSymbolicLinks(
+  repository: string,
+  staging: string,
+  signal: AbortSignal,
+  forceSnapshot = false,
+): Promise<string> {
+  const containsSymbolicLink = async (directory: string): Promise<boolean> => {
+    throwIfAborted(signal, staging);
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      throwIfAborted(signal, staging);
+      if (entry.isSymbolicLink()) return true;
+      if (
+        entry.isDirectory() &&
+        (await containsSymbolicLink(join(directory, entry.name)))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (!forceSnapshot && !(await containsSymbolicLink(repository))) {
+    return repository;
+  }
+  const snapshot = join(staging, "repository-input");
+  return await stageTreeWithoutSymbolicLinks(repository, snapshot, signal);
+}
+
+async function stageTreeWithoutSymbolicLinks(
+  sourceRoot: string,
+  destination: string,
+  signal: AbortSignal,
+): Promise<string> {
+  await cp(sourceRoot, destination, {
+    recursive: true,
+    filter: async (source) => !(await lstat(source)).isSymbolicLink(),
+  });
+  throwIfAborted(signal, destination);
+  return destination;
+}
+
+async function dockerWorkspaceRoot(
+  environment: ProcessEnvironment,
+  protectedRoot: string,
+): Promise<string> {
+  const configured = environmentValue(
+    environment,
+    "CODEX_SECURITY_DOCKER_WORKSPACE_ROOT",
+  );
+  const candidate = resolve(
+    configured ?? join(homedir(), ".cache", "codex-security", "sandboxes"),
+  );
+  requireOutsideRepository(protectedRoot, candidate);
+  await mkdir(candidate, { recursive: true, mode: 0o700 });
+  const root = await realpath(candidate);
+  requireOutsideRepository(protectedRoot, root);
+  return root;
 }
 
 async function collectAgentsResult(

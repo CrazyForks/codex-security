@@ -99,7 +99,12 @@ test("copies sandbox partial output before closing an interrupted Agents run", a
     getModel: () => model,
   };
   const client = new TestClient(
-    { pluginPath: PLUGIN_ROOT, model: "gpt-scripted", maxTurns: 4 },
+    {
+      pluginPath: PLUGIN_ROOT,
+      model: "gpt-scripted",
+      maxTurns: 4,
+      sandbox: "unsafe-local",
+    },
     {
       environment: { OPENAI_API_KEY: "synthetic-agents-key" },
       resolvePluginPython: async () =>
