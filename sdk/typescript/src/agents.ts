@@ -1,12 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants as fsConstants, type Stats } from "node:fs";
 import {
-  chmod,
-  copyFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -14,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import createDebug from "debug";
 import OpenAI from "openai";
 import {
   NoopTrace,
@@ -79,10 +81,15 @@ const OPTIONAL_PLUGIN_DIRECTORIES = [".codex-plugin", "examples", "preflight"];
 const MAX_OUTPUT_ENTRIES = 20_000;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
+const MAX_INPUT_ENTRIES = 2_000_000;
+const MAX_INPUT_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
 let tracingUsers = 0;
 let tracingWasDisabled = false;
 let savedModelLogGuard: string | undefined;
 let savedToolLogGuard: string | undefined;
+let savedOpenAILogLevel: string | undefined;
+let savedDebugNamespaces = "";
 let timeoutUsers = 0;
 let savedSetTimeout: typeof setTimeout | undefined;
 
@@ -150,6 +157,8 @@ interface ClientDependencies {
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = { environment: process.env };
 
+class AgentsSandboxCleanupError extends IncompleteScanError {}
+
 export class AgentsSecurity {
   public readonly config: Readonly<AgentsSecurityConfig>;
   readonly #dependencies: ClientDependencies;
@@ -184,6 +193,7 @@ export class AgentsSecurity {
     try {
       const repositoryPath = resolveRepositoryPath(repository);
       const repo = await normalizeRepository(repositoryPath, controller.signal);
+      const repositoryMetadata = await lstat(repo);
       const target = await normalizeTarget(
         repo,
         options.target ?? "repository",
@@ -243,10 +253,34 @@ export class AgentsSecurity {
       const stagedPlugin = join(staging, "plugin");
       const sandboxOutput = join(staging, "output");
       const sandboxInputRoot = join(staging, "scan-inputs");
-      await stageRepository(repo, stagedRepository, controller.signal);
-      await stageTree(pluginRoot, stagedPlugin, controller.signal, {
-        skip: (name) => name === "__pycache__" || name.endsWith(".pyc"),
-      });
+      await requireUnchangedDirectory(repo, repositoryMetadata);
+      await stageRepository(repo, stagedRepository, controller.signal, target);
+      await requireUnchangedDirectory(repo, repositoryMetadata);
+      for (const name of [
+        ...REQUIRED_PLUGIN_DIRECTORIES,
+        ...OPTIONAL_PLUGIN_DIRECTORIES,
+        "skills",
+      ]) {
+        const source = join(pluginRoot, name);
+        const metadata = await lstat(source).catch(() => null);
+        if (metadata === null) continue;
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+          throw new IncompleteScanError(
+            `Selected plugin has an invalid Agents scan runtime directory: ${name}`,
+          );
+        }
+        await stageTree(source, join(stagedPlugin, name), controller.signal, {
+          skip: (entry) =>
+            entry === ".git" ||
+            entry.toLowerCase().endsWith(".git") ||
+            entry === ".env" ||
+            entry.startsWith(".env.") ||
+            entry.endsWith(".pem") ||
+            entry.endsWith(".key") ||
+            entry === "__pycache__" ||
+            entry.endsWith(".pyc"),
+        });
+      }
       await mkdir(sandboxOutput, { mode: 0o700 });
       await mkdir(sandboxInputRoot, { mode: 0o700 });
       await writeFile(
@@ -260,6 +294,7 @@ export class AgentsSecurity {
         { flag: "wx", mode: 0o400 },
       );
       let summary: AgentsScanSummary;
+      let copyOutput = true;
       try {
         summary = await (this.#dependencies.runAgents ?? runAgentsScan)({
           repository: stagedRepository,
@@ -294,8 +329,14 @@ export class AgentsSecurity {
           ),
           signal: controller.signal,
         });
+      } catch (error) {
+        copyOutput = !(error instanceof AgentsSandboxCleanupError);
+        throw error;
       } finally {
-        await copyStagedOutput(sandboxOutput, scanDir);
+        if (copyOutput) {
+          await requireUnchangedOutputDirectory(scanDir, outputMetadata);
+          await copyStagedOutput(sandboxOutput, scanDir);
+        }
       }
       return await collectAgentsResult(
         scanDir,
@@ -400,6 +441,7 @@ export async function runAgentsScan(
       traceIncludeSensitiveData: false,
       workflowName: "Codex Security standard scan",
       sandbox: { session },
+      toolExecution: { maxFunctionToolConcurrency: 1 },
     };
     const worker = new SandboxAgent({
       name: "Codex Security scan worker",
@@ -443,6 +485,15 @@ export async function runAgentsScan(
           status: "already_loaded",
           skill_name,
           path: `plugin/skills/${matches[0]!.path ?? skill_name}`,
+          instructions: await readFile(
+            join(
+              request.pluginRoot,
+              "skills",
+              matches[0]!.path ?? skill_name,
+              "SKILL.md",
+            ),
+            "utf8",
+          ),
         };
       },
     });
@@ -451,7 +502,7 @@ export async function runAgentsScan(
       model: request.model,
       modelSettings: {
         reasoning: { effort: request.reasoningEffort },
-        parallelToolCalls: true,
+        parallelToolCalls: false,
         store: false,
       },
       instructions: [
@@ -490,8 +541,19 @@ export async function runAgentsScan(
     throw sanitizeAgentsRuntimeFailure(error);
   } finally {
     try {
-      await session.close().catch(() => undefined);
+      let cleanupFailure: unknown;
+      try {
+        await session.close();
+      } catch (error) {
+        cleanupFailure = error;
+      }
       await ownedProvider?.close().catch(() => undefined);
+      if (cleanupFailure !== undefined) {
+        throw new AgentsSandboxCleanupError(
+          "Unable to remove the Agents SDK sandbox after the scan.",
+          { cause: cleanupFailure },
+        );
+      }
     } finally {
       releaseTimeouts();
       releaseTracing();
@@ -501,6 +563,10 @@ export async function runAgentsScan(
 
 function suppressAgentsTracing(): () => void {
   if (tracingUsers++ === 0) {
+    savedDebugNamespaces = createDebug.disable();
+    createDebug.enable(
+      [savedDebugNamespaces, "-openai-agents:*"].filter(Boolean).join(","),
+    );
     tracingWasDisabled =
       getGlobalTraceProvider().createTrace({
         name: "Codex Security tracing state probe",
@@ -508,14 +574,17 @@ function suppressAgentsTracing(): () => void {
     setTracingDisabled(true);
     savedModelLogGuard = process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"];
     savedToolLogGuard = process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"];
+    savedOpenAILogLevel = process.env["OPENAI_LOG"];
     process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1";
     process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1";
+    process.env["OPENAI_LOG"] = "warn";
   }
   let released = false;
   return () => {
     if (released) return;
     released = true;
     if (--tracingUsers !== 0) return;
+    createDebug.enable(savedDebugNamespaces);
     setTracingDisabled(tracingWasDisabled);
     restoreEnvironmentValue(
       "OPENAI_AGENTS_DONT_LOG_MODEL_DATA",
@@ -525,6 +594,7 @@ function suppressAgentsTracing(): () => void {
       "OPENAI_AGENTS_DONT_LOG_TOOL_DATA",
       savedToolLogGuard,
     );
+    restoreEnvironmentValue("OPENAI_LOG", savedOpenAILogLevel);
   };
 }
 
@@ -701,93 +771,392 @@ async function stageRepository(
   source: string,
   destination: string,
   signal: AbortSignal,
+  target: Pick<NormalizedTarget, "kind" | "paths"> = {
+    kind: "repository",
+    paths: [],
+  },
+  state: { entries: number; bytes: number } = { entries: 0, bytes: 0 },
 ): Promise<void> {
-  const environment = {
-    ...process.env,
+  const gitRoot = await enclosingGitWorktreeRoot(source, signal);
+  if (gitRoot === null) {
+    await stageTree(
+      source,
+      destination,
+      signal,
+      {
+        skip: (name) =>
+          name === ".git" ||
+          name.toLowerCase().endsWith(".git") ||
+          name === ".env" ||
+          name.startsWith(".env.") ||
+          name.endsWith(".pem") ||
+          name.endsWith(".key"),
+      },
+      state,
+    );
+    return;
+  }
+  await requireSafeGitInputs(source, gitRoot, signal);
+  const environment: NodeJS.ProcessEnv = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+    ),
     OPENAI_API_KEY: undefined,
     CODEX_API_KEY: undefined,
     GIT_NO_LAZY_FETCH: "1",
     GIT_TERMINAL_PROMPT: "0",
     GIT_OPTIONAL_LOCKS: "0",
   };
-  const isGit = await execFile(
-    "git",
-    [
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "core.hooksPath=/dev/null",
-      "rev-parse",
-      "--is-inside-work-tree",
-    ],
-    {
-      cwd: source,
-      encoding: "utf8",
-      env: environment,
-      signal,
-      timeout: 30_000,
-    },
-  )
-    .then(({ stdout }) => stdout.trim() === "true")
-    .catch(() => false);
-  if (!isGit) {
-    await stageTree(source, destination, signal, {
-      skip: (name) =>
-        name === ".git" ||
-        name === ".env" ||
-        name.startsWith(".env.") ||
-        name.endsWith(".pem") ||
-        name.endsWith(".key"),
-    });
-    return;
+  let configuredExcludes = "";
+  try {
+    ({ stdout: configuredExcludes } = await execFile(
+      "git",
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        `safe.directory=${gitRoot}`,
+        "config",
+        "--null",
+        "--path",
+        "--get-all",
+        "core.excludesFile",
+      ],
+      {
+        cwd: source,
+        encoding: "utf8",
+        env: environment,
+        signal,
+        timeout: 30_000,
+      },
+    ));
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== 1) {
+      throw new InvalidTargetError(
+        `Unable to inspect Git ignore configuration: ${source}`,
+        { cause: error },
+      );
+    }
   }
-  const { stdout } = await execFile(
-    "git",
-    [
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "core.hooksPath=/dev/null",
-      "ls-files",
-      "--cached",
-      "--others",
-      "--exclude-standard",
-      "--deduplicate",
-      "-z",
-      "--",
-      ".",
-    ],
-    {
-      cwd: source,
-      encoding: "buffer",
-      env: environment,
-      signal,
-      timeout: 120_000,
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
+  for (const value of configuredExcludes.split("\0").filter(Boolean)) {
+    await requireRegularGitInput(resolve(source, value));
+  }
+  let stdout: Buffer;
+  try {
+    ({ stdout } = await execFile(
+      "git",
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        `safe.directory=${gitRoot}`,
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--deduplicate",
+        "-z",
+        "--",
+        ".",
+      ],
+      {
+        cwd: source,
+        encoding: "buffer",
+        env: environment,
+        signal,
+        timeout: 60_000,
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    ));
+  } catch (error) {
+    throw new InvalidTargetError(
+      `Unable to enumerate non-ignored repository files: ${source}`,
+      { cause: error },
+    );
+  }
   await mkdir(destination, { recursive: true, mode: 0o700 });
-  for (const path of stdout.toString("utf8").split("\0")) {
-    if (path.length === 0) continue;
+  for (const value of stdout.toString("utf8").split("\0")) {
+    if (value.length === 0) continue;
+    const path = value.endsWith("/") ? value.slice(0, -1) : value;
+    const parts = path.split("/");
     if (
       path.startsWith("/") ||
       path.includes("\\") ||
-      path
-        .split("/")
-        .some((part) => part === "" || part === "." || part === "..")
+      parts.some((part) => part === "" || part === "." || part === "..")
     ) {
       throw new InvalidTargetError(
         `Git returned an unsafe repository path: ${path}`,
       );
     }
+    if (
+      parts.some(
+        (part) => part === ".git" || part.toLowerCase().endsWith(".git"),
+      )
+    ) {
+      continue;
+    }
     throwIfAborted(signal);
     const entry = join(source, path);
-    const metadata = await lstat(entry).catch(() => null);
-    if (metadata?.isFile() !== true || metadata.isSymbolicLink()) continue;
+    const metadata = await repositoryEntryMetadata(source, parts);
     const target = join(destination, path);
-    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-    await copyFile(entry, target);
-    await chmod(target, metadata.mode & 0o777);
+    if (metadata?.isDirectory() === true && !metadata.isSymbolicLink()) {
+      await stageRepository(entry, target, signal, undefined, state);
+    } else if (metadata?.isFile() === true && !metadata.isSymbolicLink()) {
+      await stageInputFile(entry, target, metadata, state, signal);
+    }
+  }
+  for (const scope of target.kind === "paths" ? target.paths : []) {
+    const entry = join(source, scope);
+    const output = join(destination, scope);
+    const metadata = await repositoryEntryMetadata(source, scope.split("/"));
+    if (metadata?.isFile() === true && !metadata.isSymbolicLink()) {
+      if ((await lstat(output).catch(() => null)) === null) {
+        await stageInputFile(entry, output, metadata, state, signal);
+      }
+    } else if (metadata?.isDirectory() === true && !metadata.isSymbolicLink()) {
+      await stageTree(
+        entry,
+        output,
+        signal,
+        {
+          skip: (name) =>
+            name === ".git" || name.toLowerCase().endsWith(".git"),
+        },
+        state,
+      );
+    }
+  }
+}
+
+async function repositoryEntryMetadata(
+  root: string,
+  parts: string[],
+): Promise<Stats | null> {
+  let entry = root;
+  for (const [index, part] of parts.entries()) {
+    entry = join(entry, part);
+    const metadata = await lstat(entry).catch(() => null);
+    if (metadata === null || metadata.isSymbolicLink()) return null;
+    if (index < parts.length - 1 && !metadata.isDirectory()) return null;
+    if (index === parts.length - 1) return metadata;
+  }
+  return null;
+}
+
+async function requireUnchangedDirectory(
+  path: string,
+  expected: Pick<Stats, "dev" | "ino">,
+): Promise<void> {
+  const metadata = await lstat(path).catch(() => null);
+  if (
+    metadata === null ||
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    metadata.dev !== expected.dev ||
+    metadata.ino !== expected.ino
+  ) {
+    throw new InvalidTargetError(`Repository changed before staging: ${path}`);
+  }
+}
+
+async function requireUnchangedOutputDirectory(
+  path: string,
+  expected: Pick<Stats, "dev" | "ino">,
+): Promise<void> {
+  const metadata = await lstat(path).catch(() => null);
+  if (
+    metadata === null ||
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    metadata.dev !== expected.dev ||
+    metadata.ino !== expected.ino
+  ) {
+    throw new OutputDirectoryError(
+      `Scan output directory changed before artifact handoff: ${path}`,
+    );
+  }
+}
+
+async function requireSafeGitInputs(
+  source: string,
+  gitRoot: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const marker = join(gitRoot, ".git");
+  const markerMetadata = await lstat(marker).catch(() => null);
+  if (
+    markerMetadata === null ||
+    markerMetadata.isSymbolicLink() ||
+    (!markerMetadata.isFile() && !markerMetadata.isDirectory())
+  ) {
+    throw new InvalidTargetError(
+      `Git worktree metadata is not safe to stage: ${marker}`,
+    );
+  }
+  let gitDirectory = marker;
+  if (markerMetadata.isFile()) {
+    if (markerMetadata.size > 64 * 1024) {
+      throw new InvalidTargetError(
+        `Git worktree metadata is too large: ${marker}`,
+      );
+    }
+    const pointer = await readFile(marker, "utf8");
+    const match = /^gitdir:\s*(.+?)\s*$/u.exec(pointer);
+    if (match === null) {
+      throw new InvalidTargetError(
+        `Git worktree metadata is invalid: ${marker}`,
+      );
+    }
+    gitDirectory = resolve(gitRoot, match[1]!);
+  }
+  const commonPointer = join(gitDirectory, "commondir");
+  const commonMetadata = await lstat(commonPointer).catch(() => null);
+  let commonDirectory = gitDirectory;
+  if (commonMetadata !== null) {
+    await requireRegularGitInput(commonPointer);
+    commonDirectory = resolve(
+      gitDirectory,
+      (await readFile(commonPointer, "utf8")).trim(),
+    );
+  }
+  await requireRegularGitInput(join(commonDirectory, "config"));
+  await requireRegularGitInput(join(commonDirectory, "info", "exclude"));
+
+  const pending = [source];
+  let entries = 0;
+  while (pending.length > 0) {
+    throwIfAborted(signal);
+    const directory = pending.pop()!;
+    const children = await readdir(directory, { withFileTypes: true });
+    entries += children.length;
+    if (entries > MAX_INPUT_ENTRIES) {
+      throw new InvalidTargetError(
+        `Repository contains too many entries to stage safely: ${source}`,
+      );
+    }
+    for (const child of children) {
+      if (child.name === ".git" || child.name.toLowerCase().endsWith(".git"))
+        continue;
+      const path = join(directory, child.name);
+      if (child.name === ".gitignore") await requireRegularGitInput(path);
+      if (child.isDirectory() && !child.isSymbolicLink()) pending.push(path);
+    }
+  }
+  let ancestor = dirname(source);
+  while (source !== gitRoot && ancestor.startsWith(gitRoot)) {
+    await requireRegularGitInput(join(ancestor, ".gitignore"));
+    if (ancestor === gitRoot) break;
+    ancestor = dirname(ancestor);
+  }
+}
+
+async function requireRegularGitInput(path: string): Promise<void> {
+  const metadata = await lstat(path).catch(() => null);
+  if (metadata === null) return;
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new InvalidTargetError(
+      `Git input must be a regular file before staging: ${path}`,
+    );
+  }
+}
+
+async function stageInputFile(
+  source: string,
+  destination: string,
+  metadata: Stats,
+  state: { entries: number; bytes: number },
+  signal: AbortSignal,
+): Promise<void> {
+  state.entries += 1;
+  state.bytes += metadata.size;
+  if (state.entries > MAX_INPUT_ENTRIES || state.bytes > MAX_INPUT_BYTES) {
+    throw new InvalidTargetError(
+      `Repository inputs exceed the staging limit: ${source}`,
+    );
+  }
+  if (metadata.size > MAX_INPUT_FILE_BYTES) {
+    throw new InvalidTargetError(
+      `Repository input file is too large to stage safely: ${source}`,
+    );
+  }
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  const input = await open(
+    source,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+  );
+  let output;
+  try {
+    const opened = await input.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== metadata.dev ||
+      opened.ino !== metadata.ino ||
+      opened.size !== metadata.size
+    ) {
+      throw new InvalidTargetError(
+        `Repository input changed while staging: ${source}`,
+      );
+    }
+    output = await open(
+      destination,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+      metadata.mode & 0o777,
+    );
+    const buffer = new Uint8Array(1024 * 1024);
+    let offset = 0;
+    while (offset < opened.size) {
+      throwIfAborted(signal);
+      const { bytesRead } = await input.read(
+        buffer,
+        0,
+        Math.min(buffer.byteLength, opened.size - offset),
+        offset,
+      );
+      if (bytesRead === 0) {
+        throw new InvalidTargetError(
+          `Repository input changed while staging: ${source}`,
+        );
+      }
+      let written = 0;
+      while (written < bytesRead) {
+        const { bytesWritten } = await output.write(
+          buffer,
+          written,
+          bytesRead - written,
+          offset + written,
+        );
+        if (bytesWritten === 0) {
+          throw new InvalidTargetError(
+            `Unable to stage repository input: ${source}`,
+          );
+        }
+        written += bytesWritten;
+      }
+      offset += bytesRead;
+    }
+    const final = await input.stat();
+    if (
+      final.dev !== opened.dev ||
+      final.ino !== opened.ino ||
+      final.size !== opened.size ||
+      final.mtimeMs !== opened.mtimeMs
+    ) {
+      throw new InvalidTargetError(
+        `Repository input changed while staging: ${source}`,
+      );
+    }
+  } catch (error) {
+    await output?.close();
+    output = undefined;
+    await rm(destination, { force: true });
+    throw error;
+  } finally {
+    await output?.close();
+    await input.close();
   }
 }
 
@@ -796,6 +1165,7 @@ async function stageTree(
   destination: string,
   signal: AbortSignal,
   options: { skip?: (name: string) => boolean } = {},
+  state: { entries: number; bytes: number } = { entries: 0, bytes: 0 },
 ): Promise<void> {
   throwIfAborted(signal);
   await mkdir(destination, { recursive: true, mode: 0o700 });
@@ -806,13 +1176,12 @@ async function stageTree(
     const metadata = await lstat(from);
     if (metadata.isSymbolicLink()) continue;
     if (metadata.isDirectory()) {
-      await stageTree(from, to, signal, options);
+      await stageTree(from, to, signal, options, state);
       continue;
     }
     if (!metadata.isFile()) continue;
     throwIfAborted(signal);
-    await copyFile(from, to);
-    await chmod(to, metadata.mode & 0o777);
+    await stageInputFile(from, to, metadata, state, signal);
   }
 }
 
@@ -856,7 +1225,47 @@ async function copyStagedOutput(
         "Agents SDK scan output exceeds the total size limit.",
       );
     }
-    await copyFile(from, to);
+    const input = await open(
+      from,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    let output;
+    try {
+      const opened = await input.stat();
+      if (
+        !opened.isFile() ||
+        opened.dev !== metadata.dev ||
+        opened.ino !== metadata.ino ||
+        opened.size !== metadata.size
+      ) {
+        throw new OutputDirectoryError(
+          "Agents SDK scan output changed during artifact handoff.",
+        );
+      }
+      output = await open(
+        to,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      await output.writeFile(await input.readFile());
+      const final = await input.stat();
+      if (
+        final.dev !== opened.dev ||
+        final.ino !== opened.ino ||
+        final.size !== opened.size ||
+        final.mtimeMs !== opened.mtimeMs
+      ) {
+        throw new OutputDirectoryError(
+          "Agents SDK scan output changed during artifact handoff.",
+        );
+      }
+    } finally {
+      await output?.close();
+      await input.close();
+    }
   };
   await copy(source, destination, 0);
 }
