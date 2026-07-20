@@ -1685,11 +1685,11 @@ async function requireSafeGitConfig(
 function isBareGitDirectory(names: string[]): boolean {
   const folded = new Set(names.map((name) => name.toLowerCase()));
   return (
-    folded.has("head") &&
     folded.has("objects") &&
-    ["refs", "packed-refs", "hooks", "info", "description"].some((name) =>
-      folded.has(name),
-    )
+    (folded.has("refs") ||
+      folded.has("packed-refs") ||
+      (folded.has("head") &&
+        ["hooks", "info", "description"].some((name) => folded.has(name))))
   );
 }
 

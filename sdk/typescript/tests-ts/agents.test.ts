@@ -869,6 +869,14 @@ describe("Agents SDK thin scan adapter", () => {
     ]);
     await rm(join(incompleteBare, "config"));
     await rm(join(incompleteBare, "refs"), { recursive: true, force: true });
+    const headlessBare = join(repository, "fixtures", "headless-mirror");
+    await mkdir(join(headlessBare, "objects", "aa"), { recursive: true });
+    await mkdir(join(headlessBare, "refs", "heads"), { recursive: true });
+    await writeFile(
+      join(headlessBare, "objects", "aa", "blob"),
+      "SYNTHETIC_HEADLESS_GIT_HISTORY_SECRET\n",
+    );
+    await writeFile(join(headlessBare, "refs", "heads", "main"), "deadbeef\n");
     const malformedBare = join(repository, "fixtures", "malformed-mirror");
     await mkdir(join(malformedBare, "objects"), { recursive: true });
     await mkdir(join(malformedBare, "refs"));
@@ -976,12 +984,31 @@ describe("Agents SDK thin scan adapter", () => {
     );
     await mkdir(join(repository, "deploy"), { recursive: true });
     await writeFile(
-      join(repository, "deploy", "config.json"),
+      join(repository, "deploy", "docker-prod.json"),
       `${JSON.stringify({
         HttpHeaders: {
           Authorization: "Bearer SYNTHETIC_DOCKER_HEADER_TOKEN",
         },
         currentContext: "prod",
+      })}\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "aws-export.json"),
+      `${JSON.stringify({
+        Version: 1,
+        AccessKeyId: "ASIA_SYNTHETIC",
+        SecretAccessKey: "SYNTHETIC_AWS_SECRET",
+        SessionToken: "SYNTHETIC_AWS_SESSION",
+      })}\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "azure-prod.json"),
+      `${JSON.stringify({
+        clientId: "client",
+        clientSecret: "SYNTHETIC_AZURE_SECRET",
+        subscriptionId: "sub",
+        tenantId: "tenant",
+        activeDirectoryEndpointUrl: "https://login.microsoftonline.com",
       })}\n`,
     );
     await mkdir(join(repository, "deploy", "kube"), { recursive: true });
@@ -1123,7 +1150,9 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/kube/config",
             "project-firebase-adminsdk-ab12c-1234567890.json",
             "config.json",
-            "deploy/config.json",
+            "deploy/docker-prod.json",
+            "deploy/aws-export.json",
+            "deploy/azure-prod.json",
             "my-project-ab12cd34ef56.json",
             "credentials.json",
             "service-account.json",
@@ -1143,6 +1172,7 @@ describe("Agents SDK thin scan adapter", () => {
             "fixtures/private-mirror/config",
             "fixtures/private-mirror/objects",
             "fixtures/incomplete-mirror/objects",
+            "fixtures/headless-mirror/objects",
             "fixtures/malformed-mirror/config",
             "fixtures/malformed-mirror/objects",
           ]) {

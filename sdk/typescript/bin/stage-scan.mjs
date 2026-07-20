@@ -185,7 +185,7 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    ((name.endsWith(".json") && isCredentialJson(source, expected, name)) ||
+    ((name.endsWith(".json") && isCredentialJson(source, expected)) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
           gitCaseFold(basename(dirname(source))),
@@ -289,7 +289,7 @@ function copyFile(source, destination, expected) {
   }
 }
 
-function isCredentialJson(source, expected, name) {
+function isCredentialJson(source, expected) {
   if (expected.size > MAX_INPUT_FILE_BYTES) return false;
   let handle;
   try {
@@ -319,28 +319,31 @@ function isCredentialJson(source, expected, name) {
     }
     try {
       const value = JSON.parse(contents);
+      const keys = new Set(
+        value !== null && typeof value === "object"
+          ? Object.keys(value).map((key) => key.toLowerCase())
+          : [],
+      );
       return (
         value !== null &&
         typeof value === "object" &&
-        ((name === "config.json" &&
-          Object.keys(value).some((key) =>
-            [
-              "auths",
-              "credsstore",
-              "credhelpers",
-              "proxies",
-              "httpheaders",
-            ].includes(key.toLowerCase()),
-          )) ||
+        (["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
+          (key) => keys.has(key),
+        ) ||
+          (keys.has("accesskeyid") &&
+            (keys.has("secretaccesskey") || keys.has("sessiontoken"))) ||
+          (keys.has("clientid") &&
+            keys.has("clientsecret") &&
+            ["tenantid", "subscriptionid", "activedirectoryendpointurl"].some(
+              (key) => keys.has(key),
+            )) ||
           (Object.entries(value).some(
             ([key, entry]) =>
               key.toLowerCase() === "type" &&
               typeof entry === "string" &&
               entry.toLowerCase() === "service_account",
           ) &&
-            Object.keys(value).some(
-              (key) => key.toLowerCase() === "private_key",
-            )))
+            keys.has("private_key")))
       );
     } catch {
       return false;
@@ -467,11 +470,11 @@ function resolveSourcePath(path, cache, ignoreCase) {
 function isBareGitDirectory(entries) {
   const names = new Set(entries.map((entry) => gitCaseFold(entry)));
   return (
-    names.has("head") &&
     names.has("objects") &&
-    ["refs", "packed-refs", "hooks", "info", "description"].some((name) =>
-      names.has(name),
-    )
+    (names.has("refs") ||
+      names.has("packed-refs") ||
+      (names.has("head") &&
+        ["hooks", "info", "description"].some((name) => names.has(name))))
   );
 }
 
