@@ -370,7 +370,8 @@ function resolveSourcePath(path, cache, ignoreCase) {
     if (
       job.kind === "tracked" &&
       current !== job.source &&
-      isBareGitDirectory([...entries.values()])
+      (isBareGitDirectory([...entries.values()]) ||
+        [...entries.values()].some((name) => gitCaseFold(name) === ".git"))
     ) {
       return null;
     }

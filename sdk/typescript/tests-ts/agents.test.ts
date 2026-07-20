@@ -1496,6 +1496,54 @@ describe("Agents SDK thin scan adapter", () => {
     }
   });
 
+  test("excludes outer-tracked paths replaced by nested Git worktrees", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const nested = join(repository, "vendor", "nested");
+    await initializeGitRepository(repository);
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    await writeFile(
+      join(nested, "source.ts"),
+      "export const original = true;\n",
+    );
+    git(repository, ["add", "."]);
+    git(repository, ["commit", "--quiet", "-m", "initial"]);
+    await rm(nested, { recursive: true, force: true });
+    await initializeGitRepository(nested);
+    await writeFile(
+      join(nested, "source.ts"),
+      "SYNTHETIC_NESTED_WORKTREE_SECRET\n",
+    );
+    await writeFile(join(nested, ".gitignore"), "ignored.ts\n");
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: join(root, "workspaces"),
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(existsSync(join(value.repository, "app.ts"))).toBe(true);
+          expect(
+            existsSync(join(value.repository, "vendor", "nested", "source.ts")),
+          ).toBe(false);
+          throw new Error("stop after staging inspection");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("stop after staging inspection");
+      expect(reached).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("treats Git path scopes containing pathspec metacharacters literally", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
