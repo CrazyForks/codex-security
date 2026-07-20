@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
@@ -416,10 +416,21 @@ export function safeHostPath(repository?: string): string {
     }
     try {
       const canonical = realpathSync(entry);
+      const system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].includes(
+        canonical,
+      );
       const candidates = [canonical];
       for (const name of executableNames) {
         try {
-          candidates.push(realpathSync(join(canonical, name)));
+          const executable = realpathSync(join(canonical, name));
+          if (
+            root !== undefined &&
+            !system &&
+            statSync(executable).nlink !== 1
+          ) {
+            return false;
+          }
+          candidates.push(executable);
         } catch {
           continue;
         }

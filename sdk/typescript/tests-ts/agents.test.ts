@@ -250,15 +250,17 @@ describe("Agents SDK thin scan adapter", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "ignores a host Git executable that resolves into the repository",
+    "ignores host Git executables linked to the repository",
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const outsideBin = join(root, "outside-bin");
+      const hardlinkBin = join(root, "hardlink-bin");
       const marker = join(root, "host-git-executed");
       await initializeGitRepository(repository);
       await mkdir(join(repository, "tools"), { recursive: true });
       await mkdir(outsideBin);
+      await mkdir(hardlinkBin);
       await writeFile(join(repository, "app.ts"), "export const app = true;\n");
       git(repository, ["add", "app.ts"]);
       await writeFile(
@@ -267,8 +269,10 @@ describe("Agents SDK thin scan adapter", () => {
         { mode: 0o755 },
       );
       await symlink(join(repository, "tools", "git"), join(outsideBin, "git"));
+      await link(join(repository, "tools", "git"), join(hardlinkBin, "git"));
       const previousPath = process.env["PATH"];
-      process.env["PATH"] = `${outsideBin}:${previousPath ?? "/usr/bin:/bin"}`;
+      process.env["PATH"] =
+        `${outsideBin}:${hardlinkBin}:${previousPath ?? "/usr/bin:/bin"}`;
       let reached = false;
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
