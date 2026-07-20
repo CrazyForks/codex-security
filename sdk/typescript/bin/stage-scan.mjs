@@ -120,6 +120,14 @@ function copyTree(source, destination, prefix, depth) {
       `Bare Git-like directory cannot be staged safely: ${JSON.stringify(source)}`,
     );
   }
+  if (
+    job.kind === "tree" &&
+    entries.some((entry) => gitCaseFold(entry.name) === ".git")
+  ) {
+    fail(
+      `Nested Git worktrees cannot be staged safely; use the Codex engine: ${JSON.stringify(source)}`,
+    );
+  }
   for (const entry of entries) {
     if (input && skip(entry.name, job.kind)) continue;
     const path = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;

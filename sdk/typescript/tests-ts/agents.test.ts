@@ -1356,6 +1356,49 @@ describe("Agents SDK thin scan adapter", () => {
     }
   });
 
+  test("rejects nested Git worktrees inside unversioned targets", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const nested = join(repository, "vendor", "nested");
+    await initializeGitRepository(nested);
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    await writeFile(join(nested, ".gitignore"), "private/\n");
+    await writeFile(join(nested, "source.ts"), "export const nested = true;\n");
+    git(nested, ["add", "."]);
+    git(nested, ["commit", "--quiet", "-m", "nested"]);
+    await mkdir(join(nested, "private"));
+    await writeFile(
+      join(nested, "private", "secret.ts"),
+      "SYNTHETIC_IGNORED_NESTED_SECRET\n",
+    );
+    await writeFile(
+      join(nested, "untracked.ts"),
+      "SYNTHETIC_UNTRACKED_NESTED_SECRET\n",
+    );
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: join(root, "workspaces"),
+        },
+        runAgents: async () => {
+          reached = true;
+          throw new Error("runtime should not be reached");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("Nested Git worktrees cannot be staged safely");
+      expect(reached).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("treats Git path scopes containing pathspec metacharacters literally", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
