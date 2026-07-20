@@ -1065,6 +1065,19 @@ describe("Agents SDK thin scan adapter", () => {
       "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\nusers:\n- name: admin\n  user:\n    token: SYNTHETIC_KUBE_BEARER\n    client-key-data: SYNTHETIC_KUBE_CLIENT_KEY\n",
     );
     await writeFile(
+      join(repository, "deploy", "exported-kube.yaml"),
+      "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\nusers:\n- name: admin\n  user:\n    auth-provider:\n      name: oidc\n      config:\n        id-token: SYNTHETIC_KUBE_ID_TOKEN\n        refresh-token: SYNTHETIC_KUBE_REFRESH_TOKEN\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "azure-sp.json"),
+      `${JSON.stringify({
+        appId: "11111111-1111-1111-1111-111111111111",
+        displayName: "svc",
+        password: "SYNTHETIC_AZURE_SP_SECRET",
+        tenant: "22222222-2222-2222-2222-222222222222",
+      })}\n`,
+    );
+    await writeFile(
       join(repository, "deploy", "new-user-credentials.csv"),
       "User name,Password,Access key ID,Secret access key,Console login link\nalice,SYNTHETIC_AWS_PASSWORD,AKIASYNTHETIC,SYNTHETIC_AWS_SECRET,https://console.aws.amazon.com/\n",
     );
@@ -1220,6 +1233,8 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/oauth-token.json",
             "deploy/azure-token-cache.json",
             "deploy/cluster-export.yaml",
+            "deploy/exported-kube.yaml",
+            "deploy/azure-sp.json",
             "deploy/new-user-credentials.csv",
             "deploy/deploy_rsa",
             "my-project-ab12cd34ef56.json",

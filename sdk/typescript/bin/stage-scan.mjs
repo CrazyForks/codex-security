@@ -324,7 +324,9 @@ function isCredentialDocument(source, expected, name) {
         /^\s*kind\s*:\s*config\s*$/imu.test(contents) &&
         /^\s*clusters\s*:/imu.test(contents) &&
         /^\s*users\s*:/imu.test(contents) &&
-        /^\s*(?:token|client-key-data)\s*:/imu.test(contents)
+        /^\s*(?:token|client-key-data|id-token|refresh-token|access-token)\s*:/imu.test(
+          contents,
+        )
       );
     }
     try {
@@ -364,6 +366,9 @@ function isCredentialDocument(source, expected, name) {
           ) ||
           (keys.has("accesskeyid") &&
             (keys.has("secretaccesskey") || keys.has("sessiontoken"))) ||
+          (keys.has("appid") &&
+            keys.has("password") &&
+            (keys.has("tenant") || keys.has("tenantid"))) ||
           ((keys.has("accesstoken") || keys.has("refreshtoken")) &&
             ["tokentype", "expiresin", "expireson", "tenant"].some((key) =>
               keys.has(key),
