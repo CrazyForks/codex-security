@@ -4,6 +4,7 @@ import {
   accessSync,
   constants as fsConstants,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -655,6 +656,7 @@ function suppressUnsafeHostEnvironment(
       .split(delimiter)
       .filter((entry) => entry !== savedDockerWrapper)
       .join(delimiter);
+    const helperPath = safeDockerHelperPath(safePath);
     const docker = [
       ...(savedDockerExecutable === undefined ? [] : [savedDockerExecutable]),
       ...safePath.split(delimiter).map((entry) => join(entry, "docker")),
@@ -686,7 +688,7 @@ function suppressUnsafeHostEnvironment(
           next,
           [
             "#!/bin/sh",
-            'clean_exec() { exec /usr/bin/env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" HOME="${HOME-}" USER="${USER-}" TMPDIR="${TMPDIR-/tmp}" DOCKER_CONFIG="${DOCKER_CONFIG-}" DOCKER_HOST="${DOCKER_HOST-}" DOCKER_CONTEXT="${DOCKER_CONTEXT-}" DOCKER_CERT_PATH="${DOCKER_CERT_PATH-}" DOCKER_TLS_VERIFY="${DOCKER_TLS_VERIFY-}" DOCKER_API_VERSION="${DOCKER_API_VERSION-}" "$@"; }',
+            'clean_exec() { exec /usr/bin/env -i PATH="${PATH-}" HOME="${HOME-}" USER="${USER-}" TMPDIR="${TMPDIR-/tmp}" DOCKER_CONFIG="${DOCKER_CONFIG-}" DOCKER_HOST="${DOCKER_HOST-}" DOCKER_CONTEXT="${DOCKER_CONTEXT-}" DOCKER_CERT_PATH="${DOCKER_CERT_PATH-}" DOCKER_TLS_VERIFY="${DOCKER_TLS_VERIFY-}" DOCKER_API_VERSION="${DOCKER_API_VERSION-}" "$@"; }',
             'if [ "${1-}" = run ]; then',
             "  shift",
             `  clean_exec '${executable.replaceAll("'", "'\"'\"'")}' run -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= -e FTP_PROXY= -e ALL_PROXY= -e http_proxy= -e https_proxy= -e no_proxy= -e ftp_proxy= -e all_proxy= "$@"`,
@@ -699,7 +701,7 @@ function suppressUnsafeHostEnvironment(
         renameSync(next, join(savedDockerWrapper, "docker"));
         savedDockerExecutable = executable;
       }
-      process.env["PATH"] = `${savedDockerWrapper}${delimiter}${safePath}`;
+      process.env["PATH"] = `${savedDockerWrapper}${delimiter}${helperPath}`;
     } else {
       process.env["PATH"] = safePath;
     }
@@ -729,6 +731,35 @@ function suppressUnsafeHostEnvironment(
       savedDockerExecutable = undefined;
     }
   };
+}
+
+function safeDockerHelperPath(safePath: string): string {
+  const entries = new Set([
+    ...safePath.split(delimiter),
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ]);
+  return [...entries]
+    .filter((entry) => {
+      try {
+        return readdirSync(entry)
+          .filter(
+            (name) => name === "ssh" || name.startsWith("docker-credential-"),
+          )
+          .every((name) => {
+            const executable = realpathSync(join(entry, name));
+            return [...activeHostRoots.keys()].every((target) => {
+              const path = relative(target, executable);
+              return path === ".." || path.startsWith(`..${sep}`);
+            });
+          });
+      } catch {
+        return false;
+      }
+    })
+    .join(delimiter);
 }
 
 function releaseHostRoot(root: string): void {

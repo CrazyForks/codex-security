@@ -2909,6 +2909,8 @@ describe("Agents SDK thin scan adapter", () => {
         [
           "#!/bin/sh",
           "set -eu",
+          "command -v docker-credential-safe >/dev/null 2>&1 || exit 43",
+          "docker-credential-safe",
           "if command -v docker-credential-untrusted >/dev/null 2>&1; then docker-credential-untrusted; fi",
           `printf '%s\\n' "SAFE_DOCKER openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent} aws=\${AWS_SECRET_ACCESS_KEY-absent} gh=\${GH_TOKEN-absent}" >> '${log}'`,
           `printf '<%s>\\n' \"$@\" >> '${log}'`,
@@ -2918,6 +2920,13 @@ describe("Agents SDK thin scan adapter", () => {
         ].join("\n"),
       );
       await chmod(join(bin, "docker"), 0o755);
+      await writeFile(
+        join(bin, "docker-credential-safe"),
+        ["#!/bin/sh", `printf '%s\\n' SAFE_DOCKER_HELPER >> '${log}'`, ""].join(
+          "\n",
+        ),
+        { mode: 0o755 },
+      );
       await writeFile(
         join(repositoryBin, "docker"),
         [
@@ -3135,6 +3144,7 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
         expect(calls).not.toContain("UNTRUSTED_ENV");
         expect(calls).not.toContain("UNTRUSTED_DOCKER_HELPER");
+        expect(calls).toContain("SAFE_DOCKER_HELPER");
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_AWS_HOST_SECRET");

@@ -85,7 +85,7 @@ are excluded. Path scans include applicable ancestor `SECURITY.md` files and
 exclude unrelated source files. Credential-directory roots/descendants, empty targets, Git-config includes, Git-shaped unversioned targets, and unversioned directories containing nested Git worktrees fail
 closed; bundled content-addressable installs are supported. Use Codex for paths containing only untracked or ignored files. Inputs
 are mounted read-only, ambient API keys and Docker-configured proxy credentials
-are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, Docker helper lookup is restricted to system paths, and the sandbox has a writable temporary home/cache. Bounded
+are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, Docker helpers resolving into the target are rejected, and the sandbox has a writable temporary home/cache. Bounded
 output is copied to the requested directory. It runs the `security-scan` skill
 with one delegated ranking worker and validates the canonical output contract
 against a stable repository and relative-scope identity. SDK tracing and
