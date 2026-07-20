@@ -916,6 +916,8 @@ describe("Agents SDK thin scan adapter", () => {
       ["scheduler.conf", "SYNTHETIC_KUBE_KEY"],
       ["kubelet.conf", "SYNTHETIC_KUBE_KEY"],
       ["bootstrap-kubelet.conf", "SYNTHETIC_KUBE_KEY"],
+      ["settings.xml", "SYNTHETIC_MAVEN_PASSWORD"],
+      ["credentials", "SYNTHETIC_AWS_SECRET"],
       [
         "project-firebase-adminsdk-ab12c-1234567890.json",
         "SYNTHETIC_FIREBASE_PRIVATE_KEY",
@@ -937,6 +939,12 @@ describe("Agents SDK thin scan adapter", () => {
         },
         CREDSSTORE: "synthetic",
         CREDHELPERS: { "example.invalid": "synthetic" },
+        PROXIES: {
+          default: {
+            httpProxy:
+              "http://alice:SYNTHETIC_DOCKER_PROXY_SECRET@proxy.example.invalid:8080",
+          },
+        },
         padding: "x".repeat(1024 * 1024 + 64),
       })}\n`,
     );
@@ -944,6 +952,11 @@ describe("Agents SDK thin scan adapter", () => {
     await writeFile(
       join(repository, "src", "config.json"),
       '{"feature":true}\n',
+    );
+    await mkdir(join(repository, "deploy", "kube"), { recursive: true });
+    await writeFile(
+      join(repository, "deploy", "kube", "config"),
+      "apiVersion: v1\nkind: Config\nusers:\n- user:\n    token: SYNTHETIC_KUBE_TOKEN\n",
     );
     await writeFile(
       join(repository, "bunfig.toml"),
@@ -1074,6 +1087,9 @@ describe("Agents SDK thin scan adapter", () => {
             "scheduler.conf",
             "kubelet.conf",
             "bootstrap-kubelet.conf",
+            "settings.xml",
+            "credentials",
+            "deploy/kube/config",
             "project-firebase-adminsdk-ab12c-1234567890.json",
             "config.json",
             "credentials.json",
@@ -1152,6 +1168,39 @@ describe("Agents SDK thin scan adapter", () => {
       ).rejects.toThrow("Bare Git repositories cannot be staged safely");
       expect(reached).toBe(false);
       expect(await readdir(workspace)).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("stages a valid Git worktree without a local config file", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspace = join(root, "workspaces");
+    await initializeGitRepository(repository);
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    git(repository, ["add", "app.ts"]);
+    await rm(join(repository, ".git", "config"));
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(existsSync(join(value.repository, "app.ts"))).toBe(true);
+          throw new Error("stop after staging inspection");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("stop after staging inspection");
+      expect(reached).toBe(true);
     } finally {
       await client.close();
     }
@@ -1569,6 +1618,10 @@ describe("Agents SDK thin scan adapter", () => {
       "KUBELET.CONF",
       "bootstrap-kubelet.conf",
       "BOOTSTRAP-KUBELET.CONF",
+      "settings.xml",
+      "SETTINGS.XML",
+      "credentials",
+      "CREDENTIALS",
       "project-firebase-adminsdk-ab12c-1234567890.json",
       "PROJECT-FIREBASE-ADMINSDK-AB12C-1234567890.JSON",
     ];
@@ -1716,10 +1769,21 @@ describe("Agents SDK thin scan adapter", () => {
         },
         CREDSSTORE: "synthetic",
         CREDHELPERS: { "example.invalid": "synthetic" },
+        PROXIES: {
+          default: {
+            httpProxy:
+              "http://alice:SYNTHETIC_DOCKER_PROXY_SECRET@proxy.example.invalid:8080",
+          },
+        },
         padding: "x".repeat(1024 * 1024 + 64),
       })}\n`,
     );
     const mirror = join(repository, "private-mirror");
+    await mkdir(join(repository, "deploy", "kube"), { recursive: true });
+    await writeFile(
+      join(repository, "deploy", "kube", "config"),
+      "apiVersion: v1\nkind: Config\nusers:\n- user:\n    token: SYNTHETIC_KUBE_TOKEN\n",
+    );
     await mkdir(join(mirror, "Objects"), { recursive: true });
     await mkdir(join(mirror, "Refs"));
     await writeFile(join(mirror, "head"), "malformed bare HEAD\n");
@@ -1777,6 +1841,9 @@ describe("Agents SDK thin scan adapter", () => {
             true,
           );
           expect(existsSync(join(value.repository, "config.json"))).toBe(false);
+          expect(
+            existsSync(join(value.repository, "deploy", "kube", "config")),
+          ).toBe(false);
           for (const name of names) {
             expect(existsSync(join(value.repository, name))).toBe(false);
             expect(existsSync(join(value.pluginRoot, "scripts", name))).toBe(

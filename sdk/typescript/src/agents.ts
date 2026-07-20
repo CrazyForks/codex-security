@@ -1606,7 +1606,7 @@ async function requireSafeGitInputs(gitRoot: string): Promise<void> {
     }
     commonDirectory = resolve(gitDirectory, pointer.trim());
   }
-  await requireSafeGitConfig(join(commonDirectory, "config"));
+  await requireSafeGitConfig(join(commonDirectory, "config"), false);
   await requireSafeGitConfig(join(gitDirectory, "config.worktree"), false);
   await requireRegularGitInput(join(gitDirectory, "HEAD"));
   await requireRegularGitInput(join(gitDirectory, "index"));

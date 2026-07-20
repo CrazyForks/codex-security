@@ -182,10 +182,14 @@ function copyTree(source, destination, prefix, depth) {
 }
 
 function copyFile(source, destination, expected) {
+  const name = gitCaseFold(basename(source));
   if (
     input &&
-    gitCaseFold(basename(source)) === "config.json" &&
-    isDockerConfig(source, expected)
+    ((name === "config.json" && isDockerConfig(source, expected)) ||
+      (name === "config" &&
+        ["kube", "kubernetes"].includes(
+          gitCaseFold(basename(dirname(source))),
+        )))
   ) {
     return;
   }
@@ -319,7 +323,9 @@ function isDockerConfig(source, expected) {
         value !== null &&
         typeof value === "object" &&
         Object.keys(value).some((key) =>
-          ["auths", "credsstore", "credhelpers"].includes(key.toLowerCase()),
+          ["auths", "credsstore", "credhelpers", "proxies"].includes(
+            key.toLowerCase(),
+          ),
         )
       );
     } catch {
@@ -681,6 +687,8 @@ function skip(name, kind) {
       ".dev.vars",
       ".htpasswd",
       "local.settings.json",
+      "settings.xml",
+      "credentials",
       "application_default_credentials.json",
       "profiles.yml",
       "profiles.yaml",
