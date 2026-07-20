@@ -466,6 +466,11 @@ export class AgentsSecurity {
               kind: "output",
               source: sandboxOutput,
               destination: scanDir,
+              expectedDestination: {
+                path: scanDir,
+                dev: outputMetadata.dev,
+                ino: outputMetadata.ino,
+              },
               state: { entries: 0, bytes: 0, files: 0 },
               stagingRoot,
             },
@@ -1944,6 +1949,7 @@ interface StagingJob {
   rejectHardlinks?: boolean;
   state: StagingState;
   stagingRoot?: StagingRoot;
+  expectedDestination?: StagingRoot;
 }
 
 interface StagingRoot {

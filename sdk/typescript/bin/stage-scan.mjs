@@ -47,6 +47,13 @@ const state = job.state ?? { entries: 0, bytes: 0, files: 0 };
 const sourceRoot = anchor(job.source);
 mkdirSync(job.destination, { recursive: true, mode: 0o700 });
 const destinationRoot = anchor(job.destination);
+if (
+  job.expectedDestination &&
+  (destinationRoot.dev !== job.expectedDestination.dev ||
+    destinationRoot.ino !== job.expectedDestination.ino)
+) {
+  fail("Scan output directory changed before artifact handoff.");
+}
 
 try {
   if (input)
@@ -175,6 +182,13 @@ function copyTree(source, destination, prefix, depth) {
 }
 
 function copyFile(source, destination, expected) {
+  if (
+    input &&
+    gitCaseFold(basename(source)) === "config.json" &&
+    isDockerConfig(source, expected)
+  ) {
+    return;
+  }
   state.entries += 1;
   state.bytes += expected.size;
   state.files += 1;
@@ -268,6 +282,51 @@ function copyFile(source, destination, expected) {
   } finally {
     if (destinationHandle !== undefined) closeSync(destinationHandle);
     if (sourceHandle !== undefined) closeSync(sourceHandle);
+  }
+}
+
+function isDockerConfig(source, expected) {
+  if (expected.size > 1024 * 1024) return false;
+  let handle;
+  try {
+    handle = openAt(
+      sourceRoot,
+      source,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const opened = fstatSync(handle);
+    if (
+      !opened.isFile() ||
+      opened.dev !== expected.dev ||
+      opened.ino !== expected.ino ||
+      opened.size !== expected.size
+    ) {
+      fail(`Repository input changed while staging: ${JSON.stringify(source)}`);
+    }
+    const contents = readFileSync(handle, "utf8");
+    const final = fstatSync(handle);
+    if (
+      final.dev !== opened.dev ||
+      final.ino !== opened.ino ||
+      final.size !== opened.size ||
+      final.mtimeMs !== opened.mtimeMs
+    ) {
+      fail(`Repository input changed while staging: ${JSON.stringify(source)}`);
+    }
+    try {
+      const value = JSON.parse(contents);
+      return (
+        value !== null &&
+        typeof value === "object" &&
+        ["auths", "credsStore", "credHelpers"].some((key) =>
+          Object.hasOwn(value, key),
+        )
+      );
+    } catch {
+      return false;
+    }
+  } finally {
+    if (handle !== undefined) closeSync(handle);
   }
 }
 
@@ -498,6 +557,7 @@ function skip(name, kind) {
       ".gitconfig",
       ".gitmodules",
       ".dockercfg",
+      ".dockerconfigjson",
       ".hg",
       ".svn",
       ".bzr",
@@ -621,6 +681,9 @@ function skip(name, kind) {
       ".dev.vars",
       ".htpasswd",
       "local.settings.json",
+      "application_default_credentials.json",
+      "profiles.yml",
+      "profiles.yaml",
       "cookies",
       "cookies.sqlite",
       "login data",
@@ -640,6 +703,7 @@ function skip(name, kind) {
     /^(?:credentials|service[-_]account(?:[-_].+)?|client[-_]secret(?:[-_].+)?)\.json$/u.test(
       lower,
     ) ||
+    /firebase-adminsdk[-_].*\.json$/u.test(lower) ||
     /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     /^ssh_host_(?:rsa|dsa|ecdsa|ed25519)_key(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||

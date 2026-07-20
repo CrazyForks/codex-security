@@ -901,6 +901,14 @@ describe("Agents SDK thin scan adapter", () => {
     await writeFile(join(repository, "deploy.ppk"), "SYNTHETIC_PUTTY_KEY\n");
     for (const [file, secret] of [
       [".lfsconfig", "SYNTHETIC_LFS_TOKEN"],
+      [".dockerconfigjson", "SYNTHETIC_DOCKER_AUTH"],
+      ["application_default_credentials.json", "SYNTHETIC_GCP_REFRESH"],
+      ["profiles.yml", "SYNTHETIC_DBT_PASSWORD"],
+      ["profiles.yaml", "SYNTHETIC_DBT_PASSWORD"],
+      [
+        "project-firebase-adminsdk-ab12c-1234567890.json",
+        "SYNTHETIC_FIREBASE_PRIVATE_KEY",
+      ],
       ["credentials.json", "SYNTHETIC_SERVICE_ACCOUNT_KEY"],
       ["service-account.json", "SYNTHETIC_SERVICE_ACCOUNT_KEY"],
       ["client_secret_123.json", "SYNTHETIC_OAUTH_CLIENT_SECRET"],
@@ -910,6 +918,15 @@ describe("Agents SDK thin scan adapter", () => {
     ] as const) {
       await writeFile(join(repository, file), `${secret}\n`);
     }
+    await writeFile(
+      join(repository, "config.json"),
+      '{"auths":{"example.invalid":{"auth":"SYNTHETIC_DOCKER_CONFIG_AUTH"}}}\n',
+    );
+    await mkdir(join(repository, "src"));
+    await writeFile(
+      join(repository, "src", "config.json"),
+      '{"feature":true}\n',
+    );
     await writeFile(
       join(repository, "bunfig.toml"),
       'token="SYNTHETIC_BUN_TOKEN"\n',
@@ -1000,6 +1017,9 @@ describe("Agents SDK thin scan adapter", () => {
         runAgents: async (value: AgentsScanRequest) => {
           reached = true;
           expect(existsSync(join(value.repository, "app.ts"))).toBe(true);
+          expect(existsSync(join(value.repository, "src", "config.json"))).toBe(
+            true,
+          );
           expect(existsSync(filterMarker)).toBe(false);
           for (const path of [
             ".env",
@@ -1025,6 +1045,12 @@ describe("Agents SDK thin scan adapter", () => {
             "etc/ssh/ssh_host_ed25519_key",
             "deploy.ppk",
             ".lfsconfig",
+            ".dockerconfigjson",
+            "application_default_credentials.json",
+            "profiles.yml",
+            "profiles.yaml",
+            "project-firebase-adminsdk-ab12c-1234567890.json",
+            "config.json",
             "credentials.json",
             "service-account.json",
             "client_secret_123.json",
@@ -1332,6 +1358,8 @@ describe("Agents SDK thin scan adapter", () => {
       ".GITCONFIG",
       ".dockercfg",
       ".DOCKERCFG",
+      ".dockerconfigjson",
+      ".DOCKERCONFIGJSON",
       ".npmrc",
       ".NPMRC",
       ".netrc",
@@ -1490,6 +1518,14 @@ describe("Agents SDK thin scan adapter", () => {
       "CLIENT-SECRET-123.JSON",
       "local.settings.json",
       "LOCAL.SETTINGS.JSON",
+      "application_default_credentials.json",
+      "APPLICATION_DEFAULT_CREDENTIALS.JSON",
+      "profiles.yml",
+      "PROFILES.YML",
+      "profiles.yaml",
+      "PROFILES.YAML",
+      "project-firebase-adminsdk-ab12c-1234567890.json",
+      "PROJECT-FIREBASE-ADMINSDK-AB12C-1234567890.JSON",
     ];
     const directories = [
       ".ssh",
@@ -1622,6 +1658,15 @@ describe("Agents SDK thin scan adapter", () => {
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     await mkdir(repository);
     await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    await mkdir(join(repository, "src"));
+    await writeFile(
+      join(repository, "src", "config.json"),
+      '{"feature":true}\n',
+    );
+    await writeFile(
+      join(repository, "config.json"),
+      '{"auths":{"example.invalid":{"auth":"SYNTHETIC_DOCKER_CONFIG_AUTH"}}}\n',
+    );
     const mirror = join(repository, "private-mirror");
     await mkdir(join(mirror, "Objects"), { recursive: true });
     await mkdir(join(mirror, "Refs"));
@@ -1676,6 +1721,10 @@ describe("Agents SDK thin scan adapter", () => {
         runAgents: async (value: AgentsScanRequest) => {
           reached = true;
           expect(existsSync(join(value.repository, "app.ts"))).toBe(true);
+          expect(existsSync(join(value.repository, "src", "config.json"))).toBe(
+            true,
+          );
+          expect(existsSync(join(value.repository, "config.json"))).toBe(false);
           for (const name of names) {
             expect(existsSync(join(value.repository, name))).toBe(false);
             expect(existsSync(join(value.pluginRoot, "scripts", name))).toBe(
@@ -3198,6 +3247,67 @@ describe("Agents SDK thin scan adapter", () => {
         ).toBe(false);
         expect(await readdir(workspace)).toEqual([]);
       } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects an output directory replaced while starting artifact handoff",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const workspace = join(root, "workspaces");
+      const output = join(root, "scan");
+      const moved = join(root, "scan.moved");
+      const protectedDirectory = join(root, "protected");
+      const wrapper = join(root, "stage-wrapper");
+      const originalExecPath = process.execPath;
+      await mkdir(repository);
+      await mkdir(protectedDirectory);
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      await writeFile(join(protectedDirectory, "keep.txt"), "user-owned\n");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh\nset -eu\ndata=$(command cat)\ncase "$data" in *'"kind":"output"'*) command mv '${output}' '${moved}'; command mv '${protectedDirectory}' '${output}';; esac\nprintf '%s' "$data" | '${originalExecPath}' "$@"\n`,
+        { mode: 0o755 },
+      );
+      Object.defineProperty(process, "execPath", {
+        value: wrapper,
+        configurable: true,
+      });
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+          },
+          runAgents: async (value: AgentsScanRequest) => {
+            await writeFile(
+              join(value.scanDir, "payload.txt"),
+              "model-generated\n",
+            );
+            return { finalResponse: "complete" };
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: output }),
+        ).rejects.toThrow(
+          "Scan output directory changed before artifact handoff",
+        );
+        expect(await readFile(join(output, "keep.txt"), "utf8")).toBe(
+          "user-owned\n",
+        );
+        expect(existsSync(join(output, "payload.txt"))).toBe(false);
+        expect(await readdir(moved)).toEqual([]);
+      } finally {
+        Object.defineProperty(process, "execPath", {
+          value: originalExecPath,
+          configurable: true,
+        });
         await client.close();
       }
     },
