@@ -1112,6 +1112,47 @@ describe("Agents SDK thin scan adapter", () => {
       '<publishData><publishProfile userPWD="SYNTHETIC_AZURE_PUBLISH_PASSWORD" /></publishData>\n',
     );
     await writeFile(
+      join(repository, "deploy", "service-account-export.jsonc"),
+      '{"type":"service_account","private_key":"SYNTHETIC_JSONC_GOOGLE_PRIVATE_KEY",}\n',
+    );
+    await writeFile(
+      join(repository, "deploy", "sp-export.jsonc"),
+      '{"appId":"id","password":"SYNTHETIC_MALFORMED_AZURE_SP_SECRET","tenant":"tenant",}\n',
+    );
+    await writeFile(
+      join(repository, "deploy", "cluster-export.jsonc"),
+      '{"apiVersion":"v1","kind":"Config","clusters":[{"name":"prod"}],"users":[{"user":{"token":"SYNTHETIC_JSONC_KUBE_TOKEN"}}],}\n',
+    );
+    await writeFile(
+      join(repository, "deploy", "quoted-cluster.yaml"),
+      '"apiVersion": "v1"\n"kind": "Config"\n"clusters": [{"name": "prod"}]\n"users": [{"name": "admin", "user": {"token": "SYNTHETIC_QUOTED_KUBE_TOKEN"}}]\n',
+    );
+    await writeFile(
+      join(repository, "deploy", "kube-exec.yaml"),
+      "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\nusers:\n- name: admin\n  user:\n    exec:\n      command: aws\n      env:\n      - name: AWS_SECRET_ACCESS_KEY\n        value: SYNTHETIC_KUBE_EXEC_AWS_SECRET\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "identity"),
+      [
+        ["-----BEGIN OPENSSH", "PRIVATE KEY-----"].join(" "),
+        "SYNTHETIC_EXTENSIONLESS_OPENSSH_SECRET",
+        ["-----END OPENSSH", "PRIVATE KEY-----"].join(" "),
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(repository, "deploy", "pgp-backup.asc"),
+      "SYNTHETIC_PGP_SECRET\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "repository.bundle"),
+      "SYNTHETIC_HISTORICAL_SECRET\n",
+    );
+    await writeFile(
+      join(repository, "prod.env"),
+      "DATABASE_URL=postgres://svc:SYNTHETIC_PROD_ENV_SECRET@db.internal/app\n",
+    );
+    await writeFile(
       join(repository, "deploy", "azure-sp.json"),
       `${JSON.stringify({
         appId: "11111111-1111-1111-1111-111111111111",
@@ -1284,6 +1325,15 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/cloud-export.jsonc",
             "deploy/AuthKey_ABC12345.p8",
             "deploy/myapp.PublishSettings",
+            "deploy/service-account-export.jsonc",
+            "deploy/sp-export.jsonc",
+            "deploy/cluster-export.jsonc",
+            "deploy/quoted-cluster.yaml",
+            "deploy/kube-exec.yaml",
+            "deploy/identity",
+            "deploy/pgp-backup.asc",
+            "deploy/repository.bundle",
+            "prod.env",
             "deploy/azure-sp.json",
             "deploy/new-user-credentials.csv",
             "deploy/deploy_rsa",

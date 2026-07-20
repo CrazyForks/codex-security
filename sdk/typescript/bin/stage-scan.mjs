@@ -185,7 +185,9 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (((/\.jsonc?$/u.test(name) || /\.ya?ml$/u.test(name)) &&
+    (((/\.jsonc?$/u.test(name) ||
+      /\.ya?ml$/u.test(name) ||
+      !name.includes(".")) &&
       isCredentialDocument(source, expected, name)) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
@@ -318,22 +320,26 @@ function isCredentialDocument(source, expected, name) {
     ) {
       fail(`Repository input changed while staging: ${JSON.stringify(source)}`);
     }
-    if (/\.ya?ml$/u.test(name)) {
+    const json = /\.jsonc?$/u.test(name);
+    const yaml = /\.ya?ml$/u.test(name);
+    if (!json && !yaml) {
+      return /^\s*-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----/imu.test(
+        contents,
+      );
+    }
+    if (yaml) {
+      const unquoted = contents.replace(/["']/gu, "");
       return (
-        /(?:^|[\s{,])apiversion\s*:\s*v1(?:\s|[,}]|$)/imu.test(contents) &&
-        /(?:^|[\s{,])kind\s*:\s*config(?:\s|[,}]|$)/imu.test(contents) &&
-        /(?:^|[\s{,])clusters\s*:/imu.test(contents) &&
-        /(?:^|[\s{,])users\s*:/imu.test(contents) &&
-        /(?:^|[\s{,])(?:token|client-key-data|id-token|refresh-token|access-token)\s*:/imu.test(
-          contents,
-        )
+        /(?:^|[\s{,])apiversion\s*:\s*v1(?:\s|[,}]|$)/imu.test(unquoted) &&
+        /(?:^|[\s{,])kind\s*:\s*config(?:\s|[,}]|$)/imu.test(unquoted) &&
+        /(?:^|[\s{,])clusters\s*:/imu.test(unquoted) &&
+        /(?:^|[\s{,])users\s*:/imu.test(unquoted)
       );
     }
     try {
       const pending = [JSON.parse(contents)];
       let entries = 0;
       let kubeconfig = false;
-      let kubeCredential = false;
       while (pending.length > 0) {
         const value = pending.pop();
         if (value === null || typeof value !== "object") continue;
@@ -365,13 +371,6 @@ function isCredentialDocument(source, expected, name) {
         kubeconfig ||= ["apiversion", "kind", "clusters", "users"].every(
           (key) => keys.has(key),
         );
-        kubeCredential ||= [
-          "token",
-          "clientkeydata",
-          "idtoken",
-          "refreshtoken",
-          "accesstoken",
-        ].some((key) => keys.has(key));
         if (
           ["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
             (key) => keys.has(key),
@@ -401,7 +400,7 @@ function isCredentialDocument(source, expected, name) {
           return true;
         }
       }
-      return kubeconfig && kubeCredential;
+      return kubeconfig;
     } catch {
       const field = (name) =>
         new RegExp(`["']?${name}["']?\\s*:`, "iu").test(contents);
@@ -415,6 +414,11 @@ function isCredentialDocument(source, expected, name) {
         ].some(field) ||
         (field("access[-_]?key[-_]?id") &&
           (field("secret[-_]?access[-_]?key") || field("session[-_]?token"))) ||
+        (field("app[-_]?id") &&
+          field("password") &&
+          field("tenant(?:[-_]?id)?")) ||
+        (field("type") && field("private[-_]?key")) ||
+        ["api[-_]?version", "kind", "clusters", "users"].every(field) ||
         (field("client[-_]?id") &&
           field("client[-_]?secret") &&
           [
@@ -811,6 +815,7 @@ function skip(name, kind) {
       "logins.json",
     ].includes(lower) ||
     lower.startsWith(".env.") ||
+    lower.endsWith(".env") ||
     lower.startsWith(".envrc.") ||
     lower.startsWith(".flaskenv") ||
     lower.startsWith(".yarnrc") ||
@@ -832,6 +837,9 @@ function skip(name, kind) {
     lower.endsWith(".p12") ||
     lower.endsWith(".pfx") ||
     lower.endsWith(".p8") ||
+    lower.endsWith(".asc") ||
+    lower.endsWith(".gpg") ||
+    lower.endsWith(".age") ||
     lower.endsWith(".pkcs12") ||
     lower.endsWith(".jks") ||
     lower.endsWith(".keystore") ||
@@ -841,6 +849,7 @@ function skip(name, kind) {
     lower.endsWith(".ovpn") ||
     lower.endsWith(".mobileconfig") ||
     lower.endsWith(".publishsettings") ||
+    lower.endsWith(".bundle") ||
     /\.tfrc(?:\.json)?$/u.test(lower) ||
     /\.(?:tfstate(?:\..+)?|(?:auto\.)?tfvars(?:\.json)?)$/u.test(lower)
   ) {
