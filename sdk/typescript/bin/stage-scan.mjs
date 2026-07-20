@@ -558,6 +558,7 @@ function skip(name, kind) {
       "pip.conf",
       "pip.ini",
       ".gemrc",
+      "bazel.rc",
       ".bashrc",
       ".bash_profile",
       ".bash_login",
@@ -579,6 +580,7 @@ function skip(name, kind) {
     ].includes(lower) ||
     lower.startsWith(".env.") ||
     lower.startsWith(".yarnrc") ||
+    lower.startsWith(".bazelrc") ||
     (lower.startsWith(".") && lower.endsWith("_history")) ||
     /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||
