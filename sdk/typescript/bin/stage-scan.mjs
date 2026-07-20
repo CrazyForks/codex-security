@@ -369,9 +369,13 @@ function isCredentialDocument(source, expected, name) {
       ) ||
       /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u.test(contents) ||
       /\bBearer\s+[A-Za-z0-9+/_=-]{20,}\b/iu.test(contents) ||
-      /^\s*(?:[^,\n]+,)*access key id\s*,\s*secret access key(?:\s*,[^\n]*)?$/imu.test(
-        contents,
-      ) ||
+      (() => {
+        const prefix = contents.slice(0, 256 * 1024).toLowerCase();
+        return (
+          prefix.includes("access key id") &&
+          prefix.includes("secret access key")
+        );
+      })() ||
       /(?:^|[\s{,])["']?[A-Za-z0-9_-]{0,64}(?:api[-_]?key|secret[-_]?key|private[-_]?key|password|token)[A-Za-z0-9_-]{0,64}["']?\s*[:=]\s*["']?(?:SYNTHETIC_[A-Za-z0-9_-]{4,}|[A-Za-z0-9+/_=-]{20,})["']?(?:\s|[,}]|$)/imu.test(
         contents,
       );
