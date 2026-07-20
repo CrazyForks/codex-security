@@ -71,7 +71,11 @@ try {
         );
       }
       if (job.scopes && !include(actualPath, job.scopes)) continue;
-      copyFile(source, join(job.destination, actualPath), metadata);
+      const destinationPath =
+        job.ignoreCase && gitCaseFold(basename(actualPath)) === "security.md"
+          ? join(dirname(actualPath), "SECURITY.md")
+          : actualPath;
+      copyFile(source, join(job.destination, destinationPath), metadata);
     }
   } else {
     copyTree(job.source, job.destination, "", 0);

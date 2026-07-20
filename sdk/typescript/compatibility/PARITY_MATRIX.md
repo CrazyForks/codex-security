@@ -84,8 +84,8 @@ sparse-checkout paths absent from the worktree, and Git credentials/history
 are excluded. Path scans include applicable ancestor `SECURITY.md` files and
 exclude unrelated source files. Empty and Git-shaped unversioned targets fail
 closed; bundled content-addressable installs are supported. Use Codex for paths containing only untracked or ignored files. Inputs
-are mounted read-only, ambient API keys are not forwarded to Docker
-subprocesses, and the sandbox has a writable temporary home/cache. Bounded
+are mounted read-only, ambient API keys and Docker-configured proxy credentials
+are not forwarded to the scan shell, and the sandbox has a writable temporary home/cache. Bounded
 output is copied to the requested directory. It runs the `security-scan` skill
 with one delegated ranking worker and validates the canonical output contract
 against a stable repository and relative-scope identity. SDK tracing and

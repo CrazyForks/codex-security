@@ -1,8 +1,16 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import { InvalidTargetError } from "./errors.js";
 
@@ -383,12 +391,56 @@ async function gitOutput(
       ...process.env,
       OPENAI_API_KEY: undefined,
       CODEX_API_KEY: undefined,
+      PATH: safeHostPath(repository),
       GIT_NO_LAZY_FETCH: "1",
       GIT_TERMINAL_PROMPT: "0",
       GIT_OPTIONAL_LOCKS: "0",
     },
   });
   return stdout.trim();
+}
+
+export function safeHostPath(repository?: string): string {
+  const root = repository === undefined ? undefined : realpathSync(repository);
+  const executableNames =
+    process.platform === "win32"
+      ? ["git.exe", "git.cmd", "docker.exe", "docker.cmd"]
+      : ["git", "docker"];
+  const entries = (process.env["PATH"] ?? "")
+    .split(delimiter)
+    .filter((entry) => {
+      if (
+        entry.length === 0 ||
+        !isAbsolute(entry) ||
+        /(?:^|[\\/])node_modules[\\/]\.bin(?:[\\/]|$)/iu.test(entry)
+      ) {
+        return false;
+      }
+      try {
+        const canonical = realpathSync(entry);
+        const candidates = [canonical];
+        for (const name of executableNames) {
+          try {
+            candidates.push(realpathSync(join(canonical, name)));
+          } catch {
+            continue;
+          }
+        }
+        return candidates.every((candidate) => {
+          if (root === undefined) return true;
+          const path = relative(root, candidate);
+          return (
+            path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)
+          );
+        });
+      } catch {
+        return false;
+      }
+    });
+  if (entries.length > 0) return entries.join(delimiter);
+  return process.platform === "win32"
+    ? "C:\\Windows\\System32;C:\\Windows"
+    : "/usr/bin:/bin:/usr/sbin:/sbin";
 }
 
 async function abortable<T>(

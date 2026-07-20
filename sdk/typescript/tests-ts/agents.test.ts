@@ -250,6 +250,54 @@ describe("Agents SDK thin scan adapter", () => {
   });
 
   test.skipIf(process.platform === "win32")(
+    "ignores a host Git executable that resolves into the repository",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const outsideBin = join(root, "outside-bin");
+      const marker = join(root, "host-git-executed");
+      await initializeGitRepository(repository);
+      await mkdir(join(repository, "tools"), { recursive: true });
+      await mkdir(outsideBin);
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      git(repository, ["add", "app.ts"]);
+      await writeFile(
+        join(repository, "tools", "git"),
+        `#!/bin/sh\nprintf '%s\\n' HOST_CODE_EXECUTED > '${marker}'\nexit 42\n`,
+        { mode: 0o755 },
+      );
+      await symlink(join(repository, "tools", "git"), join(outsideBin, "git"));
+      const previousPath = process.env["PATH"];
+      process.env["PATH"] = `${outsideBin}:${previousPath ?? "/usr/bin:/bin"}`;
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: join(root, "workspaces"),
+          },
+          runAgents: async () => {
+            reached = true;
+            throw new Error("stop after safe Git staging");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: join(root, "scan") }),
+        ).rejects.toThrow("stop after safe Git staging");
+        expect(reached).toBe(true);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
+        await client.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "rejects diff targets before executing repository-local Git",
     async () => {
       const root = await temporaryDirectory();
@@ -1213,7 +1261,7 @@ describe("Agents SDK thin scan adapter", () => {
       );
       expect(staged.status, staged.stderr).toBe(0);
       expect(existsSync(join(destination, "src", "app.ts"))).toBe(true);
-      expect(existsSync(join(destination, "security.md"))).toBe(true);
+      expect(existsSync(join(destination, "SECURITY.md"))).toBe(true);
     },
   );
 
@@ -2447,6 +2495,16 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).toContain("<network>");
         expect(calls).toContain("<disconnect>");
         expect(calls).toContain("<bridge>");
+        for (const name of [
+          "HTTP_PROXY",
+          "HTTPS_PROXY",
+          "NO_PROXY",
+          "http_proxy",
+          "https_proxy",
+          "no_proxy",
+        ]) {
+          expect(calls).toContain(`<${name}=>`);
+        }
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");

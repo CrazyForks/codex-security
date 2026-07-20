@@ -49,8 +49,8 @@ excluding unrelated source files. Local edits to tracked files are included; unt
 submodule contents, symlinks, hard-linked source/custom-plugin files, unstaged deletions, sparse-checkout paths absent
 from the worktree, and Git credentials/history are excluded. Empty and
 Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when a path
-contains only untracked or ignored files. Ambient OpenAI/Codex API keys are
-not forwarded to Docker subprocesses. A sanitized,
+contains only untracked or ignored files. Ambient OpenAI/Codex API keys and
+Docker-configured proxy credentials are not forwarded to the scan shell. A sanitized,
 one-way-hashed remote and relative-scope identity keeps finding fingerprints
 stable across checkouts without colliding across monorepo services; bounded
 results are copied to the requested output directory. SDK tracing and sensitive

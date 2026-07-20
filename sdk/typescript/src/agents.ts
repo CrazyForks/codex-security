@@ -84,6 +84,7 @@ import {
   normalizeRepository,
   normalizeTarget,
   resolveRepositoryPath,
+  safeHostPath,
   type NormalizedTarget,
   type ScanTarget,
 } from "./targets.js";
@@ -683,7 +684,16 @@ function suppressUnsafeHostEnvironment(
         const next = join(savedDockerWrapper, "docker.next");
         writeFileSync(
           next,
-          `#!/bin/sh\nunset OPENAI_API_KEY CODEX_API_KEY\nexec '${executable.replaceAll("'", "'\"'\"'")}' "$@"\n`,
+          [
+            "#!/bin/sh",
+            "unset OPENAI_API_KEY CODEX_API_KEY",
+            'if [ "${1-}" = run ]; then',
+            "  shift",
+            `  exec '${executable.replaceAll("'", "'\"'\"'")}' run -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= -e http_proxy= -e https_proxy= -e no_proxy= "$@"`,
+            "fi",
+            `exec '${executable.replaceAll("'", "'\"'\"'")}' "$@"`,
+            "",
+          ].join("\n"),
           { flag: "wx", mode: 0o700 },
         );
         renameSync(next, join(savedDockerWrapper, "docker"));
@@ -725,41 +735,6 @@ function releaseHostRoot(root: string): void {
   const count = activeHostRoots.get(root)! - 1;
   if (count === 0) activeHostRoots.delete(root);
   else activeHostRoots.set(root, count);
-}
-
-function safeHostPath(repository?: string): string {
-  const root = repository === undefined ? undefined : statSync(repository);
-  const entries = (process.env["PATH"] ?? "")
-    .split(delimiter)
-    .filter((entry) => {
-      if (
-        entry.length === 0 ||
-        !isAbsolute(entry) ||
-        /(?:^|[\\/])node_modules[\\/]\.bin(?:[\\/]|$)/iu.test(entry)
-      ) {
-        return false;
-      }
-      let canonical: string;
-      try {
-        canonical = realpathSync(entry);
-      } catch {
-        return false;
-      }
-      if (root === undefined) return true;
-      while (true) {
-        const metadata = statSync(canonical);
-        if (metadata.dev === root.dev && metadata.ino === root.ino) {
-          return false;
-        }
-        const parent = dirname(canonical);
-        if (parent === canonical) return true;
-        canonical = parent;
-      }
-    });
-  if (entries.length > 0) return entries.join(delimiter);
-  return process.platform === "win32"
-    ? "C:\\Windows\\System32;C:\\Windows"
-    : "/usr/bin:/bin:/usr/sbin:/sbin";
 }
 
 function suppressAgentsTracing(): () => void {
