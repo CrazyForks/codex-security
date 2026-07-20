@@ -705,6 +705,34 @@ function suppressUnsafeHostEnvironment(
         );
       }
       const executable = realpathSync(docker);
+      const python = helperPath
+        .split(delimiter)
+        .map((entry) => join(entry, "python3"))
+        .find((entry) => {
+          try {
+            accessSync(entry, fsConstants.X_OK);
+            return statSync(entry).isFile();
+          } catch {
+            return false;
+          }
+        });
+      if (python === undefined) {
+        throw new CodexSecurityError(
+          "Agents SDK Docker PTY support requires a safe host python3 executable.",
+        );
+      }
+      const pythonExecutable = realpathSync(python);
+      const ptyNext = join(savedDockerWrapper, "python3.next");
+      writeFileSync(
+        ptyNext,
+        [
+          "#!/bin/sh",
+          `exec /usr/bin/env -i PATH="\${PATH-}" HOME="\${HOME-}" USER="\${USER-}" TMPDIR="\${TMPDIR-/tmp}" TERM="\${TERM-}" LANG="\${LANG-}" LC_ALL="\${LC_ALL-}" DOCKER_CONFIG="\${DOCKER_CONFIG-}" DOCKER_HOST="\${DOCKER_HOST-}" DOCKER_CONTEXT="\${DOCKER_CONTEXT-}" DOCKER_CERT_PATH="\${DOCKER_CERT_PATH-}" DOCKER_TLS_VERIFY="\${DOCKER_TLS_VERIFY-}" DOCKER_API_VERSION="\${DOCKER_API_VERSION-}" __OPENAI_AGENTS_PTY_UID="\${__OPENAI_AGENTS_PTY_UID-}" __OPENAI_AGENTS_PTY_GID="\${__OPENAI_AGENTS_PTY_GID-}" '${pythonExecutable.replaceAll("'", "'\\\"'\\\"'")}' -I "$@"`,
+          "",
+        ].join("\n"),
+        { flag: "wx", mode: 0o700 },
+      );
+      renameSync(ptyNext, join(savedDockerWrapper, "python3"));
       if (savedDockerExecutable !== executable) {
         const next = join(savedDockerWrapper, "docker.next");
         writeFileSync(
@@ -733,6 +761,7 @@ function suppressUnsafeHostEnvironment(
     if (root !== undefined) releaseHostRoot(root);
     if (savedDockerWrapper !== undefined) {
       rmSync(join(savedDockerWrapper, "docker.next"), { force: true });
+      rmSync(join(savedDockerWrapper, "python3.next"), { force: true });
     }
     if (hostEnvironmentUsers === 0 && savedDockerWrapper !== undefined) {
       rmSync(savedDockerWrapper, { recursive: true, force: true });

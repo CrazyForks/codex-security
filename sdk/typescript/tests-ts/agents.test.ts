@@ -3029,6 +3029,12 @@ describe("Agents SDK thin scan adapter", () => {
           expect(process.env["PATH"]?.split(":")[0]).not.toStartWith(
             repositoryTmp,
           );
+          expect(
+            await readFile(
+              join(process.env["PATH"]!.split(":")[0]!, "python3"),
+              "utf8",
+            ),
+          ).toContain(' -I "$@"');
           expect(createDebug.enabled("openai-agents:core")).toBe(false);
           requests.push(modelRequest);
           response += 1;
