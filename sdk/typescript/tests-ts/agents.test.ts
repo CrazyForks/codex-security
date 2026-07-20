@@ -1251,6 +1251,22 @@ describe("Agents SDK thin scan adapter", () => {
         "SYNTHETIC_PLUGIN_SECRET\n",
       );
     }
+    const awsCache = join(repository, ".aws", "sso", "cache");
+    await mkdir(awsCache, { recursive: true });
+    await writeFile(
+      join(awsCache, "session.json"),
+      "SYNTHETIC_AWS_SSO_SECRET\n",
+    );
+    const bareRoot = join(root, "private-mirror.git");
+    const bareObjects = join(bareRoot, "objects", "aa");
+    await mkdir(bareObjects, { recursive: true });
+    await mkdir(join(bareRoot, "refs"));
+    await writeFile(join(bareRoot, "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(bareRoot, "config"), "[core]\n  bare = true\n");
+    await writeFile(
+      join(bareObjects, "history"),
+      "SYNTHETIC_OLD_HISTORY_SECRET\n",
+    );
     let reached = false;
     const client = new TestClient(
       { pluginPath: plugin },
@@ -1281,6 +1297,18 @@ describe("Agents SDK thin scan adapter", () => {
     try {
       await expect(
         client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("Bare Git-like directory cannot be staged safely");
+      expect(reached).toBe(false);
+      await expect(
+        client.run(awsCache, {
+          outputDir: join(root, "credential-descendant-scan"),
+        }),
+      ).rejects.toThrow("Credential directory cannot be staged safely");
+      expect(reached).toBe(false);
+      await expect(
+        client.run(join(bareRoot, "objects"), {
+          outputDir: join(root, "git-objects-scan"),
+        }),
       ).rejects.toThrow("Bare Git-like directory cannot be staged safely");
       expect(reached).toBe(false);
       await expect(

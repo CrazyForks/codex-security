@@ -31,11 +31,7 @@ mkdirSync(job.destination, { recursive: true, mode: 0o700 });
 const destinationRoot = anchor(job.destination);
 
 try {
-  if (input && skip(basename(job.source), job.kind)) {
-    fail(
-      `Credential directory cannot be staged safely: ${JSON.stringify(job.source)}`,
-    );
-  }
+  if (input) requireSafeSourceRoot(job.source, job.kind);
   if (job.kind === "tracked") {
     const seen = new Set();
     const directoryEntries = new Map();
@@ -321,7 +317,16 @@ function resolveSourcePath(path, cache, ignoreCase) {
     let entries = cache.get(current);
     if (entries === undefined) {
       try {
-        entries = readDirectory(sourceRoot, current).map((entry) => entry.name);
+        const names = readDirectory(sourceRoot, current).map(
+          (entry) => entry.name,
+        );
+        entries = new Map(names.map((name) => [name, name]));
+        if (process.platform === "darwin" || ignoreCase) {
+          for (const name of names) {
+            const folded = gitPathFold(name, ignoreCase);
+            if (!entries.has(folded)) entries.set(folded, name);
+          }
+        }
       } catch (error) {
         if (!error || (error.code !== "ENOENT" && error.code !== "ENOTDIR")) {
           throw error;
@@ -334,19 +339,13 @@ function resolveSourcePath(path, cache, ignoreCase) {
     if (
       job.kind === "tracked" &&
       current !== job.source &&
-      isBareGitDirectory(entries) &&
+      isBareGitDirectory([...entries.values()]) &&
       hasGitHead(current)
     ) {
       return null;
     }
     const name =
-      entries.find((entry) => entry === part) ??
-      (process.platform === "darwin" || ignoreCase
-        ? entries.find(
-            (entry) =>
-              gitPathFold(entry, ignoreCase) === gitPathFold(part, ignoreCase),
-          )
-        : undefined);
+      entries.get(part) ?? entries.get(gitPathFold(part, ignoreCase));
     if (name === undefined) return null;
     current = join(current, name);
   }
@@ -357,6 +356,33 @@ function isBareGitDirectory(entries) {
   return ["head", "config", "objects", "refs"].every((name) =>
     entries.some((entry) => gitCaseFold(entry) === name),
   );
+}
+
+function requireSafeSourceRoot(source, kind) {
+  let directory = source;
+  while (true) {
+    if (skip(basename(directory), kind)) {
+      fail(
+        `Credential directory cannot be staged safely: ${JSON.stringify(source)}`,
+      );
+    }
+    if (directory !== source) {
+      const names = readdirSync(directory, { withFileTypes: true }).map(
+        (entry) => entry.name,
+      );
+      if (
+        isBareGitDirectory(names) &&
+        !names.some((name) => gitCaseFold(name) === ".git")
+      ) {
+        fail(
+          `Bare Git-like directory cannot be staged safely: ${JSON.stringify(directory)}`,
+        );
+      }
+    }
+    const parent = dirname(directory);
+    if (parent === directory) return;
+    directory = parent;
+  }
 }
 
 function hasGitHead(directory) {
