@@ -1151,7 +1151,7 @@ async function stageRepository(
       `Git worktree metadata changed before staging: ${displayPath(source)}`,
     );
   }
-  if (gitRoot !== source && isBareGitDirectory(await readdir(source))) {
+  if (isBareGitDirectory(await readdir(source))) {
     throw new InvalidTargetError(
       `Bare Git repositories cannot be staged safely: ${displayPath(source)}`,
     );

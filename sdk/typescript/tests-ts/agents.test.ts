@@ -989,6 +989,50 @@ describe("Agents SDK thin scan adapter", () => {
     }
   });
 
+  test("rejects a tracked bare-Git payload at the worktree root", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspace = join(root, "workspaces");
+    await initializeGitRepository(repository);
+    await mkdir(join(repository, "objects", "aa"), { recursive: true });
+    await mkdir(join(repository, "refs", "heads"), { recursive: true });
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    await writeFile(join(repository, "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(
+      join(repository, "config"),
+      '[remote "origin"]\n  url = https://user:SYNTHETIC_ROOT_BARE_TOKEN@example.invalid/private.git\n',
+    );
+    await writeFile(
+      join(repository, "objects", "aa", "blob"),
+      "SYNTHETIC_ROOT_BARE_HISTORY\n",
+    );
+    await writeFile(join(repository, "refs", "heads", "main"), "deadbeef\n");
+    git(repository, ["add", "."]);
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async () => {
+          reached = true;
+          throw new Error("runtime must not be reached");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("Bare Git repositories cannot be staged safely");
+      expect(reached).toBe(false);
+      expect(await readdir(workspace)).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("distinguishes Git subdirectories while keeping equivalent checkout identities stable", async () => {
     const root = await temporaryDirectory();
     const identities = new Map<string, string[]>();
@@ -2304,7 +2348,6 @@ describe("Agents SDK thin scan adapter", () => {
     await initializeGitRepository(repository);
     await mkdir(join(repository, "src"));
     await mkdir(join(repository, "objects"));
-    await mkdir(join(repository, "refs"));
     await mkdir(join(repository, "fixtures", "not-a-repository.git"), {
       recursive: true,
     });
