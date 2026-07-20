@@ -185,7 +185,10 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (((/\.(?:jsonc?|ya?ml|conf|txt)$/u.test(name) || !name.includes(".")) &&
+    (((/\.(?:jsonc?|ya?ml|conf|txt|toml|properties|ini|cfg|cnf|xml)$/u.test(
+      name,
+    ) ||
+      !name.includes(".")) &&
       isCredentialDocument(source, expected, name)) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
@@ -350,27 +353,31 @@ function isCredentialDocument(source, expected, name) {
         ["token[-_]?type", "expires[-_]?in", "expires[-_]?on", "tenant"].some(
           field,
         ));
-    if (!json && !structured) {
-      return (
-        /^\s*-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----/imu.test(
-          contents,
-        ) ||
-        /^\s*eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\s*$/mu.test(
-          contents,
-        )
+    const staticCredential = () =>
+      /-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----/imu.test(
+        contents,
+      ) ||
+      /\b(?:sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|ghp_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{12,}|AIza[0-9A-Za-z_-]{30,})\b/u.test(
+        contents,
+      ) ||
+      /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u.test(contents) ||
+      /(?:^|[\s{,])["']?[A-Za-z0-9_-]*(?:api[-_]?key|secret[-_]?key|private[-_]?key|password|token)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?[^\s"'{},][^\n"'},]{3,}/imu.test(
+        contents,
       );
+    if (staticCredential()) return true;
+    if (!json && !structured) {
+      return false;
     }
     if (structured) {
       const unquoted = contents.replace(/["']/gu, "");
       return (
         credentialFields() ||
-        /^\s*eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\s*$/mu.test(
-          contents,
-        ) ||
         (/(?:^|[\s{,])apiversion\s*:\s*v1(?:\s|[,}]|$)/imu.test(unquoted) &&
-          /(?:^|[\s{,])kind\s*:\s*config(?:\s|[,}]|$)/imu.test(unquoted) &&
-          /(?:^|[\s{,])clusters\s*:/imu.test(unquoted) &&
-          /(?:^|[\s{,])users\s*:/imu.test(unquoted))
+          ((/(?:^|[\s{,])kind\s*:\s*config(?:\s|[,}]|$)/imu.test(unquoted) &&
+            /(?:^|[\s{,])clusters\s*:/imu.test(unquoted) &&
+            /(?:^|[\s{,])users\s*:/imu.test(unquoted)) ||
+            (/(?:^|[\s{,])kind\s*:\s*secret(?:\s|[,}]|$)/imu.test(unquoted) &&
+              /(?:^|[\s{,])(?:stringdata|data)\s*:/imu.test(unquoted))))
       );
     }
     if (credentialFields()) return true;
@@ -445,10 +452,7 @@ function isCredentialDocument(source, expected, name) {
     } catch {
       return (
         credentialFields() ||
-        ["api[-_]?version", "kind", "clusters", "users"].every(field) ||
-        /^\s*eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\s*$/mu.test(
-          contents,
-        )
+        ["api[-_]?version", "kind", "clusters", "users"].every(field)
       );
     }
   } finally {

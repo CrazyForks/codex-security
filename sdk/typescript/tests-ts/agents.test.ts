@@ -1147,6 +1147,36 @@ describe("Agents SDK thin scan adapter", () => {
       join(repository, "deploy", "prod-token.txt"),
       "eyJhbGciOiJSUzI1NiIsImtpZCI6InN5bnRoZXRpYyJ9.SYNTHETIC_KUBE_BEARER.signature\n",
     );
+    const privateKeyHeader = ["-----BEGIN", "PRIVATE KEY-----"].join(" ");
+    const privateKeyFooter = ["-----END", "PRIVATE KEY-----"].join(" ");
+    await writeFile(
+      join(repository, "deploy", "k8s-secret.yaml"),
+      `apiVersion: v1\nkind: Secret\nmetadata:\n  name: prod-token\nstringData:\n  OPENAI_API_KEY: sk-SYNTHETIC_OPENAI_RELEASE_TOKEN\n  tls.key: |\n    ${privateKeyHeader}\n    SYNTHETIC_PRIVATE_KEY\n    ${privateKeyFooter}\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "helm-values.yaml"),
+      `service:\n  token: eyJhbGciOiJSUzI1NiJ9.SYNTHETIC.payload\n  privateKey: |\n    ${privateKeyHeader}\n    SYNTHETIC_HELM_PRIVATE_KEY\n    ${privateKeyFooter}\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "secret.json"),
+      `${JSON.stringify({ apiKey: "sk-SYNTHETIC_JSON_RELEASE_TOKEN", privateKey: `${privateKeyHeader}\\nSYNTHETIC_JSON_PRIVATE_KEY\\n${privateKeyFooter}` })}\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "bearer.txt"),
+      "Bearer eyJhbGciOiJSUzI1NiJ9.SYNTHETIC.signature\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "token.txt"),
+      "ghp_SYNTHETIC_OPAQUE_TOKEN\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "secrets.toml"),
+      'api_key = "SYNTHETIC_TOML_TOKEN"\n',
+    );
+    await writeFile(
+      join(repository, "deploy", "secrets.properties"),
+      "password=SYNTHETIC_PROPERTIES_PASSWORD\n",
+    );
     await writeFile(
       join(repository, "deploy", "identity"),
       [
@@ -1352,6 +1382,13 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/aws-export.yaml",
             "deploy/cluster-prod.conf",
             "deploy/prod-token.txt",
+            "deploy/k8s-secret.yaml",
+            "deploy/helm-values.yaml",
+            "deploy/secret.json",
+            "deploy/bearer.txt",
+            "deploy/token.txt",
+            "deploy/secrets.toml",
+            "deploy/secrets.properties",
             "deploy/identity",
             "deploy/pgp-backup.asc",
             "deploy/repository.bundle",
