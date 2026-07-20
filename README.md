@@ -8,9 +8,10 @@ Run Codex Security scans from the command line or a TypeScript application.
 ## Requirements
 
 The SDK and CLI require Node.js 22 or later. Standard Agents scans require a
-running Docker daemon; the default sandbox image includes Python for the
-bundled scan helpers. Codex scans require a host Python interpreter. Docker and
-Python are not needed to install the package or run
+running Docker daemon and a host Python 3 interpreter for the SDK PTY bridge;
+the default sandbox image includes Python for the bundled scan helpers. Codex
+scans also require a host Python interpreter. Docker and Python are not needed
+to install the package or run
 `--help` and `--version`.
 
 Standard repository and path scans run through the OpenAI Agents SDK by

@@ -370,8 +370,7 @@ function resolveSourcePath(path, cache, ignoreCase) {
     if (
       job.kind === "tracked" &&
       current !== job.source &&
-      isBareGitDirectory([...entries.values()]) &&
-      hasGitHead(current)
+      isBareGitDirectory([...entries.values()])
     ) {
       return null;
     }
@@ -426,42 +425,6 @@ function requireSafeSourceRoot(source, kind, bundledPlugin) {
     const parent = dirname(directory);
     if (parent === directory) return;
     directory = parent;
-  }
-}
-
-function hasGitHead(directory) {
-  const path = join(directory, "HEAD");
-  const metadata = metadataAt(sourceRoot, path);
-  if (
-    metadata === null ||
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.size > 64 * 1024
-  ) {
-    return true;
-  }
-  const handle = openAt(
-    sourceRoot,
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  );
-  try {
-    const opened = fstatSync(handle);
-    if (
-      !opened.isFile() ||
-      opened.dev !== metadata.dev ||
-      opened.ino !== metadata.ino ||
-      opened.size !== metadata.size
-    ) {
-      return true;
-    }
-    const head = new Uint8Array(opened.size);
-    if (readSync(handle, head, 0, head.length, 0) !== head.length) return true;
-    return /^(?:ref:\s*refs\/[^\r\n]+|[0-9a-f]{40,64})\s*$/iu.test(
-      Buffer.from(head).toString("utf8"),
-    );
-  } finally {
-    closeSync(handle);
   }
 }
 

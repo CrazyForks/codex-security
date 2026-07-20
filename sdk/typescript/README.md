@@ -17,7 +17,8 @@ npx codex-security --version
 ```
 
 Node.js 22 or later is required. Standard Agents scans require a running Docker
-daemon; the default sandbox image includes Python for the bundled scan helpers.
+daemon and a host Python 3 interpreter for the SDK PTY bridge; the default
+sandbox image includes Python for the bundled scan helpers.
 `--python` and `pythonPath` select an in-container interpreter for Agents
 scans or a host interpreter for Codex scans.
 

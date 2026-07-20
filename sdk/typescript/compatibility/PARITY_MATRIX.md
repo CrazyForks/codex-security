@@ -95,7 +95,7 @@ does not consume file-backed Codex authentication.
 
 Git-backed targets are deliberately treated as directory snapshots, so history
 and advisory lookup is unavailable; staged targets omit common local
-credential files and directories but remain trusted-local input. Docker-host limits apply. Native
+credential files and directories but remain trusted-local input. Docker-host limits and the SDK's host Python 3 PTY-bridge requirement apply. Native
 Windows paths route to Codex; WSL can be used for Agents execution. Docker
 workspaces default to
 `~/.cache/codex-security/sandboxes`; set

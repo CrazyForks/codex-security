@@ -854,6 +854,18 @@ describe("Agents SDK thin scan adapter", () => {
       join(bare, "config"),
       `${await readFile(join(bare, "config"), "utf8")}\n[remote "origin"]\n  url = https://user:SYNTHETIC_BARE_TOKEN@example.invalid/private.git\n`,
     );
+    const malformedBare = join(repository, "fixtures", "malformed-mirror");
+    await mkdir(join(malformedBare, "objects"), { recursive: true });
+    await mkdir(join(malformedBare, "refs"));
+    await writeFile(join(malformedBare, "HEAD"), "this is not a valid HEAD\n");
+    await writeFile(
+      join(malformedBare, "config"),
+      '[remote "origin"]\n  url = https://user:SYNTHETIC_MALFORMED_BARE_TOKEN@example.invalid/private.git\n',
+    );
+    await writeFile(
+      join(malformedBare, "objects", "history.ts"),
+      "SYNTHETIC_MALFORMED_HISTORY_SECRET\n",
+    );
     await writeFile(join(repository, "app.ts"), "export const app = true;\n");
     await writeFile(join(repository, ".env"), "SYNTHETIC_ENV_SECRET\n");
     await writeFile(join(repository, ".envrc"), "SYNTHETIC_ENVRC_SECRET\n");
@@ -941,6 +953,8 @@ describe("Agents SDK thin scan adapter", () => {
             "intent.ts",
             "fixtures/private-mirror/config",
             "fixtures/private-mirror/objects",
+            "fixtures/malformed-mirror/config",
+            "fixtures/malformed-mirror/objects",
           ]) {
             expect(existsSync(join(value.repository, path))).toBe(false);
           }
@@ -2167,7 +2181,7 @@ describe("Agents SDK thin scan adapter", () => {
     },
   );
 
-  test("stages tracked path contents and preserves ordinary Git-shaped fixtures", async () => {
+  test("stages tracked path contents and excludes nested Git-shaped fixtures", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const workspace = join(root, "workspaces");
@@ -2278,7 +2292,7 @@ describe("Agents SDK thin scan adapter", () => {
                 "source.ts",
               ),
             ),
-          ).toBe(!scoped);
+          ).toBe(false);
           expect(
             existsSync(
               join(
@@ -3305,6 +3319,58 @@ describe("Agents SDK thin scan adapter", () => {
         else process.env["OPENAI_AGENTS_PYTHON"] = previousPtyPython;
         if (previousPythonPath === undefined) delete process.env["PYTHONPATH"];
         else process.env["PYTHONPATH"] = previousPythonPath;
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "does not execute repository-local Docker when the public runtime omits the host root",
+    async () => {
+      const root = await temporaryDirectory();
+      const value = request(root);
+      const targetBin = join(value.repository, "tools");
+      const marker = join(root, "repository-docker-executed");
+      for (const path of [
+        value.repository,
+        value.scanDir,
+        value.sandboxBaseDir,
+        value.sandboxInputRoot,
+        targetBin,
+      ]) {
+        await mkdir(path, { recursive: true });
+      }
+      await writeFile(
+        join(value.sandboxInputRoot, "target-paths.json"),
+        '["."]\n',
+      );
+      await writeFile(
+        join(value.sandboxInputRoot, "repository-identity.json"),
+        `${JSON.stringify({ targetId: value.repositoryIdentity })}\n`,
+      );
+      await writeFile(
+        join(targetBin, "docker"),
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' TARGET_DOCKER_EXECUTED > '${marker}'`,
+          "exit 42",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const previousPath = process.env["PATH"];
+      const previousDockerHost = process.env["DOCKER_HOST"];
+      process.env["PATH"] = `${targetBin}:/usr/bin:/bin`;
+      process.env["DOCKER_HOST"] = "tcp://127.0.0.1:9";
+      try {
+        const { hostRepositoryRoot: _hostRepositoryRoot, ...withoutHostRoot } =
+          value;
+        await expect(runAgentsScan(withoutHostRoot)).rejects.toThrow("Docker");
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
+        if (previousDockerHost === undefined) delete process.env["DOCKER_HOST"];
+        else process.env["DOCKER_HOST"] = previousDockerHost;
       }
     },
   );

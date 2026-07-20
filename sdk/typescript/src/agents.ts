@@ -535,7 +535,7 @@ export async function runAgentsScan(
     workspaceBaseDir: request.sandboxBaseDir,
   });
   const releaseHostEnvironment = suppressUnsafeHostEnvironment(
-    request.hostRepositoryRoot,
+    request.hostRepositoryRoot ?? request.repository,
     dirname(request.sandboxBaseDir),
   );
   const session = await createDockerSession(
