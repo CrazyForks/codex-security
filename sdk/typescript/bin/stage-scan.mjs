@@ -186,7 +186,21 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (isCredentialDocument(source, expected, name) ||
+    /\.(?:tgz|tar(?:\.(?:gz|xz|bz2|zst))?|zip|gz|xz|bz2|7z|rar|jar|war)$/u.test(
+      name,
+    )
+  ) {
+    return;
+  }
+  const credential = input && isCredentialDocument(source, expected, name);
+  if (credential && name === "security.md") {
+    fail(
+      `SECURITY.md contains credential-like material and cannot be staged safely: ${JSON.stringify(source)}; use the Codex engine.`,
+    );
+  }
+  if (
+    input &&
+    (credential ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
           gitCaseFold(basename(dirname(source))),
@@ -365,6 +379,8 @@ function isCredentialDocument(source, expected, name) {
       ) ||
       /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u.test(contents) ||
       /\bBearer\s+[A-Za-z0-9+/_=-]{20,}\b/iu.test(contents) ||
+      /\bSG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{20,}\b/u.test(contents) ||
+      /^# v[23] git bundle\b/imu.test(contents) ||
       hasCredentialUri(contents) ||
       (() => {
         const prefix = contents.slice(0, 256 * 1024).toLowerCase();
@@ -374,6 +390,9 @@ function isCredentialDocument(source, expected, name) {
         );
       })() ||
       /(?:^|[\s{,])["']?[A-Za-z0-9_-]{0,64}(?:api[-_]?key|secret[-_]?key|private[-_]?key|password|token)[A-Za-z0-9_-]{0,64}["']?\s*[:=]\s*["']?(?:SYNTHETIC_[A-Za-z0-9_-]{4,}|[A-Za-z0-9+/_=-]{20,})["']?(?:\s|[,}]|$)/imu.test(
+        contents,
+      ) ||
+      /(?:^|[\s{,;])["']?[A-Za-z0-9_-]{0,64}(?:secret[-_]?key|private[-_]?key|password)[A-Za-z0-9_-]{0,64}["']?\s*[:=]\s*["']?[A-Za-z0-9+/_=-]{0,64}[0-9!$%^&*][A-Za-z0-9+/_=!'$%^&*-]{0,64}["']?(?:\s|[,;}@]|$)/imu.test(
         contents,
       );
     if (staticCredential()) return true;
@@ -483,12 +502,12 @@ function isCredentialDocument(source, expected, name) {
 
 function hasCredentialUri(contents) {
   const scheme =
-    /\b(?:jdbc:)?(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?):\/\//giu;
+    /\b(?:jdbc:)?(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?|mssql|sqlserver):\/\//giu;
   for (const match of contents.matchAll(scheme)) {
     const start = (match.index ?? 0) + match[0].length;
     const authority = contents
       .slice(start, start + 4096)
-      .split(/[\s"'/?#]/u, 1)[0];
+      .split(/[\s/?#]/u, 1)[0];
     const at = authority.lastIndexOf("@");
     if (at < 0) continue;
     const password = authority.slice(0, at).split(":").slice(1).join(":");

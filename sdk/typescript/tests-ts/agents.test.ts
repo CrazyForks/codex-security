@@ -1257,6 +1257,24 @@ describe("Agents SDK thin scan adapter", () => {
         "example.exs",
         'System.put_env("OPENAI_API_KEY", "sk-SYNTHETIC_ELIXIR_RELEASE_TOKEN")\n',
       ],
+      [
+        "auth.yaml",
+        "service:\n  username: service-user\n  password: CorrectHorse1'!\n",
+      ],
+      [
+        "sqlserver.properties",
+        "url=jdbc:sqlserver://db.example.invalid:1433;database=prod;user=svc;password=S3cret'!\n",
+      ],
+      [
+        "mssql.yaml",
+        "databaseUrl: mssql://svc:S3cret'!@db.example.invalid/prod\n",
+      ],
+      [
+        "sendgrid.ts",
+        'export const token = getToken("SG.abcdefghijklmnopqrstuv.ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef");\n',
+      ],
+      ["history.backup", "# v2 git bundle\nSYNTHETIC_HISTORICAL_SECRET\n"],
+      ["release-cache.tgz", "SYNTHETIC_ARCHIVED_CREDENTIALS\n"],
     ] as const) {
       await writeFile(join(repository, "deploy", file), contents);
     }
@@ -1501,6 +1519,12 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/demo.ipynb",
             "deploy/requests.http",
             "deploy/example.exs",
+            "deploy/auth.yaml",
+            "deploy/sqlserver.properties",
+            "deploy/mssql.yaml",
+            "deploy/sendgrid.ts",
+            "deploy/history.backup",
+            "deploy/release-cache.tgz",
             "deploy/oversized.json",
             "deploy/identity",
             "deploy/pgp-backup.asc",
