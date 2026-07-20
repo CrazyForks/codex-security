@@ -39,13 +39,16 @@ The output directory must be outside the scanned repository. When SARIF is produ
 `<scan-dir>/exports/results.sarif`. Use `npx codex-security scan --help` for all
 target, output, and runtime options.
 
-The Agents engine stages a tracked, regular-file snapshot and the bundled
-scan skills/helpers into a network-disabled `node:22-bookworm` Docker
+The Agents engine stages the requested tracked, regular-file scope and the
+bundled scan skills/helpers into a network-disabled `node:22-bookworm` Docker
 workspace, mounts them read-only, and delegates bounded scan workers through
-Agents SDK. Local edits to tracked files are included; untracked/ignored files,
+Agents SDK. Path scans include applicable ancestor `SECURITY.md` files while
+excluding unrelated source files. Local edits to tracked files are included; untracked/ignored files,
 submodule contents, symlinks, unstaged deletions, sparse-checkout paths absent
-from the worktree, and Git credentials/history are excluded. Use the Codex
-engine when a path contains only untracked or ignored files. A sanitized,
+from the worktree, and Git credentials/history are excluded. Empty and
+Git-shaped unversioned targets fail closed; use the Codex engine when a path
+contains only untracked or ignored files. Ambient OpenAI/Codex API keys are
+not forwarded to Docker subprocesses. A sanitized,
 one-way-hashed remote and relative-scope identity keeps finding fingerprints
 stable across checkouts without colliding across monorepo services; bounded
 results are copied to the requested output directory. SDK tracing and sensitive

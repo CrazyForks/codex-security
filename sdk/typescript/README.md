@@ -42,13 +42,16 @@ repository and path targets. The output directory must be outside the scanned
 repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
-The default Agents engine stages a compact tracked, regular-file snapshot
+The default Agents engine stages the requested tracked, regular-file scope
 and the plugin into the SDK Docker workspace, mounts them read-only, and
 disables network access before tool execution. Local edits to tracked files are
 included; untracked/ignored files, submodule contents, symlinks, unstaged
 deletions, sparse-checkout paths absent from the worktree, Git credentials/history,
-and unrelated plugin-checkout files are excluded. Use the
-Codex engine when a path contains only untracked or ignored files. Inputs and
+and unrelated plugin-checkout files are excluded. Path scans also include
+applicable ancestor `SECURITY.md` files and exclude unrelated source files.
+Empty and Git-shaped unversioned targets fail closed. Use the Codex engine when
+a path contains only untracked or ignored files. Ambient OpenAI/Codex API keys
+are not forwarded to Docker subprocesses. Inputs and
 results are size/type bounded before handoff. The standard `security-scan`
 skill runs with one serialized delegated ranking worker and preserves the
 existing pool-plan, receipt, and canonical output contract. A stable one-way-hashed,
@@ -63,7 +66,8 @@ directories omit common `.env` and key files but remain a trusted-local input.
 Docker-host resource limits apply. `--model`, `--reasoning-effort`,
 `--max-turns`, and `--worker-max-turns` control the Agents workflow.
 
-Docker workspaces default to `~/.cache/codex-security/sandboxes`, which works with
+The sandbox uses a writable temporary home/cache without exposing host home
+directories. Docker workspaces default to `~/.cache/codex-security/sandboxes`, which works with
 Docker Desktop and Colima's default shared-user-directory mount. Set
 `CODEX_SECURITY_DOCKER_WORKSPACE_ROOT` to another Docker-shared directory when a
 custom daemon or mount policy requires it.
