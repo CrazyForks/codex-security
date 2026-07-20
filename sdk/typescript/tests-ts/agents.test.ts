@@ -954,7 +954,7 @@ describe("Agents SDK thin scan adapter", () => {
     },
   );
 
-  test("excludes case-insensitive env and key files from unversioned and plugin inputs", async () => {
+  test("excludes common local credentials from unversioned and plugin inputs", async () => {
     const root = await temporaryDirectory();
     const plugin = join(root, "plugin");
     const repository = join(root, "repository");
@@ -971,6 +971,50 @@ describe("Agents SDK thin scan adapter", () => {
       ".GIT-CREDENTIALS",
       ".gitmodules",
       ".GITMODULES",
+      ".gitconfig",
+      ".GITCONFIG",
+      ".npmrc",
+      ".NPMRC",
+      ".netrc",
+      ".NETRC",
+      ".pypirc",
+      ".PYPIRC",
+      ".pgpass",
+      ".PGPASS",
+      ".yarnrc.yml",
+      ".YARNRC.YML",
+      "id_rsa",
+      "ID_RSA",
+      "id_ed25519",
+      "ID_ED25519",
+      "private.p12",
+      "PRIVATE.P12",
+      "private.pfx",
+      "PRIVATE.PFX",
+      "private.pkcs12",
+      "PRIVATE.PKCS12",
+      "private.jks",
+      "PRIVATE.JKS",
+      "private.keystore",
+      "PRIVATE.KEYSTORE",
+    ];
+    const directories = [
+      ".ssh",
+      ".SSH",
+      ".aws",
+      ".AWS",
+      ".azure",
+      ".AZURE",
+      ".docker",
+      ".DOCKER",
+      ".kube",
+      ".KUBE",
+      ".gnupg",
+      ".GNUPG",
+      ".codex",
+      ".CODEX",
+      ".openai",
+      ".OPENAI",
     ];
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     await mkdir(repository);
@@ -990,6 +1034,18 @@ describe("Agents SDK thin scan adapter", () => {
         "SYNTHETIC_PLUGIN_SECRET\n",
       );
     }
+    for (const name of directories) {
+      await mkdir(join(repository, name), { recursive: true });
+      await mkdir(join(plugin, "scripts", name), { recursive: true });
+      await writeFile(
+        join(repository, name, "credentials"),
+        "SYNTHETIC_SOURCE_SECRET\n",
+      );
+      await writeFile(
+        join(plugin, "scripts", name, "credentials"),
+        "SYNTHETIC_PLUGIN_SECRET\n",
+      );
+    }
     let reached = false;
     const client = new TestClient(
       { pluginPath: plugin },
@@ -1002,6 +1058,12 @@ describe("Agents SDK thin scan adapter", () => {
           reached = true;
           expect(existsSync(join(value.repository, "app.ts"))).toBe(true);
           for (const name of names) {
+            expect(existsSync(join(value.repository, name))).toBe(false);
+            expect(existsSync(join(value.pluginRoot, "scripts", name))).toBe(
+              false,
+            );
+          }
+          for (const name of directories) {
             expect(existsSync(join(value.repository, name))).toBe(false);
             expect(existsSync(join(value.pluginRoot, "scripts", name))).toBe(
               false,
@@ -2499,9 +2561,13 @@ describe("Agents SDK thin scan adapter", () => {
           "HTTP_PROXY",
           "HTTPS_PROXY",
           "NO_PROXY",
+          "FTP_PROXY",
+          "ALL_PROXY",
           "http_proxy",
           "https_proxy",
           "no_proxy",
+          "ftp_proxy",
+          "all_proxy",
         ]) {
           expect(calls).toContain(`<${name}=>`);
         }

@@ -94,8 +94,8 @@ sensitive debug logging are suppressed. Repository instruction files such as
 does not consume file-backed Codex authentication.
 
 Git-backed targets are deliberately treated as directory snapshots, so history
-and advisory lookup is unavailable; unversioned targets omit common `.env` and
-key files but remain trusted-local input. Docker-host limits apply. Native
+and advisory lookup is unavailable; unversioned targets omit common local
+credential files and directories but remain trusted-local input. Docker-host limits apply. Native
 Windows paths route to Codex; WSL can be used for Agents execution. Docker
 workspaces default to
 `~/.cache/codex-security/sandboxes`; set

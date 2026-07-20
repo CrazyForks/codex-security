@@ -689,7 +689,7 @@ function suppressUnsafeHostEnvironment(
             "unset OPENAI_API_KEY CODEX_API_KEY",
             'if [ "${1-}" = run ]; then',
             "  shift",
-            `  exec '${executable.replaceAll("'", "'\"'\"'")}' run -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= -e http_proxy= -e https_proxy= -e no_proxy= "$@"`,
+            `  exec '${executable.replaceAll("'", "'\"'\"'")}' run -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= -e FTP_PROXY= -e ALL_PROXY= -e http_proxy= -e https_proxy= -e no_proxy= -e ftp_proxy= -e all_proxy= "$@"`,
             "fi",
             `exec '${executable.replaceAll("'", "'\"'\"'")}' "$@"`,
             "",

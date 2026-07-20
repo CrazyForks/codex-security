@@ -390,13 +390,35 @@ function ensureDirectory(path) {
 function skip(name, kind) {
   const lower = name.toLowerCase();
   if (
-    lower === ".git" ||
-    lower === ".git-credentials" ||
-    lower === ".gitmodules" ||
-    lower === ".env" ||
+    [
+      ".git",
+      ".git-credentials",
+      ".gitconfig",
+      ".gitmodules",
+      ".env",
+      ".ssh",
+      ".aws",
+      ".azure",
+      ".docker",
+      ".kube",
+      ".gnupg",
+      ".codex",
+      ".openai",
+      ".npmrc",
+      ".netrc",
+      ".pypirc",
+      ".pgpass",
+    ].includes(lower) ||
     lower.startsWith(".env.") ||
+    lower.startsWith(".yarnrc") ||
+    /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||
-    lower.endsWith(".key")
+    lower.endsWith(".key") ||
+    lower.endsWith(".p12") ||
+    lower.endsWith(".pfx") ||
+    lower.endsWith(".pkcs12") ||
+    lower.endsWith(".jks") ||
+    lower.endsWith(".keystore")
   ) {
     return true;
   }
