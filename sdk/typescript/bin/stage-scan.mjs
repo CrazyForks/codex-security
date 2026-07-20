@@ -185,7 +185,7 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (((name.endsWith(".json") || /\.ya?ml$/u.test(name)) &&
+    (((/\.jsonc?$/u.test(name) || /\.ya?ml$/u.test(name)) &&
       isCredentialDocument(source, expected, name)) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
@@ -320,10 +320,10 @@ function isCredentialDocument(source, expected, name) {
     }
     if (/\.ya?ml$/u.test(name)) {
       return (
-        /^\s*apiversion\s*:\s*v1\s*$/imu.test(contents) &&
-        /^\s*kind\s*:\s*config\s*$/imu.test(contents) &&
-        /^\s*clusters\s*:/imu.test(contents) &&
-        /^\s*users\s*:/imu.test(contents) &&
+        /(?:^|[\s{,])apiversion\s*:\s*v1(?:\s|[,}]|$)/imu.test(contents) &&
+        /(?:^|[\s{,])kind\s*:\s*config(?:\s|[,}]|$)/imu.test(contents) &&
+        /(?:^|[\s{,])clusters\s*:/imu.test(contents) &&
+        /(?:^|[\s{,])users\s*:/imu.test(contents) &&
         /(?:^|[\s{,])(?:token|client-key-data|id-token|refresh-token|access-token)\s*:/imu.test(
           contents,
         )
@@ -403,7 +403,31 @@ function isCredentialDocument(source, expected, name) {
       }
       return kubeconfig && kubeCredential;
     } catch {
-      return false;
+      const field = (name) =>
+        new RegExp(`["']?${name}["']?\\s*:`, "iu").test(contents);
+      return (
+        [
+          "auths",
+          "creds[-_]?store",
+          "cred[-_]?helpers",
+          "proxies",
+          "http[-_]?headers",
+        ].some(field) ||
+        (field("access[-_]?key[-_]?id") &&
+          (field("secret[-_]?access[-_]?key") || field("session[-_]?token"))) ||
+        (field("client[-_]?id") &&
+          field("client[-_]?secret") &&
+          [
+            "tenant[-_]?id",
+            "subscription[-_]?id",
+            "auth[-_]?uri",
+            "token[-_]?uri",
+          ].some(field)) ||
+        ((field("access[-_]?token") || field("refresh[-_]?token")) &&
+          ["token[-_]?type", "expires[-_]?in", "expires[-_]?on", "tenant"].some(
+            field,
+          ))
+      );
     }
   } finally {
     if (handle !== undefined) closeSync(handle);
@@ -807,6 +831,7 @@ function skip(name, kind) {
     lower.endsWith(".ppk") ||
     lower.endsWith(".p12") ||
     lower.endsWith(".pfx") ||
+    lower.endsWith(".p8") ||
     lower.endsWith(".pkcs12") ||
     lower.endsWith(".jks") ||
     lower.endsWith(".keystore") ||
@@ -815,6 +840,7 @@ function skip(name, kind) {
     lower.endsWith(".keychain-db") ||
     lower.endsWith(".ovpn") ||
     lower.endsWith(".mobileconfig") ||
+    lower.endsWith(".publishsettings") ||
     /\.tfrc(?:\.json)?$/u.test(lower) ||
     /\.(?:tfstate(?:\..+)?|(?:auto\.)?tfvars(?:\.json)?)$/u.test(lower)
   ) {

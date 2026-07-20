@@ -1092,6 +1092,26 @@ describe("Agents SDK thin scan adapter", () => {
       })}\n`,
     );
     await writeFile(
+      join(repository, "deploy", "cluster-fully-inline.yaml"),
+      "{apiVersion: v1, kind: Config, clusters: [{name: prod}], users: [{name: admin, user: {token: SYNTHETIC_FULLY_INLINE_KUBE_TOKEN}}]}\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "aws-malformed.json"),
+      '{"AccessKeyId":"ASIA_SYNTHETIC","SecretAccessKey":"SYNTHETIC_MALFORMED_AWS_SECRET","SessionToken":"SYNTHETIC_SESSION",}\n',
+    );
+    await writeFile(
+      join(repository, "deploy", "cloud-export.jsonc"),
+      '{"clientId":"id","clientSecret":"SYNTHETIC_JSONC_AZURE_SECRET","tenantId":"tenant"}\n',
+    );
+    await writeFile(
+      join(repository, "deploy", "AuthKey_ABC12345.p8"),
+      "SYNTHETIC_APPLE_APNS_PRIVATE_KEY\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "myapp.PublishSettings"),
+      '<publishData><publishProfile userPWD="SYNTHETIC_AZURE_PUBLISH_PASSWORD" /></publishData>\n',
+    );
+    await writeFile(
       join(repository, "deploy", "azure-sp.json"),
       `${JSON.stringify({
         appId: "11111111-1111-1111-1111-111111111111",
@@ -1259,6 +1279,11 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/exported-kube.yaml",
             "deploy/cluster-inline.yaml",
             "deploy/cluster-export.json",
+            "deploy/cluster-fully-inline.yaml",
+            "deploy/aws-malformed.json",
+            "deploy/cloud-export.jsonc",
+            "deploy/AuthKey_ABC12345.p8",
+            "deploy/myapp.PublishSettings",
             "deploy/azure-sp.json",
             "deploy/new-user-credentials.csv",
             "deploy/deploy_rsa",
