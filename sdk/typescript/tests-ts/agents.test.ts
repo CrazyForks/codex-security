@@ -3322,6 +3322,7 @@ describe("Agents SDK thin scan adapter", () => {
       const bin = join(root, "bin");
       const badBin = join(root, "bad-bin");
       const envBin = join(root, "env-bin");
+      const hardlinkBin = join(root, "hardlink-bin");
       const repositoryBin = join(value.repository, "node_modules", ".bin");
       const repositoryTmp = join(value.repository, "tmp");
       const log = join(root, "docker-calls");
@@ -3340,6 +3341,7 @@ describe("Agents SDK thin scan adapter", () => {
       await mkdir(bin);
       await mkdir(badBin);
       await mkdir(envBin);
+      await mkdir(hardlinkBin);
       await writeFile(join(badBin, "docker"), "not executable\n", {
         mode: 0o644,
       });
@@ -3357,6 +3359,7 @@ describe("Agents SDK thin scan adapter", () => {
           "command -v docker-credential-safe >/dev/null 2>&1 || exit 43",
           "docker-credential-safe",
           "if command -v DOCKER-CREDENTIAL-UNTRUSTED >/dev/null 2>&1; then DOCKER-CREDENTIAL-UNTRUSTED; fi",
+          "if command -v docker-credential-hardlinked >/dev/null 2>&1; then docker-credential-hardlinked; fi",
           `printf '%s\\n' "SAFE_DOCKER openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent} aws=\${AWS_SECRET_ACCESS_KEY-absent} gh=\${GH_TOKEN-absent}" >> '${log}'`,
           `printf '<%s>\\n' \"$@\" >> '${log}'`,
           `case "\${1-}" in run) printf "%s\\n" synthetic-container;; inspect) if grep -q "<disconnect>" '${log}'; then printf "%s\\n" '{}'; else printf "%s\\n" '{"bridge":{}}'; fi;; exec) printf "%s\\n" '## Phase Sequence';; esac`,
@@ -3411,6 +3414,20 @@ describe("Agents SDK thin scan adapter", () => {
         join(envBin, "DOCKER-CREDENTIAL-UNTRUSTED"),
       );
       await writeFile(
+        join(repositoryBin, "docker-credential-hardlinked"),
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "UNTRUSTED_HARDLINK_HELPER key=\${OPENAI_API_KEY-absent}" >> '${log}'`,
+          "exit 42",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      await link(
+        join(repositoryBin, "docker-credential-hardlinked"),
+        join(hardlinkBin, "docker-credential-hardlinked"),
+      );
+      await writeFile(
         join(repositoryBin, "pass"),
         [
           "#!/bin/sh",
@@ -3441,7 +3458,7 @@ describe("Agents SDK thin scan adapter", () => {
       const previousPtyPython = process.env["OPENAI_AGENTS_PYTHON"];
       const previousPythonPath = process.env["PYTHONPATH"];
       process.env["PATH"] =
-        `${repositoryBin}:${envBin}:${badBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
+        `${repositoryBin}:${envBin}:${hardlinkBin}:${badBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
       process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
       process.env["CODEX_API_KEY"] = "SYNTHETIC_CODEX_HOST_KEY";
       process.env["AWS_SECRET_ACCESS_KEY"] = "SYNTHETIC_AWS_HOST_SECRET";
@@ -3626,6 +3643,7 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
         expect(calls).not.toContain("UNTRUSTED_ENV");
         expect(calls).not.toContain("UNTRUSTED_DOCKER_HELPER");
+        expect(calls).not.toContain("UNTRUSTED_HARDLINK_HELPER");
         expect(calls).not.toContain("UNTRUSTED_HELPER_DEPENDENCY");
         expect(calls).not.toContain("UNTRUSTED_PTY");
         expect(calls).toContain("SAFE_DOCKER_HELPER");
@@ -3805,6 +3823,7 @@ describe("Agents SDK thin scan adapter", () => {
       const root = await temporaryDirectory();
       const value = request(root);
       const targetBin = join(value.repository, "tools");
+      const linkedBin = join(root, "linked-bin");
       const marker = join(root, "repository-docker-executed");
       for (const path of [
         value.repository,
@@ -3812,6 +3831,7 @@ describe("Agents SDK thin scan adapter", () => {
         value.sandboxBaseDir,
         value.sandboxInputRoot,
         targetBin,
+        linkedBin,
       ]) {
         await mkdir(path, { recursive: true });
       }
@@ -3833,9 +3853,10 @@ describe("Agents SDK thin scan adapter", () => {
         ].join("\n"),
         { mode: 0o755 },
       );
+      await link(join(targetBin, "docker"), join(linkedBin, "docker"));
       const previousPath = process.env["PATH"];
       const previousDockerHost = process.env["DOCKER_HOST"];
-      process.env["PATH"] = `${targetBin}:/usr/bin:/bin`;
+      process.env["PATH"] = `${linkedBin}:${targetBin}:/usr/bin:/bin`;
       process.env["DOCKER_HOST"] = "tcp://127.0.0.1:9";
       try {
         const { hostRepositoryRoot: _hostRepositoryRoot, ...withoutHostRoot } =

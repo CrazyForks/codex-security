@@ -714,8 +714,10 @@ function suppressUnsafeHostEnvironment(
       try {
         const executable = realpathSync(entry);
         accessSync(executable, fsConstants.X_OK);
+        const metadata = statSync(executable);
         return (
-          statSync(executable).isFile() &&
+          metadata.isFile() &&
+          metadata.nlink === 1 &&
           [...activeHostRoots.keys()].every((target) => {
             const path = relative(target, executable);
             return path === ".." || path.startsWith(`..${sep}`);
@@ -781,7 +783,7 @@ function suppressUnsafeHostEnvironment(
       }
       process.env["PATH"] = `${savedDockerWrapper}${delimiter}${helperPath}`;
     } else {
-      process.env["PATH"] = safePath;
+      process.env["PATH"] = helperPath;
     }
     hostEnvironmentUsers += 1;
   } catch (error) {
@@ -932,22 +934,43 @@ function safeDockerHelperPath(safePath: string): string {
   return [...entries]
     .filter((entry) => {
       try {
+        const system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].includes(
+          realpathSync(entry),
+        );
         return readdirSync(entry, { withFileTypes: true })
           .filter((candidate) => {
             const lower = candidate.name.toLowerCase();
             return (
               candidate.isSymbolicLink() ||
+              lower === "docker" ||
               lower === "ssh" ||
               lower === "python3" ||
+              lower === "pass" ||
+              lower === "gpg" ||
+              lower === "gpg2" ||
+              lower === "security" ||
               lower.startsWith("docker-credential-")
             );
           })
           .every((candidate) => {
             const executable = realpathSync(join(entry, candidate.name));
-            return [...activeHostRoots.keys()].every((target) => {
-              const path = relative(target, executable);
-              return path === ".." || path.startsWith(`..${sep}`);
-            });
+            const lower = candidate.name.toLowerCase();
+            const helper =
+              lower === "docker" ||
+              lower === "ssh" ||
+              lower === "python3" ||
+              lower === "pass" ||
+              lower === "gpg" ||
+              lower === "gpg2" ||
+              lower === "security" ||
+              lower.startsWith("docker-credential-");
+            return (
+              (!helper || system || statSync(executable).nlink === 1) &&
+              [...activeHostRoots.keys()].every((target) => {
+                const path = relative(target, executable);
+                return path === ".." || path.startsWith(`..${sep}`);
+              })
+            );
           });
       } catch {
         return false;
