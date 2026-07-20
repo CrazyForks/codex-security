@@ -1036,6 +1036,10 @@ describe("Agents SDK thin scan adapter", () => {
         },
       })}\n`,
     );
+    await writeFile(
+      join(repository, "deploy", "large-array.json"),
+      `[${"0,".repeat(2_000_000)}0]\n`,
+    );
     await mkdir(join(repository, "deploy", "kube"), { recursive: true });
     await writeFile(
       join(repository, "deploy", "kube", "config"),
@@ -1180,6 +1184,7 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/aws-assume-role.json",
             "deploy/azure-prod.json",
             "deploy/oauth-client.json",
+            "deploy/large-array.json",
             "my-project-ab12cd34ef56.json",
             "credentials.json",
             "service-account.json",

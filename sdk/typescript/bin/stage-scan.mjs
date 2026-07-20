@@ -323,12 +323,31 @@ function isCredentialJson(source, expected) {
       while (pending.length > 0) {
         const value = pending.pop();
         if (value === null || typeof value !== "object") continue;
-        const fields = Object.entries(value);
-        entries += fields.length;
-        if (entries > MAX_INPUT_ENTRIES) return true;
-        const keys = new Set(
-          fields.map(([key]) => key.toLowerCase().replace(/[-_]/gu, "")),
-        );
+        if (Array.isArray(value)) {
+          entries += value.length;
+          if (entries > MAX_INPUT_ENTRIES) return true;
+          for (const entry of value) pending.push(entry);
+          continue;
+        }
+        const keys = new Set();
+        let credentialType = false;
+        for (const key in value) {
+          if (!Object.hasOwn(value, key)) continue;
+          if (++entries > MAX_INPUT_ENTRIES) return true;
+          const entry = value[key];
+          const normalized = key.toLowerCase().replace(/[-_]/gu, "");
+          keys.add(normalized);
+          if (
+            normalized === "type" &&
+            typeof entry === "string" &&
+            ["serviceaccount", "authorizeduser"].includes(
+              entry.toLowerCase().replace(/[-_]/gu, ""),
+            )
+          ) {
+            credentialType = true;
+          }
+          if (entry !== null && typeof entry === "object") pending.push(entry);
+        }
         if (
           ["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
             (key) => keys.has(key),
@@ -345,19 +364,11 @@ function isCredentialJson(source, expected) {
               "tokenuri",
               "refreshtoken",
             ].some((key) => keys.has(key))) ||
-          (fields.some(
-            ([key, entry]) =>
-              key.toLowerCase() === "type" &&
-              typeof entry === "string" &&
-              ["serviceaccount", "authorizeduser"].includes(
-                entry.toLowerCase().replace(/[-_]/gu, ""),
-              ),
-          ) &&
+          (credentialType &&
             (keys.has("privatekey") || keys.has("refreshtoken")))
         ) {
           return true;
         }
-        for (const [, entry] of fields) pending.push(entry);
       }
       return false;
     } catch {
