@@ -185,7 +185,7 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    ((name === "config.json" && isDockerConfig(source, expected)) ||
+    ((name.endsWith(".json") && isCredentialJson(source, expected, name)) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
           gitCaseFold(basename(dirname(source))),
@@ -289,7 +289,7 @@ function copyFile(source, destination, expected) {
   }
 }
 
-function isDockerConfig(source, expected) {
+function isCredentialJson(source, expected, name) {
   if (expected.size > MAX_INPUT_FILE_BYTES) return false;
   let handle;
   try {
@@ -322,11 +322,25 @@ function isDockerConfig(source, expected) {
       return (
         value !== null &&
         typeof value === "object" &&
-        Object.keys(value).some((key) =>
-          ["auths", "credsstore", "credhelpers", "proxies"].includes(
-            key.toLowerCase(),
-          ),
-        )
+        ((name === "config.json" &&
+          Object.keys(value).some((key) =>
+            [
+              "auths",
+              "credsstore",
+              "credhelpers",
+              "proxies",
+              "httpheaders",
+            ].includes(key.toLowerCase()),
+          )) ||
+          (Object.entries(value).some(
+            ([key, entry]) =>
+              key.toLowerCase() === "type" &&
+              typeof entry === "string" &&
+              entry.toLowerCase() === "service_account",
+          ) &&
+            Object.keys(value).some(
+              (key) => key.toLowerCase() === "private_key",
+            )))
       );
     } catch {
       return false;
@@ -451,8 +465,13 @@ function resolveSourcePath(path, cache, ignoreCase) {
 }
 
 function isBareGitDirectory(entries) {
-  return ["head", "config", "objects", "refs"].every((name) =>
-    entries.some((entry) => gitCaseFold(entry) === name),
+  const names = new Set(entries.map((entry) => gitCaseFold(entry)));
+  return (
+    names.has("head") &&
+    names.has("objects") &&
+    ["refs", "packed-refs", "hooks", "info", "description"].some((name) =>
+      names.has(name),
+    )
   );
 }
 

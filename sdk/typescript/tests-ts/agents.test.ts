@@ -858,6 +858,17 @@ describe("Agents SDK thin scan adapter", () => {
       join(bare, "config"),
       `${await readFile(join(bare, "config"), "utf8")}\n[remote "origin"]\n  url = https://user:SYNTHETIC_BARE_TOKEN@example.invalid/private.git\n`,
     );
+    const incompleteBare = join(repository, "fixtures", "incomplete-mirror");
+    git(repository, [
+      "clone",
+      "--quiet",
+      "--no-hardlinks",
+      "--bare",
+      child,
+      incompleteBare,
+    ]);
+    await rm(join(incompleteBare, "config"));
+    await rm(join(incompleteBare, "refs"), { recursive: true, force: true });
     const malformedBare = join(repository, "fixtures", "malformed-mirror");
     await mkdir(join(malformedBare, "objects"), { recursive: true });
     await mkdir(join(malformedBare, "refs"));
@@ -952,6 +963,26 @@ describe("Agents SDK thin scan adapter", () => {
     await writeFile(
       join(repository, "src", "config.json"),
       '{"feature":true}\n',
+    );
+    await writeFile(
+      join(repository, "my-project-ab12cd34ef56.json"),
+      `${JSON.stringify({
+        type: "service_account",
+        project_id: "demo",
+        private_key_id: "synthetic",
+        private_key: "SYNTHETIC_GOOGLE_PRIVATE_KEY",
+        client_email: "svc@demo.iam.gserviceaccount.com",
+      })}\n`,
+    );
+    await mkdir(join(repository, "deploy"), { recursive: true });
+    await writeFile(
+      join(repository, "deploy", "config.json"),
+      `${JSON.stringify({
+        HttpHeaders: {
+          Authorization: "Bearer SYNTHETIC_DOCKER_HEADER_TOKEN",
+        },
+        currentContext: "prod",
+      })}\n`,
     );
     await mkdir(join(repository, "deploy", "kube"), { recursive: true });
     await writeFile(
@@ -1092,6 +1123,8 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/kube/config",
             "project-firebase-adminsdk-ab12c-1234567890.json",
             "config.json",
+            "deploy/config.json",
+            "my-project-ab12cd34ef56.json",
             "credentials.json",
             "service-account.json",
             "client_secret_123.json",
@@ -1109,6 +1142,7 @@ describe("Agents SDK thin scan adapter", () => {
             "intent.ts",
             "fixtures/private-mirror/config",
             "fixtures/private-mirror/objects",
+            "fixtures/incomplete-mirror/objects",
             "fixtures/malformed-mirror/config",
             "fixtures/malformed-mirror/objects",
           ]) {
@@ -3977,6 +4011,7 @@ describe("Agents SDK thin scan adapter", () => {
       const fileLinked = join(root, "file-linked-config");
       const contextLinked = join(root, "context-linked-config");
       const hardLinked = join(root, "hard-linked-config");
+      const unsafeHelper = join(root, "unsafe-helper-config");
       for (const path of [
         value.repository,
         value.scanDir,
@@ -3986,6 +4021,7 @@ describe("Agents SDK thin scan adapter", () => {
         fileLinked,
         join(contextLinked, "contexts", "meta", "example"),
         hardLinked,
+        unsafeHelper,
       ]) {
         await mkdir(path, { recursive: true });
       }
@@ -4013,6 +4049,10 @@ describe("Agents SDK thin scan adapter", () => {
         "file",
       );
       await link(join(config, "config.json"), join(hardLinked, "config.json"));
+      await writeFile(
+        join(unsafeHelper, "config.json"),
+        '{"credsStore":"safe","CREDSSTORE":"/payload","credHelpers":{"example.invalid":"../payload"}}\n',
+      );
       const previousConfig = process.env["DOCKER_CONFIG"];
       const previousHome = process.env["HOME"];
       try {
@@ -4022,6 +4062,7 @@ describe("Agents SDK thin scan adapter", () => {
           fileLinked,
           contextLinked,
           hardLinked,
+          unsafeHelper,
           undefined,
         ]) {
           if (configured === undefined) {
@@ -4034,7 +4075,9 @@ describe("Agents SDK thin scan adapter", () => {
           await expect(runAgentsScan(value)).rejects.toThrow(
             configured === hardLinked
               ? "Docker configuration contains an unsafe hard-linked file"
-              : "Docker configuration must be outside the scan target",
+              : configured === unsafeHelper
+                ? "Docker credential helper names must not contain paths or shell metacharacters"
+                : "Docker configuration must be outside the scan target",
           );
         }
       } finally {

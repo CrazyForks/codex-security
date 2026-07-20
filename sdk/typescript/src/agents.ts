@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -905,6 +906,9 @@ function requireSafeDockerConfig(): void {
           "Docker configuration contains an unsafe hard-linked file.",
         );
       }
+      if (basename(current).toLowerCase() === "config.json") {
+        requireSafeDockerHelperNames(current, metadata);
+      }
       continue;
     }
     if (!metadata.isDirectory() || visited.has(current)) continue;
@@ -925,6 +929,45 @@ function requireSafeDockerConfig(): void {
       );
     }
     pending.push(...children.map((entry) => join(current, entry.name)));
+  }
+}
+
+function requireSafeDockerHelperNames(config: string, metadata: Stats): void {
+  if (metadata.size > MAX_GIT_CONFIG_BYTES) {
+    throw new CodexSecurityError(
+      "Docker configuration is too large to validate safely.",
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(config, "utf8"));
+  } catch (error) {
+    throw new CodexSecurityError(
+      "Unable to validate the host Docker configuration file.",
+      { cause: error },
+    );
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new CodexSecurityError(
+      "Unable to validate the host Docker configuration file.",
+    );
+  }
+  const names = Object.entries(value).flatMap(([key, entry]) => {
+    const lower = key.toLowerCase();
+    if (lower === "credsstore") return [entry];
+    if (lower !== "credhelpers") return [];
+    return typeof entry === "object" && entry !== null
+      ? Object.values(entry)
+      : [entry];
+  });
+  if (
+    names.some(
+      (name) => typeof name !== "string" || !/^[A-Za-z0-9_.-]+$/u.test(name),
+    )
+  ) {
+    throw new CodexSecurityError(
+      "Docker credential helper names must not contain paths or shell metacharacters.",
+    );
   }
 }
 
@@ -1641,8 +1684,12 @@ async function requireSafeGitConfig(
 
 function isBareGitDirectory(names: string[]): boolean {
   const folded = new Set(names.map((name) => name.toLowerCase()));
-  return ["head", "config", "objects", "refs"].every((name) =>
-    folded.has(name),
+  return (
+    folded.has("head") &&
+    folded.has("objects") &&
+    ["refs", "packed-refs", "hooks", "info", "description"].some((name) =>
+      folded.has(name),
+    )
   );
 }
 
