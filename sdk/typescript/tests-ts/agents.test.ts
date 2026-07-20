@@ -1025,6 +1025,17 @@ describe("Agents SDK thin scan adapter", () => {
         activeDirectoryEndpointUrl: "https://login.microsoftonline.com",
       })}\n`,
     );
+    await writeFile(
+      join(repository, "deploy", "oauth-client.json"),
+      `${JSON.stringify({
+        installed: {
+          client_id: "client",
+          client_secret: "SYNTHETIC_OAUTH_SECRET",
+          auth_uri: "https://accounts.google.com/o/oauth2/auth",
+          token_uri: "https://oauth2.googleapis.com/token",
+        },
+      })}\n`,
+    );
     await mkdir(join(repository, "deploy", "kube"), { recursive: true });
     await writeFile(
       join(repository, "deploy", "kube", "config"),
@@ -1168,6 +1179,7 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/aws-export.json",
             "deploy/aws-assume-role.json",
             "deploy/azure-prod.json",
+            "deploy/oauth-client.json",
             "my-project-ab12cd34ef56.json",
             "credentials.json",
             "service-account.json",

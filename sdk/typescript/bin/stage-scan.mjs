@@ -326,7 +326,9 @@ function isCredentialJson(source, expected) {
         const fields = Object.entries(value);
         entries += fields.length;
         if (entries > MAX_INPUT_ENTRIES) return true;
-        const keys = new Set(fields.map(([key]) => key.toLowerCase()));
+        const keys = new Set(
+          fields.map(([key]) => key.toLowerCase().replace(/[-_]/gu, "")),
+        );
         if (
           ["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
             (key) => keys.has(key),
@@ -335,16 +337,23 @@ function isCredentialJson(source, expected) {
             (keys.has("secretaccesskey") || keys.has("sessiontoken"))) ||
           (keys.has("clientid") &&
             keys.has("clientsecret") &&
-            ["tenantid", "subscriptionid", "activedirectoryendpointurl"].some(
-              (key) => keys.has(key),
-            )) ||
+            [
+              "tenantid",
+              "subscriptionid",
+              "activedirectoryendpointurl",
+              "authuri",
+              "tokenuri",
+              "refreshtoken",
+            ].some((key) => keys.has(key))) ||
           (fields.some(
             ([key, entry]) =>
               key.toLowerCase() === "type" &&
               typeof entry === "string" &&
-              entry.toLowerCase() === "service_account",
+              ["serviceaccount", "authorizeduser"].includes(
+                entry.toLowerCase().replace(/[-_]/gu, ""),
+              ),
           ) &&
-            keys.has("private_key"))
+            (keys.has("privatekey") || keys.has("refreshtoken")))
         ) {
           return true;
         }
