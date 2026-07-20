@@ -1217,6 +1217,26 @@ describe("Agents SDK thin scan adapter", () => {
         "slack-cookie.txt",
         "xoxc-123456789012-123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZ\n",
       ],
+      [
+        "application.yaml",
+        "service:\n  databaseUrl: postgresql://svc:SYNTHETIC_DB_PASSWORD@db.example.invalid:5432/app\n  redisUrl: redis://:SYNTHETIC_REDIS_PASSWORD@cache.example.invalid:6379/0\n",
+      ],
+      [
+        "config.ini",
+        "[app]\ndatabase_url=postgres://svc:SYNTHETIC_INI_DB_PASSWORD@db.example.invalid/app\n",
+      ],
+      [
+        "config.json",
+        '{"DATABASE_URL":"postgres://svc:SYNTHETIC_JSON_DB_PASSWORD@db.example.invalid/app","REDIS_URL":"redis://:SYNTHETIC_JSON_REDIS_PASSWORD@cache.example.invalid/0"}\n',
+      ],
+      [
+        "secrets.ts",
+        'export const apiKey = "sk-SYNTHETIC_SOURCE_RELEASE_TOKEN";\n',
+      ],
+      [
+        "secrets.sh",
+        `export OPENAI_API_KEY=sk-SYNTHETIC_SHELL_RELEASE_TOKEN\nexport GITHUB_TOKEN=${["ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"].join("")}\n`,
+      ],
     ] as const) {
       await writeFile(join(repository, "deploy", file), contents);
     }
@@ -1451,6 +1471,11 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/npm-token.txt",
             "deploy/opaque-bearer.txt",
             "deploy/slack-cookie.txt",
+            "deploy/application.yaml",
+            "deploy/config.ini",
+            "deploy/config.json",
+            "deploy/secrets.ts",
+            "deploy/secrets.sh",
             "deploy/oversized.json",
             "deploy/identity",
             "deploy/pgp-backup.asc",

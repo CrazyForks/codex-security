@@ -186,7 +186,7 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (((/\.(?:jsonc?|ya?ml|conf|txt|toml|properties|ini|cfg|cnf|xml|csv)$/u.test(
+    (((/\.(?:jsonc?|ya?ml|conf|txt|toml|properties|ini|cfg|cnf|xml|csv|(?:m|c)?js|jsx|tsx?|sh|bash|zsh|py|rb|go|rs|java|kt|cs|c|cc|cpp|h|hpp|php|pl|scala|swift|sql|tf|hcl|md|vue|svelte|ps1)$/u.test(
       name,
     ) ||
       !name.includes(".")) &&
@@ -369,6 +369,9 @@ function isCredentialDocument(source, expected, name) {
       ) ||
       /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u.test(contents) ||
       /\bBearer\s+[A-Za-z0-9+/_=-]{20,}\b/iu.test(contents) ||
+      /\b(?:jdbc:)?(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?):\/\/[^\s"'@/]*:[^\s"'@/]{4,}@/iu.test(
+        contents,
+      ) ||
       (() => {
         const prefix = contents.slice(0, 256 * 1024).toLowerCase();
         return (
