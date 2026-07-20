@@ -1170,6 +1170,12 @@ describe("Agents SDK thin scan adapter", () => {
       "PIP.INI",
       ".gemrc",
       ".GEMRC",
+      ".bash_history",
+      ".BASH_HISTORY",
+      ".zsh_history",
+      ".ZSH_HISTORY",
+      ".python_history",
+      ".PSQL_HISTORY",
     ];
     const directories = [
       ".ssh",
@@ -1224,6 +1230,34 @@ describe("Agents SDK thin scan adapter", () => {
       ".TERRAFORM.D",
       ".password-store",
       ".PASSWORD-STORE",
+      ".cache",
+      ".CACHE",
+      ".local",
+      ".LOCAL",
+      ".mozilla",
+      ".MOZILLA",
+      ".thunderbird",
+      ".THUNDERBIRD",
+      ".pki",
+      ".PKI",
+      ".subversion",
+      ".SUBVERSION",
+      ".bash_sessions",
+      ".BASH_SESSIONS",
+      ".hg",
+      ".HG",
+      ".svn",
+      ".SVN",
+      ".bzr",
+      ".BZR",
+      ".jj",
+      ".JJ",
+      ".pijul",
+      ".PIJUL",
+      "_darcs",
+      "_DARCS",
+      "CVS",
+      "cvs",
     ];
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     await mkdir(repository);
@@ -2875,6 +2909,7 @@ describe("Agents SDK thin scan adapter", () => {
         [
           "#!/bin/sh",
           "set -eu",
+          "if command -v docker-credential-untrusted >/dev/null 2>&1; then docker-credential-untrusted; fi",
           `printf '%s\\n' "SAFE_DOCKER openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent} aws=\${AWS_SECRET_ACCESS_KEY-absent} gh=\${GH_TOKEN-absent}" >> '${log}'`,
           `printf '<%s>\\n' \"$@\" >> '${log}'`,
           `case "\${1-}" in run) printf "%s\\n" synthetic-container;; inspect) if grep -q "<disconnect>" '${log}'; then printf "%s\\n" '{}'; else printf "%s\\n" '{"bridge":{}}'; fi;; exec) printf "%s\\n" '## Phase Sequence';; esac`,
@@ -2904,6 +2939,20 @@ describe("Agents SDK thin scan adapter", () => {
         { mode: 0o755 },
       );
       await symlink(join(repositoryBin, "env"), join(envBin, "env"));
+      await writeFile(
+        join(repositoryBin, "docker-credential-untrusted"),
+        [
+          "#!/bin/sh",
+          `printf '%s\n' "UNTRUSTED_DOCKER_HELPER key=\${OPENAI_API_KEY-absent}" >> '${log}'`,
+          "exit 42",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      await symlink(
+        join(repositoryBin, "docker-credential-untrusted"),
+        join(envBin, "docker-credential-untrusted"),
+      );
       const previousPath = process.env["PATH"];
       const previousHostKey = process.env["OPENAI_API_KEY"];
       const previousCodexKey = process.env["CODEX_API_KEY"];
@@ -3085,6 +3134,7 @@ describe("Agents SDK thin scan adapter", () => {
         }
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
         expect(calls).not.toContain("UNTRUSTED_ENV");
+        expect(calls).not.toContain("UNTRUSTED_DOCKER_HELPER");
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_AWS_HOST_SECRET");

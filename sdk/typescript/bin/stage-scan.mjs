@@ -514,6 +514,13 @@ function skip(name, kind) {
       ".gitconfig",
       ".gitmodules",
       ".dockercfg",
+      ".hg",
+      ".svn",
+      ".bzr",
+      ".jj",
+      ".pijul",
+      "_darcs",
+      "cvs",
       ".env",
       ".envrc",
       ".direnv",
@@ -537,6 +544,13 @@ function skip(name, kind) {
       ".pip",
       ".terraform",
       ".config",
+      ".cache",
+      ".local",
+      ".mozilla",
+      ".thunderbird",
+      ".pki",
+      ".subversion",
+      ".bash_sessions",
       ".terraform.d",
       ".password-store",
       ".vault-token",
@@ -560,6 +574,7 @@ function skip(name, kind) {
     ].includes(lower) ||
     lower.startsWith(".env.") ||
     lower.startsWith(".yarnrc") ||
+    (lower.startsWith(".") && lower.endsWith("_history")) ||
     /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||
     lower.endsWith(".key") ||
