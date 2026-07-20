@@ -18,6 +18,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 const MAX_INPUT_ENTRIES = 2_000_000;
 const MAX_INPUT_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_STRUCTURED_CREDENTIAL_BYTES = 8 * 1024 * 1024;
 const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_ENTRIES = 20_000;
 const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
@@ -185,7 +186,7 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (((/\.(?:jsonc?|ya?ml|conf|txt|toml|properties|ini|cfg|cnf|xml)$/u.test(
+    (((/\.(?:jsonc?|ya?ml|conf|txt|toml|properties|ini|cfg|cnf|xml|csv)$/u.test(
       name,
     ) ||
       !name.includes(".")) &&
@@ -295,6 +296,12 @@ function copyFile(source, destination, expected) {
 
 function isCredentialDocument(source, expected, name) {
   if (expected.size > MAX_INPUT_FILE_BYTES) return false;
+  if (
+    /\.jsonc?$/u.test(name) &&
+    expected.size > MAX_STRUCTURED_CREDENTIAL_BYTES
+  ) {
+    return true;
+  }
   let handle;
   try {
     handle = openAt(
@@ -357,11 +364,14 @@ function isCredentialDocument(source, expected, name) {
       /-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----/imu.test(
         contents,
       ) ||
-      /\b(?:sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|ghp_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{12,}|AIza[0-9A-Za-z_-]{30,})\b/u.test(
+      /\b(?:sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{12,}|AIza[0-9A-Za-z_-]{30,}|ya29\.[A-Za-z0-9._-]{12,})\b/u.test(
         contents,
       ) ||
       /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u.test(contents) ||
-      /(?:^|[\s{,])["']?[A-Za-z0-9_-]*(?:api[-_]?key|secret[-_]?key|private[-_]?key|password|token)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?[^\s"'{},][^\n"'},]{3,}/imu.test(
+      /^\s*(?:[^,\n]+,)*access key id\s*,\s*secret access key(?:\s*,[^\n]*)?$/imu.test(
+        contents,
+      ) ||
+      /(?:^|[\s{,])["']?[A-Za-z0-9_-]*(?:api[-_]?key|secret[-_]?key|private[-_]?key|password|token)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?(?:SYNTHETIC_[A-Za-z0-9_-]{4,}|[A-Za-z0-9+/_=-]{20,})["']?(?:\s|[,}]|$)/imu.test(
         contents,
       );
     if (staticCredential()) return true;

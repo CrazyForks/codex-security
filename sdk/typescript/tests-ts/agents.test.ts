@@ -976,6 +976,15 @@ describe("Agents SDK thin scan adapter", () => {
       join(repository, "src", "proxy-schema.json"),
       '{"components":{"schemas":{"ServiceConfig":{"properties":{"proxies":{"type":"array","items":{"type":"string"}},"enabled":{"type":"boolean"}}}}}}\n',
     );
+    await mkdir(join(repository, "i18n"), { recursive: true });
+    await writeFile(
+      join(repository, "i18n", "en.json"),
+      '{"password":"Password","token":"Sign-in token","title":"Welcome"}\n',
+    );
+    await writeFile(
+      join(repository, "src", "auth-config.json"),
+      '{"csrfToken":"required","cookieSecure":false}\n',
+    );
     await writeFile(
       join(repository, "my-project-ab12cd34ef56.json"),
       `${JSON.stringify({
@@ -1178,6 +1187,22 @@ describe("Agents SDK thin scan adapter", () => {
       "password=SYNTHETIC_PROPERTIES_PASSWORD\n",
     );
     await writeFile(
+      join(repository, "deploy", "accessKeys.csv"),
+      `User Name,Access key ID,Secret access key\nalice,${["AKIA", "IOSFODNN7EXAMPLE"].join("")},wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "access-token.txt"),
+      "Authorization: Bearer ya29.a0AfH6SMD_EXAMPLE_OPAQUE_ACCESS_TOKEN\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "github-token.txt"),
+      "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "oversized.json"),
+      `[${"0,".repeat(4_194_304)}0]\n`,
+    );
+    await writeFile(
       join(repository, "deploy", "identity"),
       [
         ["-----BEGIN OPENSSH", "PRIVATE KEY-----"].join(" "),
@@ -1316,6 +1341,12 @@ describe("Agents SDK thin scan adapter", () => {
           expect(
             existsSync(join(value.repository, "src", "proxy-schema.json")),
           ).toBe(true);
+          expect(existsSync(join(value.repository, "i18n", "en.json"))).toBe(
+            true,
+          );
+          expect(
+            existsSync(join(value.repository, "src", "auth-config.json")),
+          ).toBe(true);
           expect(existsSync(filterMarker)).toBe(false);
           for (const path of [
             ".env",
@@ -1389,6 +1420,10 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/token.txt",
             "deploy/secrets.toml",
             "deploy/secrets.properties",
+            "deploy/accessKeys.csv",
+            "deploy/access-token.txt",
+            "deploy/github-token.txt",
+            "deploy/oversized.json",
             "deploy/identity",
             "deploy/pgp-backup.asc",
             "deploy/repository.bundle",
