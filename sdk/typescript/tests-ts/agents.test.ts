@@ -890,6 +890,19 @@ describe("Agents SDK thin scan adapter", () => {
       "SYNTHETIC_GITCONFIG_SECRET\n",
     );
     await writeFile(join(repository, ".npmrc"), "SYNTHETIC_NPM_TOKEN\n");
+    await writeFile(
+      join(repository, ".bazelrc"),
+      "build --remote_header=x-buildbuddy-api-key=SYNTHETIC_BAZEL_TOKEN\n",
+    );
+    await writeFile(
+      join(repository, ".bazelrc.user"),
+      "build --remote_header=x-buildbuddy-api-key=SYNTHETIC_BAZEL_USER_TOKEN\n",
+    );
+    await mkdir(join(repository, "tools"));
+    await writeFile(
+      join(repository, "tools", "bazel.rc"),
+      "build --remote_header=x-buildbuddy-api-key=SYNTHETIC_BAZEL_TOOLS_TOKEN\n",
+    );
     await mkdir(join(repository, ".ssh"));
     await writeFile(join(repository, ".ssh", "id_rsa"), "SYNTHETIC_SSH_KEY\n");
     await mkdir(join(repository, ".config", "gcloud"), { recursive: true });
@@ -945,6 +958,9 @@ describe("Agents SDK thin scan adapter", () => {
             "gradle.properties",
             ".gitconfig",
             ".npmrc",
+            ".bazelrc",
+            ".bazelrc.user",
+            "tools/bazel.rc",
             ".ssh/id_rsa",
             ".config/gcloud/application_default_credentials.json",
             ".terraform.d/credentials.tfrc.json",
