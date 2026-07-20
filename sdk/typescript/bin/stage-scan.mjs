@@ -140,10 +140,12 @@ function copyTree(source, destination, prefix, depth) {
   }
   if (
     job.kind === "tree" &&
-    entries.some((entry) => gitCaseFold(entry.name) === ".git")
+    entries.some((entry) =>
+      [".git", ".gitignore"].includes(gitCaseFold(entry.name)),
+    )
   ) {
     fail(
-      `Nested Git worktrees cannot be staged safely; use the Codex engine: ${JSON.stringify(source)}`,
+      `Nested Git worktrees or ignore files cannot be staged safely; use the Codex engine: ${JSON.stringify(source)}`,
     );
   }
   for (const entry of entries) {

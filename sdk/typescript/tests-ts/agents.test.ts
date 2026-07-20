@@ -1786,7 +1786,45 @@ describe("Agents SDK thin scan adapter", () => {
     try {
       await expect(
         client.run(repository, { outputDir: join(root, "scan") }),
-      ).rejects.toThrow("Nested Git worktrees cannot be staged safely");
+      ).rejects.toThrow(
+        "Nested Git worktrees or ignore files cannot be staged safely",
+      );
+      expect(reached).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("rejects Git-ignore rules inside unversioned targets", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(join(repository, "private"), { recursive: true });
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    await writeFile(join(repository, ".gitignore"), "private/\n");
+    await writeFile(
+      join(repository, "private", "token.txt"),
+      "SYNTHETIC_IGNORED_SECRET\n",
+    );
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: join(root, "workspaces"),
+        },
+        runAgents: async () => {
+          reached = true;
+          throw new Error("runtime should not be reached");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow(
+        "Nested Git worktrees or ignore files cannot be staged safely",
+      );
       expect(reached).toBe(false);
     } finally {
       await client.close();

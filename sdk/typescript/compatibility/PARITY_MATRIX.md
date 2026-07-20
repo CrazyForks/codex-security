@@ -82,7 +82,7 @@ compaction, and delegates one bounded worker. Local edits to tracked files are i
 untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged deletions,
 sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, shell profiles/histories/caches, alternate-VCS metadata, `.envrc`, Composer/Bundler/Gradle credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, gsutil, and common client RC files), and Git credentials/history (including tracked nested repositories)
 are excluded. Path scans include applicable ancestor `SECURITY.md` files and
-exclude unrelated source files. Credential-directory roots/descendants, empty targets, Git-config includes, Git-shaped unversioned targets, and unversioned directories containing nested Git worktrees fail
+exclude unrelated source files. Credential-directory roots/descendants, empty targets, Git-config includes, Git-shaped unversioned targets, and unversioned directories containing `.gitignore` files or nested Git worktrees fail
 closed; bundled content-addressable installs are supported. Use Codex for paths containing only untracked or ignored files. Inputs
 are mounted read-only, ambient API keys and Docker-configured proxy credentials
 are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, target-controlled Docker configuration and Docker/PTY helpers resolving into the target are rejected, unsafe PTY loader overrides are suppressed, and the sandbox has a writable temporary home/cache. Bounded
