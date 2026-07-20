@@ -447,6 +447,8 @@ function skip(name, kind) {
       ".gitconfig",
       ".gitmodules",
       ".env",
+      ".envrc",
+      ".direnv",
       ".ssh",
       ".aws",
       ".azure",
@@ -455,16 +457,34 @@ function skip(name, kind) {
       ".gnupg",
       ".codex",
       ".openai",
+      ".oci",
+      ".bundle",
+      ".gem",
+      ".cargo",
+      ".composer",
+      ".gradle",
+      ".m2",
+      ".nuget",
+      ".npm",
+      ".pip",
+      ".terraform",
       ".config",
       ".terraform.d",
       ".password-store",
       ".vault-token",
       ".boto",
       ".s3cfg",
+      ".pulumi",
+      ".serverless",
+      ".chalice",
       ".npmrc",
       ".netrc",
       ".pypirc",
       ".pgpass",
+      "nuget.config",
+      "pip.conf",
+      "pip.ini",
+      ".gemrc",
     ].includes(lower) ||
     lower.startsWith(".env.") ||
     lower.startsWith(".yarnrc") ||
@@ -475,7 +495,8 @@ function skip(name, kind) {
     lower.endsWith(".pfx") ||
     lower.endsWith(".pkcs12") ||
     lower.endsWith(".jks") ||
-    lower.endsWith(".keystore")
+    lower.endsWith(".keystore") ||
+    /\.(?:tfstate(?:\..+)?|(?:auto\.)?tfvars(?:\.json)?)$/u.test(lower)
   ) {
     return true;
   }

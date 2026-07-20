@@ -80,7 +80,7 @@ adapter stages the requested tracked regular-file scope and the plugin with a cr
 subprocess into a network-disabled `node:22-bookworm` Docker sandbox, exposes the SDK shell tool with context
 compaction, and delegates one bounded worker. Local edits to tracked files are included;
 untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged deletions,
-sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config` and `.terraform.d`), and Git credentials/history (including tracked nested bare repositories)
+sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, `.envrc`, `.bundle`, and Terraform state), and Git credentials/history (including tracked nested bare repositories)
 are excluded. Path scans include applicable ancestor `SECURITY.md` files and
 exclude unrelated source files. Credential-directory roots, empty targets, and Git-shaped unversioned targets fail
 closed; bundled content-addressable installs are supported. Use Codex for paths containing only untracked or ignored files. Inputs

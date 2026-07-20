@@ -807,6 +807,7 @@ describe("Agents SDK thin scan adapter", () => {
     );
     await writeFile(join(repository, "app.ts"), "export const app = true;\n");
     await writeFile(join(repository, ".env"), "SYNTHETIC_ENV_SECRET\n");
+    await writeFile(join(repository, ".envrc"), "SYNTHETIC_ENVRC_SECRET\n");
     await writeFile(
       join(repository, ".gitconfig"),
       "SYNTHETIC_GITCONFIG_SECRET\n",
@@ -829,6 +830,16 @@ describe("Agents SDK thin scan adapter", () => {
       join(repository, ".terraform.d", "credentials.tfrc.json"),
       "SYNTHETIC_TERRAFORM_SECRET\n",
     );
+    await mkdir(join(repository, ".terraform"));
+    await writeFile(
+      join(repository, ".terraform", "terraform.tfstate"),
+      "SYNTHETIC_TFSTATE_SECRET\n",
+    );
+    await mkdir(join(repository, ".bundle"));
+    await writeFile(
+      join(repository, ".bundle", "config"),
+      "SYNTHETIC_BUNDLE_TOKEN\n",
+    );
     await writeFile(join(repository, "intent.ts"), "SYNTHETIC_INTENT_SECRET\n");
     await writeFile(join(repository, ".gitattributes"), "*.ts filter=unsafe\n");
     git(repository, ["add", "-f", "."]);
@@ -850,11 +861,14 @@ describe("Agents SDK thin scan adapter", () => {
           expect(existsSync(filterMarker)).toBe(false);
           for (const path of [
             ".env",
+            ".envrc",
             ".gitconfig",
             ".npmrc",
             ".ssh/id_rsa",
             ".config/gcloud/application_default_credentials.json",
             ".terraform.d/credentials.tfrc.json",
+            ".terraform/terraform.tfstate",
+            ".bundle/config",
             "intent.ts",
             "fixtures/private-mirror/config",
             "fixtures/private-mirror/objects",
@@ -1068,6 +1082,8 @@ describe("Agents SDK thin scan adapter", () => {
       ".ENV",
       ".env.production",
       ".ENV.PRODUCTION",
+      ".envrc",
+      ".ENVRC",
       "private.pem",
       "PRIVATE.PEM",
       "private.key",
@@ -1108,6 +1124,16 @@ describe("Agents SDK thin scan adapter", () => {
       ".BOTO",
       ".s3cfg",
       ".S3CFG",
+      "terraform.tfstate",
+      "TERRAFORM.TFSTATE.BACKUP",
+      "terraform.tfvars",
+      "PRODUCTION.AUTO.TFVARS.JSON",
+      "nuget.config",
+      "NUGET.CONFIG",
+      "pip.conf",
+      "PIP.INI",
+      ".gemrc",
+      ".GEMRC",
     ];
     const directories = [
       ".ssh",
@@ -1126,6 +1152,36 @@ describe("Agents SDK thin scan adapter", () => {
       ".CODEX",
       ".openai",
       ".OPENAI",
+      ".oci",
+      ".OCI",
+      ".bundle",
+      ".BUNDLE",
+      ".gem",
+      ".GEM",
+      ".cargo",
+      ".CARGO",
+      ".composer",
+      ".COMPOSER",
+      ".gradle",
+      ".GRADLE",
+      ".m2",
+      ".M2",
+      ".nuget",
+      ".NUGET",
+      ".npm",
+      ".NPM",
+      ".pip",
+      ".PIP",
+      ".terraform",
+      ".TERRAFORM",
+      ".pulumi",
+      ".PULUMI",
+      ".serverless",
+      ".SERVERLESS",
+      ".chalice",
+      ".CHALICE",
+      ".direnv",
+      ".DIRENV",
       ".config",
       ".CONFIG",
       ".terraform.d",
