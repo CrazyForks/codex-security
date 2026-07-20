@@ -78,14 +78,16 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 Standard repository/path CLI scans use `@openai/agents@0.13.5`. The thin Agents
 adapter stages tracked regular files and the plugin into a network-disabled
 `node:22-bookworm` Docker sandbox. Local edits to tracked files are included;
-untracked/ignored files, submodule contents, symlinks, and Git
-credentials/history are excluded. Use Codex for paths containing only
-untracked or ignored files. Inputs are mounted read-only. Bounded
+untracked/ignored files, submodule contents, symlinks, unstaged deletions,
+sparse-checkout paths absent from the worktree, and Git credentials/history
+are excluded. Use Codex for paths containing only untracked or ignored files.
+Inputs are mounted read-only. Bounded
 output is copied to the requested directory. It runs the `security-scan` skill
 with one delegated ranking worker and validates the canonical output contract
-against a stable repository identity. SDK tracing and sensitive debug logging
-are suppressed. It requires an API key and does not consume file-backed Codex
-authentication.
+against a stable repository and relative-scope identity. SDK tracing and
+sensitive debug logging are suppressed. Repository instruction files such as
+`AGENTS.md` are treated as untrusted scan input. It requires an API key and
+does not consume file-backed Codex authentication.
 
 Git-backed targets are deliberately treated as directory snapshots, so history
 and advisory lookup is unavailable; unversioned targets omit common `.env` and

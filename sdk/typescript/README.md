@@ -45,14 +45,17 @@ repository. When SARIF is produced, it is written to
 The default Agents engine stages a compact tracked, regular-file snapshot
 and the plugin into the SDK Docker workspace, mounts them read-only, and
 disables network access before tool execution. Local edits to tracked files are
-included; untracked/ignored files, submodule contents, symlinks, Git
-credentials/history, and unrelated plugin-checkout files are excluded. Use the
+included; untracked/ignored files, submodule contents, symlinks, unstaged
+deletions, sparse-checkout paths absent from the worktree, Git credentials/history,
+and unrelated plugin-checkout files are excluded. Use the
 Codex engine when a path contains only untracked or ignored files. Inputs and
-results are size/type bounded before handoff. The standard `security-scan` skill runs with
-one serialized delegated ranking worker and preserves the existing pool-plan,
-receipt, and canonical output contract. A stable one-way-hashed,
-credential-free remote identity is bound during validation when available,
-while SDK tracing and sensitive debug logging are suppressed.
+results are size/type bounded before handoff. The standard `security-scan`
+skill runs with one serialized delegated ranking worker and preserves the
+existing pool-plan, receipt, and canonical output contract. A stable one-way-hashed,
+credential-free remote and relative-scope identity is bound during validation
+when available, while SDK tracing and sensitive debug logging are suppressed.
+Repository instruction files such as `AGENTS.md` are treated as untrusted scan
+input.
 
 This intentionally keeps staging small: Git-backed targets are treated as
 directory snapshots, so history/advisory lookup is unavailable; unversioned

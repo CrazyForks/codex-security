@@ -43,11 +43,14 @@ The Agents engine stages a tracked, regular-file snapshot and the bundled
 scan skills/helpers into a network-disabled `node:22-bookworm` Docker
 workspace, mounts them read-only, and delegates bounded scan workers through
 Agents SDK. Local edits to tracked files are included; untracked/ignored files,
-submodule contents, symlinks, and Git credentials/history are excluded. Use the
-Codex engine when a path contains only untracked or ignored files. A sanitized,
-one-way-hashed remote identity keeps finding fingerprints stable across checkouts;
-bounded results are copied to the requested output directory. SDK tracing and
-sensitive debug logging are suppressed during the scan.
+submodule contents, symlinks, unstaged deletions, sparse-checkout paths absent
+from the worktree, and Git credentials/history are excluded. Use the Codex
+engine when a path contains only untracked or ignored files. A sanitized,
+one-way-hashed remote and relative-scope identity keeps finding fingerprints
+stable across checkouts without colliding across monorepo services; bounded
+results are copied to the requested output directory. SDK tracing and sensitive
+debug logging are suppressed, and repository instruction files such as
+`AGENTS.md` are treated as untrusted scan input.
 Docker must be running for the default Agents engine. Use
 `--engine codex` to run the existing Codex-backed standard scan when needed;
 diff, working-tree, deep, `--codex`, and native Windows scans select it
