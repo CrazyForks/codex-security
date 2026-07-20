@@ -546,6 +546,22 @@ function skip(name, kind) {
       ".snowsql",
       ".snowflake",
       ".gsutil",
+      ".jfrog",
+      ".fly",
+      ".flyctl",
+      ".cf",
+      ".heroku",
+      ".netlify",
+      ".vercel",
+      ".railway",
+      ".doppler",
+      ".kaggle",
+      ".huggingface",
+      ".wandb",
+      ".streamlit",
+      ".gitkraken",
+      ".keybase",
+      "keychains",
       ".pulumi",
       ".serverless",
       ".chalice",
@@ -568,6 +584,15 @@ function skip(name, kind) {
       ".condarc",
       ".hgrc",
       ".cvspass",
+      ".sentryclirc",
+      ".authinfo",
+      ".authinfo.gpg",
+      ".netrc.gpg",
+      ".ossutilconfig",
+      ".clearml.conf",
+      ".comet.config",
+      ".nomad-token",
+      ".consul-token",
       ".bashrc",
       ".bash_profile",
       ".bash_login",
@@ -590,6 +615,14 @@ function skip(name, kind) {
       "pg_service.conf",
       ".sqliterc",
       ".odbc.ini",
+      "cookies",
+      "cookies.sqlite",
+      "login data",
+      "local state",
+      "web data",
+      "key3.db",
+      "key4.db",
+      "logins.json",
     ].includes(lower) ||
     lower.startsWith(".env.") ||
     lower.startsWith(".envrc.") ||
@@ -605,6 +638,11 @@ function skip(name, kind) {
     lower.endsWith(".pkcs12") ||
     lower.endsWith(".jks") ||
     lower.endsWith(".keystore") ||
+    lower.endsWith(".kdbx") ||
+    lower.endsWith(".keychain") ||
+    lower.endsWith(".keychain-db") ||
+    lower.endsWith(".ovpn") ||
+    lower.endsWith(".mobileconfig") ||
     /\.tfrc(?:\.json)?$/u.test(lower) ||
     /\.(?:tfstate(?:\..+)?|(?:auto\.)?tfvars(?:\.json)?)$/u.test(lower)
   ) {

@@ -49,7 +49,7 @@ subprocess, mounts them read-only, disables network access, and exposes the SDK
 shell tool with context compaction before
 delegating one bounded worker. Local edits to tracked files are
 included; untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged
-deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, shell profiles/histories/caches, alternate-VCS metadata, `.envrc`/`.flaskenv`, Composer/Bundler/Gradle/Bazel/Bun credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, gsutil, and common database/client RC files), Git credentials/history (including tracked nested repositories),
+deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, shell profiles/histories/caches, alternate-VCS metadata, `.envrc`/`.flaskenv`, Composer/Bundler/Gradle/Bazel/Bun credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, gsutil, deployment/ML CLI stores, Sentry/authinfo, browser/keychain/password databases, and common database/client RC files), Git credentials/history (including tracked nested repositories),
 and unrelated plugin-checkout files are excluded. Path scans also include
 applicable ancestor `SECURITY.md` files and exclude unrelated source files.
 Credential-directory roots/descendants, empty targets, Git-config includes, Git-shaped targets (including an ambiguous tracked-worktree root), and unversioned directories containing nested Git worktrees fail closed; bundled content-addressable installs are supported. Use the Codex engine when
