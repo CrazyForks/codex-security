@@ -47,11 +47,11 @@ and the plugin into the SDK Docker workspace using a credential-free staging
 subprocess, mounts them read-only, disables network access, and exposes the SDK
 shell tool with context compaction before
 delegating one bounded worker. Local edits to tracked files are
-included; untracked/ignored files, submodule contents, symlinks, hard-linked source/plugin files, unstaged
+included; untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, unstaged
 deletions, sparse-checkout paths absent from the worktree, Git credentials/history,
 and unrelated plugin-checkout files are excluded. Path scans also include
 applicable ancestor `SECURITY.md` files and exclude unrelated source files.
-Empty and Git-shaped unversioned targets fail closed. Use the Codex engine when
+Empty and Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when
 a path contains only untracked or ignored files. Ambient OpenAI/Codex API keys
 are not forwarded to Docker subprocesses. Inputs and
 results are size/type bounded before handoff. The standard `security-scan`

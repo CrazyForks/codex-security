@@ -351,6 +351,11 @@ export class AgentsSecurity {
           source: pluginRoot,
           destination: stagedPlugin,
           scopes: pluginScopes,
+          rejectHardlinks:
+            pluginRoot !==
+            (await realpath(
+              fileURLToPath(new URL("../_bundled_plugin/", import.meta.url)),
+            ).catch(() => null)),
           state: inputState,
         },
         controller.signal,
@@ -1415,8 +1420,9 @@ async function requireSafeGitConfig(
 }
 
 function isBareGitDirectory(names: string[]): boolean {
-  return ["HEAD", "config", "objects", "refs"].every((name) =>
-    names.includes(name),
+  const folded = new Set(names.map((name) => name.toLowerCase()));
+  return ["head", "config", "objects", "refs"].every((name) =>
+    folded.has(name),
   );
 }
 
@@ -1718,6 +1724,7 @@ interface StagingJob {
   paths?: readonly string[];
   scopes?: readonly string[];
   ignoreCase?: boolean;
+  rejectHardlinks?: boolean;
   state: StagingState;
 }
 

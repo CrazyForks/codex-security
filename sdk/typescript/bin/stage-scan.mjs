@@ -107,8 +107,8 @@ function copyTree(source, destination, prefix, depth) {
   const entries = readDirectory(sourceRoot, source);
   if (
     input &&
-    ["HEAD", "config", "objects", "refs"].every((name) =>
-      entries.some((entry) => entry.name === name),
+    ["head", "config", "objects", "refs"].every((name) =>
+      entries.some((entry) => gitCaseFold(entry.name) === name),
     )
   ) {
     fail(
@@ -162,7 +162,7 @@ function copyFile(source, destination, expected) {
         : "Agents SDK scan output contains an oversized file.",
     );
   }
-  if (input && expected.nlink !== 1) {
+  if (input && job.rejectHardlinks !== false && expected.nlink !== 1) {
     fail(`Repository input has an unsafe hard link: ${JSON.stringify(source)}`);
   }
   ensureDirectory(dirname(destination));
@@ -180,7 +180,7 @@ function copyFile(source, destination, expected) {
       opened.dev !== expected.dev ||
       opened.ino !== expected.ino ||
       opened.size !== expected.size ||
-      (input && opened.nlink !== 1)
+      (input && job.rejectHardlinks !== false && opened.nlink !== 1)
     ) {
       fail(
         input
@@ -329,12 +329,16 @@ function resolveSourcePath(path, cache, ignoreCase) {
     const name =
       entries.find((entry) => entry === part) ??
       (ignoreCase
-        ? entries.find((entry) => entry.toLowerCase() === part.toLowerCase())
+        ? entries.find((entry) => gitCaseFold(entry) === gitCaseFold(part))
         : undefined);
     if (name === undefined) return null;
     current = join(current, name);
   }
   return current;
+}
+
+function gitCaseFold(value) {
+  return value.replace(/[A-Z]/gu, (character) => character.toLowerCase());
 }
 
 function openAt(root, path, flags, mode) {
@@ -410,7 +414,7 @@ function include(path, scopes) {
   ) {
     return true;
   }
-  if (basename(path) !== "SECURITY.md") return false;
+  if (gitCaseFold(basename(path)) !== "security.md") return false;
   const parent = dirname(path).split(sep).join("/");
   return scopes.some(
     (scope) =>

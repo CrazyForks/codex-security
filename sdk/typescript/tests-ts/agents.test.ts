@@ -928,13 +928,13 @@ describe("Agents SDK thin scan adapter", () => {
     await mkdir(repository);
     await writeFile(join(repository, "app.ts"), "export const app = true;\n");
     const mirror = join(repository, "private-mirror");
-    await mkdir(join(mirror, "objects"), { recursive: true });
-    await mkdir(join(mirror, "refs"));
-    await writeFile(join(mirror, "HEAD"), "malformed bare HEAD\n");
-    await writeFile(join(mirror, "objects", "history"), "SYNTHETIC_HISTORY\n");
+    await mkdir(join(mirror, "Objects"), { recursive: true });
+    await mkdir(join(mirror, "Refs"));
+    await writeFile(join(mirror, "head"), "malformed bare HEAD\n");
+    await writeFile(join(mirror, "Objects", "history"), "SYNTHETIC_HISTORY\n");
     const mirrorConfig = join(root, "mirror-config");
     await writeFile(mirrorConfig, "SYNTHETIC_MIRROR_TOKEN\n");
-    await symlink(mirrorConfig, join(mirror, "config"));
+    await symlink(mirrorConfig, join(mirror, "CONFIG"));
     for (const name of names) {
       await writeFile(join(repository, name), "SYNTHETIC_SOURCE_SECRET\n");
       await writeFile(
@@ -1194,6 +1194,7 @@ describe("Agents SDK thin scan adapter", () => {
         join(source, "src", "app.ts"),
         "export const app = true;\n",
       );
+      await writeFile(join(source, "security.md"), "root policy\n");
       const staged = spawnSync(
         process.execPath,
         [join(import.meta.dir, "../bin/stage-scan.mjs")],
@@ -1203,7 +1204,7 @@ describe("Agents SDK thin scan adapter", () => {
             kind: "tracked",
             source,
             destination,
-            paths: ["src/App.ts"],
+            paths: ["src/App.ts", "SECURITY.md"],
             scopes: ["src/app.ts"],
             ignoreCase: true,
             state: { entries: 0, bytes: 0, files: 0 },
@@ -1212,6 +1213,66 @@ describe("Agents SDK thin scan adapter", () => {
       );
       expect(staged.status, staged.stderr).toBe(0);
       expect(existsSync(join(destination, "src", "app.ts"))).toBe(true);
+      expect(existsSync(join(destination, "security.md"))).toBe(true);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "does not stage Unicode case-fold lookalikes absent from the Git index",
+    async () => {
+      const root = await temporaryDirectory();
+      const source = join(root, "source");
+      const destination = join(root, "destination");
+      await mkdir(source);
+      await writeFile(join(source, "K.ts"), "SYNTHETIC_UNTRACKED_SECRET\n");
+      const staged = spawnSync(
+        process.execPath,
+        [join(import.meta.dir, "../bin/stage-scan.mjs")],
+        {
+          encoding: "utf8",
+          input: JSON.stringify({
+            kind: "tracked",
+            source,
+            destination,
+            paths: ["K.ts"],
+            ignoreCase: true,
+            state: { entries: 0, bytes: 0, files: 0 },
+          }),
+        },
+      );
+      expect(staged.status, staged.stderr).toBe(0);
+      expect(JSON.parse(staged.stdout).files).toBe(0);
+      expect(existsSync(join(destination, "K.ts"))).toBe(false);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "stages content-addressable bundled-plugin hard links",
+    async () => {
+      const root = await temporaryDirectory();
+      const source = join(root, "plugin");
+      const destination = join(root, "destination");
+      const storeFile = join(root, "store-file");
+      await mkdir(join(source, "scripts"), { recursive: true });
+      await writeFile(storeFile, "print('bundled')\n");
+      await link(storeFile, join(source, "scripts", "bundled.py"));
+      const staged = spawnSync(
+        process.execPath,
+        [join(import.meta.dir, "../bin/stage-scan.mjs")],
+        {
+          encoding: "utf8",
+          input: JSON.stringify({
+            kind: "plugin",
+            source,
+            destination,
+            scopes: ["scripts"],
+            rejectHardlinks: false,
+            state: { entries: 0, bytes: 0, files: 0 },
+          }),
+        },
+      );
+      expect(staged.status, staged.stderr).toBe(0);
+      expect(existsSync(join(destination, "scripts", "bundled.py"))).toBe(true);
     },
   );
 
