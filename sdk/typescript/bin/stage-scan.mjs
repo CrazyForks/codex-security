@@ -502,8 +502,10 @@ function skip(name, kind) {
     [
       ".git",
       ".git-credentials",
+      ".gitcookies",
       ".gitconfig",
       ".gitmodules",
+      ".dockercfg",
       ".env",
       ".envrc",
       ".direnv",

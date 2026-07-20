@@ -1122,10 +1122,14 @@ describe("Agents SDK thin scan adapter", () => {
       "PRIVATE.KEY",
       ".git-credentials",
       ".GIT-CREDENTIALS",
+      ".gitcookies",
+      ".GITCOOKIES",
       ".gitmodules",
       ".GITMODULES",
       ".gitconfig",
       ".GITCONFIG",
+      ".dockercfg",
+      ".DOCKERCFG",
       ".npmrc",
       ".NPMRC",
       ".netrc",
@@ -1527,6 +1531,55 @@ describe("Agents SDK thin scan adapter", () => {
       } finally {
         if (previousPath === undefined) delete process.env["PATH"];
         else process.env["PATH"] = previousPath;
+        await client.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "stages large explicit path scopes without exceeding the Git argument limit",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const targets: string[] = [];
+      await initializeGitRepository(repository);
+      await mkdir(join(repository, "src"));
+      for (let index = 0; index < 2200; index += 1) {
+        const name = `${String(index).padStart(4, "0")}-${"x".repeat(210)}.ts`;
+        targets.push(`src/${name}`);
+        await writeFile(
+          join(repository, "src", name),
+          `export const value = ${index};\n`,
+        );
+      }
+      git(repository, ["add", "src"]);
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: join(root, "workspaces"),
+          },
+          runAgents: async (value: AgentsScanRequest) => {
+            reached = true;
+            expect(existsSync(join(value.repository, targets[0]!))).toBe(true);
+            expect(existsSync(join(value.repository, targets.at(-1)!))).toBe(
+              true,
+            );
+            throw new Error("stop after large-pathspec inspection");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, {
+            target: targets,
+            outputDir: join(root, "scan"),
+          }),
+        ).rejects.toThrow("stop after large-pathspec inspection");
+        expect(reached).toBe(true);
+      } finally {
         await client.close();
       }
     },

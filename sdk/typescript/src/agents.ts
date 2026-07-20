@@ -99,6 +99,7 @@ const REQUIRED_PLUGIN_DIRECTORIES = ["references", "schemas", "scripts"];
 const OPTIONAL_PLUGIN_DIRECTORIES = [".codex-plugin", "examples", "preflight"];
 const MAX_INPUT_ENTRIES = 2_000_000;
 const MAX_GIT_INDEX_RECORD_BYTES = 64 * 1024;
+const MAX_GIT_PATHSPEC_BYTES = 64 * 1024;
 const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
 const MAX_GIT_POINTER_BYTES = 64 * 1024;
 let tracingUsers = 0;
@@ -1109,7 +1110,13 @@ function gitPathspecs(
       paths.add(parent.length === 0 ? "SECURITY.md" : `${parent}/SECURITY.md`);
     }
   }
-  return [...paths].map((path) => `${literal}${path}`);
+  const pathspecs = [...paths].map((path) => `${literal}${path}`);
+  return pathspecs.reduce(
+    (bytes, pathspec) => bytes + Buffer.byteLength(pathspec) + 1,
+    0,
+  ) > MAX_GIT_PATHSPEC_BYTES
+    ? [`${literal}.`]
+    : pathspecs;
 }
 
 async function gitIndexEntries(
@@ -1468,8 +1475,10 @@ function isGitCredentialPath(parts: string[]): boolean {
   const leaf = parts.at(-1)?.toLowerCase();
   return (
     leaf === ".git-credentials" ||
+    leaf === ".gitcookies" ||
     leaf === ".gitconfig" ||
-    leaf === ".gitmodules"
+    leaf === ".gitmodules" ||
+    leaf === ".dockercfg"
   );
 }
 
