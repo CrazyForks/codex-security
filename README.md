@@ -41,10 +41,12 @@ target, output, and runtime options.
 
 The Agents engine stages the requested tracked, regular-file scope and the
 bundled scan skills/helpers into a network-disabled `node:22-bookworm` Docker
-workspace, mounts them read-only, and delegates bounded scan workers through
-Agents SDK. Path scans include applicable ancestor `SECURITY.md` files while
+workspace using a credential-free staging subprocess, mounts them read-only,
+exposes the SDK shell tool with context compaction, and delegates one bounded
+scan worker. Path scans include
+applicable ancestor `SECURITY.md` files while
 excluding unrelated source files. Local edits to tracked files are included; untracked/ignored files,
-submodule contents, symlinks, hard-linked source files, unstaged deletions, sparse-checkout paths absent
+submodule contents, symlinks, hard-linked source/plugin files, unstaged deletions, sparse-checkout paths absent
 from the worktree, and Git credentials/history are excluded. Empty and
 Git-shaped unversioned targets fail closed; use the Codex engine when a path
 contains only untracked or ignored files. Ambient OpenAI/Codex API keys are

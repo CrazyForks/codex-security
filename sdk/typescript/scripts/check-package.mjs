@@ -67,6 +67,7 @@ const required = [
   "package/README.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
+  "package/bin/stage-scan.mjs",
   "package/dist/index.js",
   "package/dist/index.d.ts",
   "package/dist/cli.js",
@@ -194,6 +195,7 @@ const allowedRoot = new Set([
   "package/README.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
+  "package/bin/stage-scan.mjs",
 ]);
 const distFiles = new Set(
   [
