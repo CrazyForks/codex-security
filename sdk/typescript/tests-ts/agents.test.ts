@@ -870,6 +870,14 @@ describe("Agents SDK thin scan adapter", () => {
     await writeFile(join(repository, ".env"), "SYNTHETIC_ENV_SECRET\n");
     await writeFile(join(repository, ".envrc"), "SYNTHETIC_ENVRC_SECRET\n");
     await writeFile(
+      join(repository, ".envrc.local"),
+      "export OPENAI_API_KEY=SYNTHETIC_ENVRC_LOCAL_SECRET\n",
+    );
+    await writeFile(
+      join(repository, ".flaskenv"),
+      "SECRET_KEY=SYNTHETIC_FLASKENV_SECRET\n",
+    );
+    await writeFile(
       join(repository, ".terraformrc"),
       "SYNTHETIC_TERRAFORMRC_SECRET\n",
     );
@@ -890,6 +898,14 @@ describe("Agents SDK thin scan adapter", () => {
       "SYNTHETIC_GITCONFIG_SECRET\n",
     );
     await writeFile(join(repository, ".npmrc"), "SYNTHETIC_NPM_TOKEN\n");
+    await writeFile(
+      join(repository, "bunfig.toml"),
+      'token="SYNTHETIC_BUN_TOKEN"\n',
+    );
+    await writeFile(
+      join(repository, ".mylogin.cnf"),
+      "SYNTHETIC_MYLOGIN_SECRET\n",
+    );
     await writeFile(
       join(repository, ".bazelrc"),
       "build --remote_header=x-buildbuddy-api-key=SYNTHETIC_BAZEL_TOKEN\n",
@@ -952,12 +968,16 @@ describe("Agents SDK thin scan adapter", () => {
           for (const path of [
             ".env",
             ".envrc",
+            ".envrc.local",
+            ".flaskenv",
             ".terraformrc",
             "credentials.tfrc.json",
             "auth.json",
             "gradle.properties",
             ".gitconfig",
             ".npmrc",
+            "bunfig.toml",
+            ".mylogin.cnf",
             ".bazelrc",
             ".bazelrc.user",
             "tools/bazel.rc",
@@ -1227,6 +1247,12 @@ describe("Agents SDK thin scan adapter", () => {
       ".ENV.PRODUCTION",
       ".envrc",
       ".ENVRC",
+      ".envrc.local",
+      ".ENVRC.LOCAL",
+      ".flaskenv",
+      ".FLASKENV",
+      ".flaskenv.local",
+      ".FLASKENV.LOCAL",
       ".terraformrc",
       ".TERRAFORMRC",
       "terraform.rc",
@@ -1257,6 +1283,8 @@ describe("Agents SDK thin scan adapter", () => {
       ".NPMRC",
       ".netrc",
       ".NETRC",
+      "_netrc",
+      "_NETRC",
       ".pypirc",
       ".PYPIRC",
       ".pgpass",
@@ -1301,6 +1329,16 @@ describe("Agents SDK thin scan adapter", () => {
       ".BAZELRC.LOCAL",
       "bazel.rc",
       "BAZEL.RC",
+      "bunfig.toml",
+      "BUNFIG.TOML",
+      ".bunfig.toml",
+      ".BUNFIG.TOML",
+      ".condarc",
+      ".CONDARC",
+      ".hgrc",
+      ".HGRC",
+      ".cvspass",
+      ".CVSPASS",
       ".bash_history",
       ".BASH_HISTORY",
       ".zsh_history",
@@ -1341,6 +1379,14 @@ describe("Agents SDK thin scan adapter", () => {
       ".WGETRC",
       ".my.cnf",
       ".MY.CNF",
+      ".mylogin.cnf",
+      ".MYLOGIN.CNF",
+      ".pg_service.conf",
+      ".PG_SERVICE.CONF",
+      "pg_service.conf",
+      "PG_SERVICE.CONF",
+      ".sqliterc",
+      ".SQLITERC",
       ".odbc.ini",
       ".ODBC.INI",
     ];
@@ -1375,6 +1421,12 @@ describe("Agents SDK thin scan adapter", () => {
       ".GRADLE",
       ".m2",
       ".M2",
+      ".sbt",
+      ".SBT",
+      ".ivy2",
+      ".IVY2",
+      ".lein",
+      ".LEIN",
       ".nuget",
       ".NUGET",
       ".npm",

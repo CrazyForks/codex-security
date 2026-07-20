@@ -521,6 +521,9 @@ function skip(name, kind) {
       ".composer",
       ".gradle",
       ".m2",
+      ".sbt",
+      ".ivy2",
+      ".lein",
       ".nuget",
       ".npm",
       ".pip",
@@ -548,6 +551,7 @@ function skip(name, kind) {
       ".chalice",
       ".npmrc",
       ".netrc",
+      "_netrc",
       ".pypirc",
       ".pgpass",
       ".terraformrc",
@@ -559,6 +563,11 @@ function skip(name, kind) {
       "pip.ini",
       ".gemrc",
       "bazel.rc",
+      "bunfig.toml",
+      ".bunfig.toml",
+      ".condarc",
+      ".hgrc",
+      ".cvspass",
       ".bashrc",
       ".bash_profile",
       ".bash_login",
@@ -576,9 +585,15 @@ function skip(name, kind) {
       ".curlrc",
       ".wgetrc",
       ".my.cnf",
+      ".mylogin.cnf",
+      ".pg_service.conf",
+      "pg_service.conf",
+      ".sqliterc",
       ".odbc.ini",
     ].includes(lower) ||
     lower.startsWith(".env.") ||
+    lower.startsWith(".envrc.") ||
+    lower.startsWith(".flaskenv") ||
     lower.startsWith(".yarnrc") ||
     lower.startsWith(".bazelrc") ||
     (lower.startsWith(".") && lower.endsWith("_history")) ||
