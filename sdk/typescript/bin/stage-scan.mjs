@@ -37,14 +37,15 @@ try {
     for (const path of job.paths ?? []) {
       if (seen.has(path)) continue;
       seen.add(path);
-      const source = join(job.source, path);
+      let source = join(job.source, path);
       let metadata;
       try {
-        if (
-          !hasSourceEntry(source, directoryEntries, job.ignoreCase === true)
-        ) {
-          continue;
-        }
+        source = resolveSourcePath(
+          path,
+          directoryEntries,
+          job.ignoreCase === true,
+        );
+        if (source === null) continue;
         metadata = metadataAt(sourceRoot, source);
       } catch (error) {
         fail(
@@ -309,26 +310,31 @@ function readDirectory(root, path) {
   );
 }
 
-function hasSourceEntry(path, cache, ignoreCase) {
-  const parent = dirname(path);
-  let entries = cache.get(parent);
-  if (entries === undefined) {
-    try {
-      entries = new Set(
-        readDirectory(sourceRoot, parent).map((entry) =>
-          ignoreCase ? entry.name.toLowerCase() : entry.name,
-        ),
-      );
-    } catch (error) {
-      if (!error || (error.code !== "ENOENT" && error.code !== "ENOTDIR")) {
-        throw error;
+function resolveSourcePath(path, cache, ignoreCase) {
+  let current = job.source;
+  for (const part of path.split("/")) {
+    let entries = cache.get(current);
+    if (entries === undefined) {
+      try {
+        entries = readDirectory(sourceRoot, current).map((entry) => entry.name);
+      } catch (error) {
+        if (!error || (error.code !== "ENOENT" && error.code !== "ENOTDIR")) {
+          throw error;
+        }
+        entries = null;
       }
-      entries = null;
+      cache.set(current, entries);
     }
-    cache.set(parent, entries);
+    if (entries === null) return null;
+    const name =
+      entries.find((entry) => entry === part) ??
+      (ignoreCase
+        ? entries.find((entry) => entry.toLowerCase() === part.toLowerCase())
+        : undefined);
+    if (name === undefined) return null;
+    current = join(current, name);
   }
-  const name = basename(path);
-  return entries?.has(ignoreCase ? name.toLowerCase() : name) ?? false;
+  return current;
 }
 
 function openAt(root, path, flags, mode) {

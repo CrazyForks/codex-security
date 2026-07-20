@@ -1184,6 +1184,38 @@ describe("Agents SDK thin scan adapter", () => {
   );
 
   test.skipIf(process.platform === "win32")(
+    "resolves case-renamed tracked inputs before staging on case-sensitive hosts",
+    async () => {
+      const root = await temporaryDirectory();
+      const source = join(root, "source");
+      const destination = join(root, "destination");
+      await mkdir(join(source, "src"), { recursive: true });
+      await writeFile(
+        join(source, "src", "app.ts"),
+        "export const app = true;\n",
+      );
+      const staged = spawnSync(
+        process.execPath,
+        [join(import.meta.dir, "../bin/stage-scan.mjs")],
+        {
+          encoding: "utf8",
+          input: JSON.stringify({
+            kind: "tracked",
+            source,
+            destination,
+            paths: ["src/App.ts"],
+            scopes: ["src/app.ts"],
+            ignoreCase: true,
+            state: { entries: 0, bytes: 0, files: 0 },
+          }),
+        },
+      );
+      expect(staged.status, staged.stderr).toBe(0);
+      expect(existsSync(join(destination, "src", "app.ts"))).toBe(true);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "rejects externally hard-linked tracked inputs before starting the runtime",
     async () => {
       const root = await temporaryDirectory();
