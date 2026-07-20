@@ -185,9 +185,7 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (((/\.jsonc?$/u.test(name) ||
-      /\.ya?ml$/u.test(name) ||
-      !name.includes(".")) &&
+    (((/\.(?:jsonc?|ya?ml|conf|txt)$/u.test(name) || !name.includes(".")) &&
       isCredentialDocument(source, expected, name)) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
@@ -321,21 +319,61 @@ function isCredentialDocument(source, expected, name) {
       fail(`Repository input changed while staging: ${JSON.stringify(source)}`);
     }
     const json = /\.jsonc?$/u.test(name);
-    const yaml = /\.ya?ml$/u.test(name);
-    if (!json && !yaml) {
-      return /^\s*-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----/imu.test(
-        contents,
+    const structured = /\.(?:ya?ml|conf)$/u.test(name);
+    const field = (name) =>
+      new RegExp(`(?:^|[\\s{,])["']?${name}["']?\\s*:`, "imu").test(contents);
+    const credentialFields = () =>
+      ["auths", "creds[-_]?store", "cred[-_]?helpers"].some(field) ||
+      (field("proxies") &&
+        [
+          "http[-_]?proxy",
+          "https[-_]?proxy",
+          "ftp[-_]?proxy",
+          "all[-_]?proxy",
+        ].some(field)) ||
+      (field("http[-_]?headers") && field("authorization")) ||
+      (field("access[-_]?key[-_]?id") &&
+        (field("secret[-_]?access[-_]?key") || field("session[-_]?token"))) ||
+      (field("app[-_]?id") &&
+        field("password") &&
+        field("tenant(?:[-_]?id)?")) ||
+      (field("type") && field("private[-_]?key")) ||
+      (field("client[-_]?id") &&
+        field("client[-_]?secret") &&
+        [
+          "tenant[-_]?id",
+          "subscription[-_]?id",
+          "auth[-_]?uri",
+          "token[-_]?uri",
+        ].some(field)) ||
+      ((field("access[-_]?token") || field("refresh[-_]?token")) &&
+        ["token[-_]?type", "expires[-_]?in", "expires[-_]?on", "tenant"].some(
+          field,
+        ));
+    if (!json && !structured) {
+      return (
+        /^\s*-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----/imu.test(
+          contents,
+        ) ||
+        /^\s*eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\s*$/mu.test(
+          contents,
+        )
       );
     }
-    if (yaml) {
+    if (structured) {
       const unquoted = contents.replace(/["']/gu, "");
       return (
-        /(?:^|[\s{,])apiversion\s*:\s*v1(?:\s|[,}]|$)/imu.test(unquoted) &&
-        /(?:^|[\s{,])kind\s*:\s*config(?:\s|[,}]|$)/imu.test(unquoted) &&
-        /(?:^|[\s{,])clusters\s*:/imu.test(unquoted) &&
-        /(?:^|[\s{,])users\s*:/imu.test(unquoted)
+        credentialFields() ||
+        /^\s*eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\s*$/mu.test(
+          contents,
+        ) ||
+        (/(?:^|[\s{,])apiversion\s*:\s*v1(?:\s|[,}]|$)/imu.test(unquoted) &&
+          /(?:^|[\s{,])kind\s*:\s*config(?:\s|[,}]|$)/imu.test(unquoted) &&
+          /(?:^|[\s{,])clusters\s*:/imu.test(unquoted) &&
+          /(?:^|[\s{,])users\s*:/imu.test(unquoted))
       );
     }
+    if (credentialFields()) return true;
     try {
       const pending = [JSON.parse(contents)];
       let entries = 0;
@@ -372,9 +410,12 @@ function isCredentialDocument(source, expected, name) {
           (key) => keys.has(key),
         );
         if (
-          ["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
-            (key) => keys.has(key),
-          ) ||
+          ["auths", "credsstore", "credhelpers"].some((key) => keys.has(key)) ||
+          (keys.has("proxies") &&
+            ["httpproxy", "httpsproxy", "ftpproxy", "allproxy"].some((key) =>
+              keys.has(key),
+            )) ||
+          (keys.has("httpheaders") && keys.has("authorization")) ||
           (keys.has("accesskeyid") &&
             (keys.has("secretaccesskey") || keys.has("sessiontoken"))) ||
           (keys.has("appid") &&
@@ -402,35 +443,12 @@ function isCredentialDocument(source, expected, name) {
       }
       return kubeconfig;
     } catch {
-      const field = (name) =>
-        new RegExp(`["']?${name}["']?\\s*:`, "iu").test(contents);
       return (
-        [
-          "auths",
-          "creds[-_]?store",
-          "cred[-_]?helpers",
-          "proxies",
-          "http[-_]?headers",
-        ].some(field) ||
-        (field("access[-_]?key[-_]?id") &&
-          (field("secret[-_]?access[-_]?key") || field("session[-_]?token"))) ||
-        (field("app[-_]?id") &&
-          field("password") &&
-          field("tenant(?:[-_]?id)?")) ||
-        (field("type") && field("private[-_]?key")) ||
+        credentialFields() ||
         ["api[-_]?version", "kind", "clusters", "users"].every(field) ||
-        (field("client[-_]?id") &&
-          field("client[-_]?secret") &&
-          [
-            "tenant[-_]?id",
-            "subscription[-_]?id",
-            "auth[-_]?uri",
-            "token[-_]?uri",
-          ].some(field)) ||
-        ((field("access[-_]?token") || field("refresh[-_]?token")) &&
-          ["token[-_]?type", "expires[-_]?in", "expires[-_]?on", "tenant"].some(
-            field,
-          ))
+        /^\s*eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\s*$/mu.test(
+          contents,
+        )
       );
     }
   } finally {

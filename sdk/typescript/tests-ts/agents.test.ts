@@ -973,6 +973,10 @@ describe("Agents SDK thin scan adapter", () => {
       '{"feature":true}\n',
     );
     await writeFile(
+      join(repository, "src", "proxy-schema.json"),
+      '{"components":{"schemas":{"ServiceConfig":{"properties":{"proxies":{"type":"array","items":{"type":"string"}},"enabled":{"type":"boolean"}}}}}}\n',
+    );
+    await writeFile(
       join(repository, "my-project-ab12cd34ef56.json"),
       `${JSON.stringify({
         type: "service_account",
@@ -1132,6 +1136,18 @@ describe("Agents SDK thin scan adapter", () => {
       "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\nusers:\n- name: admin\n  user:\n    exec:\n      command: aws\n      env:\n      - name: AWS_SECRET_ACCESS_KEY\n        value: SYNTHETIC_KUBE_EXEC_AWS_SECRET\n",
     );
     await writeFile(
+      join(repository, "deploy", "aws-export.yaml"),
+      "Version: 1\nAccessKeyId: ASIA_SYNTHETIC\nSecretAccessKey: SYNTHETIC_AWS_YAML_SECRET\nSessionToken: SYNTHETIC_AWS_YAML_SESSION\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "cluster-prod.conf"),
+      "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\nusers:\n- name: admin\n  user:\n    token: SYNTHETIC_KUBE_CONF_TOKEN\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "prod-token.txt"),
+      "eyJhbGciOiJSUzI1NiIsImtpZCI6InN5bnRoZXRpYyJ9.SYNTHETIC_KUBE_BEARER.signature\n",
+    );
+    await writeFile(
       join(repository, "deploy", "identity"),
       [
         ["-----BEGIN OPENSSH", "PRIVATE KEY-----"].join(" "),
@@ -1267,6 +1283,9 @@ describe("Agents SDK thin scan adapter", () => {
           expect(existsSync(join(value.repository, "src", "config.json"))).toBe(
             true,
           );
+          expect(
+            existsSync(join(value.repository, "src", "proxy-schema.json")),
+          ).toBe(true);
           expect(existsSync(filterMarker)).toBe(false);
           for (const path of [
             ".env",
@@ -1330,6 +1349,9 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/cluster-export.jsonc",
             "deploy/quoted-cluster.yaml",
             "deploy/kube-exec.yaml",
+            "deploy/aws-export.yaml",
+            "deploy/cluster-prod.conf",
+            "deploy/prod-token.txt",
             "deploy/identity",
             "deploy/pgp-backup.asc",
             "deploy/repository.bundle",
