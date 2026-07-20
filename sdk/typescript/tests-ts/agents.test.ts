@@ -2664,6 +2664,7 @@ describe("Agents SDK thin scan adapter", () => {
       const value = request(root);
       const bin = join(root, "bin");
       const badBin = join(root, "bad-bin");
+      const envBin = join(root, "env-bin");
       const repositoryBin = join(value.repository, "node_modules", ".bin");
       const repositoryTmp = join(value.repository, "tmp");
       const log = join(root, "docker-calls");
@@ -2681,6 +2682,7 @@ describe("Agents SDK thin scan adapter", () => {
       );
       await mkdir(bin);
       await mkdir(badBin);
+      await mkdir(envBin);
       await writeFile(join(badBin, "docker"), "not executable\n", {
         mode: 0o644,
       });
@@ -2713,6 +2715,17 @@ describe("Agents SDK thin scan adapter", () => {
         ].join("\n"),
         { mode: 0o755 },
       );
+      await writeFile(
+        join(repositoryBin, "env"),
+        [
+          "#!/bin/sh",
+          `printf '%s\n' "UNTRUSTED_ENV key=\${OPENAI_API_KEY-absent}" >> '${log}'`,
+          'exec /usr/bin/env "$@"',
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      await symlink(join(repositoryBin, "env"), join(envBin, "env"));
       const previousPath = process.env["PATH"];
       const previousHostKey = process.env["OPENAI_API_KEY"];
       const previousCodexKey = process.env["CODEX_API_KEY"];
@@ -2720,7 +2733,7 @@ describe("Agents SDK thin scan adapter", () => {
       const previousGh = process.env["GH_TOKEN"];
       const previousTmp = process.env["TMPDIR"];
       process.env["PATH"] =
-        `${repositoryBin}:${badBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
+        `${repositoryBin}:${envBin}:${badBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
       process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
       process.env["CODEX_API_KEY"] = "SYNTHETIC_CODEX_HOST_KEY";
       process.env["AWS_SECRET_ACCESS_KEY"] = "SYNTHETIC_AWS_HOST_SECRET";
@@ -2893,6 +2906,7 @@ describe("Agents SDK thin scan adapter", () => {
           expect(calls).toContain(`<${name}=>`);
         }
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
+        expect(calls).not.toContain("UNTRUSTED_ENV");
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_AWS_HOST_SECRET");

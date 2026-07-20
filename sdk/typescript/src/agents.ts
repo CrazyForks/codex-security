@@ -685,7 +685,7 @@ function suppressUnsafeHostEnvironment(
           next,
           [
             "#!/bin/sh",
-            'clean_exec() { exec env -i PATH="${PATH-}" HOME="${HOME-}" USER="${USER-}" TMPDIR="${TMPDIR-/tmp}" DOCKER_CONFIG="${DOCKER_CONFIG-}" DOCKER_HOST="${DOCKER_HOST-}" DOCKER_CONTEXT="${DOCKER_CONTEXT-}" DOCKER_CERT_PATH="${DOCKER_CERT_PATH-}" DOCKER_TLS_VERIFY="${DOCKER_TLS_VERIFY-}" DOCKER_API_VERSION="${DOCKER_API_VERSION-}" "$@"; }',
+            'clean_exec() { exec /usr/bin/env -i PATH="${PATH-}" HOME="${HOME-}" USER="${USER-}" TMPDIR="${TMPDIR-/tmp}" DOCKER_CONFIG="${DOCKER_CONFIG-}" DOCKER_HOST="${DOCKER_HOST-}" DOCKER_CONTEXT="${DOCKER_CONTEXT-}" DOCKER_CERT_PATH="${DOCKER_CERT_PATH-}" DOCKER_TLS_VERIFY="${DOCKER_TLS_VERIFY-}" DOCKER_API_VERSION="${DOCKER_API_VERSION-}" "$@"; }',
             'if [ "${1-}" = run ]; then',
             "  shift",
             `  clean_exec '${executable.replaceAll("'", "'\"'\"'")}' run -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= -e FTP_PROXY= -e ALL_PROXY= -e http_proxy= -e https_proxy= -e no_proxy= -e ftp_proxy= -e all_proxy= "$@"`,
