@@ -823,40 +823,42 @@ function suppressUnsafeHostEnvironment(
 
 function requireSafeDockerConfig(): void {
   const configured = process.env["DOCKER_CONFIG"]?.trim();
-  let current = resolve(
+  const config = resolve(
     configured && configured.length > 0
       ? configured
       : join(process.env["HOME"] ?? homedir(), ".docker"),
   );
-  const missing: string[] = [];
-  while (true) {
-    try {
-      current = resolve(realpathSync(current), ...missing.reverse());
-      break;
-    } catch (error) {
-      if (
-        typeof error !== "object" ||
-        error === null ||
-        !("code" in error) ||
-        (error.code !== "ENOENT" && error.code !== "ENOTDIR")
-      ) {
+  for (let current of [config, join(config, "config.json")]) {
+    const missing: string[] = [];
+    while (true) {
+      try {
+        current = resolve(realpathSync(current), ...missing.reverse());
+        break;
+      } catch (error) {
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          !("code" in error) ||
+          (error.code !== "ENOENT" && error.code !== "ENOTDIR")
+        ) {
+          throw new CodexSecurityError(
+            "Unable to validate the host Docker configuration directory.",
+            { cause: error },
+          );
+        }
+        const parent = dirname(current);
+        if (parent === current) break;
+        missing.push(basename(current));
+        current = parent;
+      }
+    }
+    for (const target of activeHostRoots.keys()) {
+      const path = relative(target, current);
+      if (path === "" || (!isAbsolute(path) && !path.startsWith(`..${sep}`))) {
         throw new CodexSecurityError(
-          "Unable to validate the host Docker configuration directory.",
-          { cause: error },
+          "Docker configuration must be outside the scan target.",
         );
       }
-      const parent = dirname(current);
-      if (parent === current) break;
-      missing.push(basename(current));
-      current = parent;
-    }
-  }
-  for (const target of activeHostRoots.keys()) {
-    const path = relative(target, current);
-    if (path === "" || (!isAbsolute(path) && !path.startsWith(`..${sep}`))) {
-      throw new CodexSecurityError(
-        "Docker configuration must be outside the scan target.",
-      );
     }
   }
 }

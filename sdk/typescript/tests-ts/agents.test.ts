@@ -3689,12 +3689,14 @@ describe("Agents SDK thin scan adapter", () => {
       const value = request(root);
       const config = join(value.repository, ".docker");
       const linked = join(root, "config-link");
+      const fileLinked = join(root, "file-linked-config");
       for (const path of [
         value.repository,
         value.scanDir,
         value.sandboxBaseDir,
         value.sandboxInputRoot,
         config,
+        fileLinked,
       ]) {
         await mkdir(path, { recursive: true });
       }
@@ -3711,10 +3713,15 @@ describe("Agents SDK thin scan adapter", () => {
         join(config, "config.json"),
         '{"credsStore":"../payload"}\n',
       );
+      await symlink(
+        join(config, "config.json"),
+        join(fileLinked, "config.json"),
+        "file",
+      );
       const previousConfig = process.env["DOCKER_CONFIG"];
       const previousHome = process.env["HOME"];
       try {
-        for (const configured of [config, linked, undefined]) {
+        for (const configured of [config, linked, fileLinked, undefined]) {
           if (configured === undefined) {
             delete process.env["DOCKER_CONFIG"];
             process.env["HOME"] = value.repository;
