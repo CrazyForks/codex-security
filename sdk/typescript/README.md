@@ -49,12 +49,12 @@ subprocess, mounts them read-only, disables network access, and exposes the SDK
 shell tool with context compaction before
 delegating one bounded worker. Local edits to tracked files are
 included; untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged
-deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, shell histories/caches, alternate-VCS metadata, `.envrc`, Composer/Bundler/Gradle credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, and gsutil), Git credentials/history (including tracked nested repositories),
+deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, shell profiles/histories/caches, alternate-VCS metadata, `.envrc`, Composer/Bundler/Gradle credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, gsutil, and common client RC files), Git credentials/history (including tracked nested repositories),
 and unrelated plugin-checkout files are excluded. Path scans also include
 applicable ancestor `SECURITY.md` files and exclude unrelated source files.
 Credential-directory roots/descendants, empty targets, Git-config includes, Git-shaped unversioned targets, and unversioned directories containing nested Git worktrees fail closed; bundled content-addressable installs are supported. Use the Codex engine when
 a path contains only untracked or ignored files. Ambient OpenAI/Codex API keys
-and Docker-configured proxy credentials are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, reject Docker/PTY helpers resolving into the target, and suppress unsafe PTY loader overrides. Inputs and
+and Docker-configured proxy credentials are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, reject target-controlled Docker configuration and Docker/PTY helpers resolving into the target, and suppress unsafe PTY loader overrides. Inputs and
 results are size/type bounded before handoff. The standard `security-scan`
 skill runs with one serialized delegated ranking worker and preserves the
 existing pool-plan, receipt, and canonical output contract. A stable one-way-hashed,

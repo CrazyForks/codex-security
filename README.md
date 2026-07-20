@@ -48,10 +48,10 @@ scan worker. Path scans include
 applicable ancestor `SECURITY.md` files while
 excluding unrelated source files. Local edits to tracked files are included; untracked/ignored files,
 submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged deletions, sparse-checkout paths absent
-from the worktree, common local credential stores/key material (including `.config`, shell histories/caches, alternate-VCS metadata, `.envrc`, Composer/Bundler/Gradle credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, and gsutil), and Git credentials/history (including tracked nested repositories) are excluded. Credential-directory roots/descendants, empty targets, Git-config includes, and
+from the worktree, common local credential stores/key material (including `.config`, shell profiles/histories/caches, alternate-VCS metadata, `.envrc`, Composer/Bundler/Gradle credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, gsutil, and common client RC files), and Git credentials/history (including tracked nested repositories) are excluded. Credential-directory roots/descendants, empty targets, Git-config includes, and
 Git-shaped unversioned targets and unversioned directories containing nested Git worktrees fail closed; bundled content-addressable installs are supported. Use the Codex engine when a path
 contains only untracked or ignored files. Ambient OpenAI/Codex API keys and
-Docker-configured proxy credentials are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, reject Docker/PTY helpers resolving into the target, and suppress unsafe PTY loader overrides. A sanitized,
+Docker-configured proxy credentials are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, reject target-controlled Docker configuration and Docker/PTY helpers resolving into the target, and suppress unsafe PTY loader overrides. A sanitized,
 one-way-hashed remote and relative-scope identity keeps finding fingerprints
 stable across checkouts without colliding across monorepo services; bounded
 results are copied to the requested output directory. SDK tracing and sensitive

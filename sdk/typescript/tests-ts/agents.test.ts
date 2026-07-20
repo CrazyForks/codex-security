@@ -1241,6 +1241,42 @@ describe("Agents SDK thin scan adapter", () => {
       ".ZSH_HISTORY",
       ".python_history",
       ".PSQL_HISTORY",
+      ".bashrc",
+      ".BASHRC",
+      ".bash_profile",
+      ".BASH_PROFILE",
+      ".bash_login",
+      ".BASH_LOGIN",
+      ".profile",
+      ".PROFILE",
+      ".zshrc",
+      ".ZSHRC",
+      ".zprofile",
+      ".ZPROFILE",
+      ".zshenv",
+      ".ZSHENV",
+      ".zlogin",
+      ".ZLOGIN",
+      ".zlogout",
+      ".ZLOGOUT",
+      ".kshrc",
+      ".KSHRC",
+      ".cshrc",
+      ".CSHRC",
+      ".tcshrc",
+      ".TCSHRC",
+      ".Renviron",
+      ".RENVIRON",
+      ".Rprofile",
+      ".RPROFILE",
+      ".curlrc",
+      ".CURLRC",
+      ".wgetrc",
+      ".WGETRC",
+      ".my.cnf",
+      ".MY.CNF",
+      ".odbc.ini",
+      ".ODBC.INI",
     ];
     const directories = [
       ".ssh",
@@ -3392,6 +3428,59 @@ describe("Agents SDK thin scan adapter", () => {
         else process.env["OPENAI_AGENTS_PYTHON"] = previousPtyPython;
         if (previousPythonPath === undefined) delete process.env["PYTHONPATH"];
         else process.env["PYTHONPATH"] = previousPythonPath;
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects target-controlled Docker configuration before host execution",
+    async () => {
+      const root = await temporaryDirectory();
+      const value = request(root);
+      const config = join(value.repository, ".docker");
+      const linked = join(root, "config-link");
+      for (const path of [
+        value.repository,
+        value.scanDir,
+        value.sandboxBaseDir,
+        value.sandboxInputRoot,
+        config,
+      ]) {
+        await mkdir(path, { recursive: true });
+      }
+      await symlink(config, linked, "dir");
+      await writeFile(
+        join(value.sandboxInputRoot, "target-paths.json"),
+        '["."]\n',
+      );
+      await writeFile(
+        join(value.sandboxInputRoot, "repository-identity.json"),
+        `${JSON.stringify({ targetId: value.repositoryIdentity })}\n`,
+      );
+      await writeFile(
+        join(config, "config.json"),
+        '{"credsStore":"../payload"}\n',
+      );
+      const previousConfig = process.env["DOCKER_CONFIG"];
+      const previousHome = process.env["HOME"];
+      try {
+        for (const configured of [config, linked, undefined]) {
+          if (configured === undefined) {
+            delete process.env["DOCKER_CONFIG"];
+            process.env["HOME"] = value.repository;
+          } else {
+            process.env["DOCKER_CONFIG"] = configured;
+            process.env["HOME"] = root;
+          }
+          await expect(runAgentsScan(value)).rejects.toThrow(
+            "Docker configuration must be outside the scan target",
+          );
+        }
+      } finally {
+        if (previousConfig === undefined) delete process.env["DOCKER_CONFIG"];
+        else process.env["DOCKER_CONFIG"] = previousConfig;
+        if (previousHome === undefined) delete process.env["HOME"];
+        else process.env["HOME"] = previousHome;
       }
     },
   );
