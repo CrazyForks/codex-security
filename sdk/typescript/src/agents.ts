@@ -103,9 +103,26 @@ const MAX_GIT_INDEX_RECORD_BYTES = 64 * 1024;
 const MAX_GIT_PATHSPEC_BYTES = 64 * 1024;
 const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
 const MAX_GIT_POINTER_BYTES = 64 * 1024;
+const HOST_PTY_ENV = [
+  "OPENAI_AGENTS_PYTHON",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PYTHONSTARTUP",
+  "PYTHONUSERBASE",
+  "PYTHONINSPECT",
+  "PYTHONBREAKPOINT",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "DYLD_FRAMEWORK_PATH",
+  "DYLD_FALLBACK_LIBRARY_PATH",
+  "DYLD_FALLBACK_FRAMEWORK_PATH",
+];
 let tracingUsers = 0;
 let hostEnvironmentUsers = 0;
 let savedHostPath: string | undefined;
+let savedHostPtyEnvironment = new Map<string, string | undefined>();
 let savedDockerWrapper: string | undefined;
 let savedDockerExecutable: string | undefined;
 const activeHostRoots = new Map<string, number>();
@@ -651,7 +668,13 @@ function suppressUnsafeHostEnvironment(
     activeHostRoots.set(root, (activeHostRoots.get(root) ?? 0) + 1);
   }
   try {
-    if (hostEnvironmentUsers === 0) savedHostPath = process.env["PATH"];
+    if (hostEnvironmentUsers === 0) {
+      savedHostPath = process.env["PATH"];
+      savedHostPtyEnvironment = new Map(
+        HOST_PTY_ENV.map((name) => [name, process.env[name]]),
+      );
+      for (const name of HOST_PTY_ENV) delete process.env[name];
+    }
     const safePath = safeHostPath(repository)
       .split(delimiter)
       .filter((entry) => entry !== savedDockerWrapper)
@@ -716,6 +739,13 @@ function suppressUnsafeHostEnvironment(
       savedDockerWrapper = undefined;
       savedDockerExecutable = undefined;
     }
+    if (hostEnvironmentUsers === 0) {
+      restoreEnvironmentValue("PATH", savedHostPath);
+      for (const [name, value] of savedHostPtyEnvironment) {
+        restoreEnvironmentValue(name, value);
+      }
+      savedHostPtyEnvironment.clear();
+    }
     throw error;
   }
   let released = false;
@@ -725,6 +755,10 @@ function suppressUnsafeHostEnvironment(
     if (root !== undefined) releaseHostRoot(root);
     if (--hostEnvironmentUsers !== 0) return;
     restoreEnvironmentValue("PATH", savedHostPath);
+    for (const [name, value] of savedHostPtyEnvironment) {
+      restoreEnvironmentValue(name, value);
+    }
+    savedHostPtyEnvironment.clear();
     if (savedDockerWrapper !== undefined) {
       rmSync(savedDockerWrapper, { recursive: true, force: true });
       savedDockerWrapper = undefined;
@@ -746,7 +780,10 @@ function safeDockerHelperPath(safePath: string): string {
       try {
         return readdirSync(entry)
           .filter(
-            (name) => name === "ssh" || name.startsWith("docker-credential-"),
+            (name) =>
+              name === "ssh" ||
+              name === "python3" ||
+              name.startsWith("docker-credential-"),
           )
           .every((name) => {
             const executable = realpathSync(join(entry, name));

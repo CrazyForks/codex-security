@@ -2962,12 +2962,25 @@ describe("Agents SDK thin scan adapter", () => {
         join(repositoryBin, "docker-credential-untrusted"),
         join(envBin, "docker-credential-untrusted"),
       );
+      await writeFile(
+        join(repositoryBin, "python3"),
+        [
+          "#!/bin/sh",
+          `printf '%s\n' "UNTRUSTED_PTY key=\${OPENAI_API_KEY-absent}" >> '${log}'`,
+          'exec /usr/bin/python3 "$@"',
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      await symlink(join(repositoryBin, "python3"), join(envBin, "python3"));
       const previousPath = process.env["PATH"];
       const previousHostKey = process.env["OPENAI_API_KEY"];
       const previousCodexKey = process.env["CODEX_API_KEY"];
       const previousAws = process.env["AWS_SECRET_ACCESS_KEY"];
       const previousGh = process.env["GH_TOKEN"];
       const previousTmp = process.env["TMPDIR"];
+      const previousPtyPython = process.env["OPENAI_AGENTS_PYTHON"];
+      const previousPythonPath = process.env["PYTHONPATH"];
       process.env["PATH"] =
         `${repositoryBin}:${envBin}:${badBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
       process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
@@ -2975,6 +2988,8 @@ describe("Agents SDK thin scan adapter", () => {
       process.env["AWS_SECRET_ACCESS_KEY"] = "SYNTHETIC_AWS_HOST_SECRET";
       process.env["GH_TOKEN"] = "SYNTHETIC_GH_HOST_TOKEN";
       process.env["TMPDIR"] = repositoryTmp;
+      process.env["OPENAI_AGENTS_PYTHON"] = join(repositoryBin, "python3");
+      process.env["PYTHONPATH"] = repositoryBin;
       const tracingWasDisabled =
         getGlobalTraceProvider().createTrace({ name: "before scan" }) instanceof
         NoopTrace;
@@ -3006,6 +3021,8 @@ describe("Agents SDK thin scan adapter", () => {
           expect(process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"]).toBe("1");
           expect(process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"]).toBe("1");
           expect(process.env["OPENAI_LOG"]).toBe("warn");
+          expect(process.env["OPENAI_AGENTS_PYTHON"]).toBeUndefined();
+          expect(process.env["PYTHONPATH"]).toBeUndefined();
           expect(process.env["PATH"]?.split(":")[0]).toStartWith(
             join(root, "codex-security-docker-"),
           );
@@ -3061,7 +3078,7 @@ describe("Agents SDK thin scan adapter", () => {
                       cmd: "test -f repository/app.ts",
                       workdir: "/workspace",
                       login: false,
-                      tty: false,
+                      tty: true,
                       yield_time_ms: 1000,
                     }),
                   ]
@@ -3144,6 +3161,7 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
         expect(calls).not.toContain("UNTRUSTED_ENV");
         expect(calls).not.toContain("UNTRUSTED_DOCKER_HELPER");
+        expect(calls).not.toContain("UNTRUSTED_PTY");
         expect(calls).toContain("SAFE_DOCKER_HELPER");
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");
@@ -3227,6 +3245,11 @@ describe("Agents SDK thin scan adapter", () => {
         else process.env["GH_TOKEN"] = previousGh;
         if (previousTmp === undefined) delete process.env["TMPDIR"];
         else process.env["TMPDIR"] = previousTmp;
+        if (previousPtyPython === undefined)
+          delete process.env["OPENAI_AGENTS_PYTHON"];
+        else process.env["OPENAI_AGENTS_PYTHON"] = previousPtyPython;
+        if (previousPythonPath === undefined) delete process.env["PYTHONPATH"];
+        else process.env["PYTHONPATH"] = previousPythonPath;
       }
     },
   );
