@@ -1198,6 +1198,28 @@ describe("Agents SDK thin scan adapter", () => {
       join(repository, "deploy", "github-token.txt"),
       "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n",
     );
+    for (const [file, contents] of [
+      [
+        "auth-export.json",
+        '{"Authorization":"Bearer 0123456789abcdef0123456789abcdef"}\n',
+      ],
+      ["github-refresh.txt", "ghr_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n"],
+      [
+        "gitlab-token.txt",
+        `${["glpat-", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"].join("")}\n`,
+      ],
+      ["npm-token.txt", "npm_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n"],
+      [
+        "opaque-bearer.txt",
+        "Authorization: Bearer 0123456789abcdef0123456789abcdef\n",
+      ],
+      [
+        "slack-cookie.txt",
+        "xoxc-123456789012-123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZ\n",
+      ],
+    ] as const) {
+      await writeFile(join(repository, "deploy", file), contents);
+    }
     await writeFile(
       join(repository, "deploy", "oversized.json"),
       `[${"0,".repeat(4_194_304)}0]\n`,
@@ -1423,6 +1445,12 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/accessKeys.csv",
             "deploy/access-token.txt",
             "deploy/github-token.txt",
+            "deploy/auth-export.json",
+            "deploy/github-refresh.txt",
+            "deploy/gitlab-token.txt",
+            "deploy/npm-token.txt",
+            "deploy/opaque-bearer.txt",
+            "deploy/slack-cookie.txt",
             "deploy/oversized.json",
             "deploy/identity",
             "deploy/pgp-backup.asc",

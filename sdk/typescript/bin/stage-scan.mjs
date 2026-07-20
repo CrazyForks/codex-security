@@ -364,14 +364,15 @@ function isCredentialDocument(source, expected, name) {
       /-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|PRIVATE KEY BLOCK)-----/imu.test(
         contents,
       ) ||
-      /\b(?:sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{12,}|AIza[0-9A-Za-z_-]{30,}|ya29\.[A-Za-z0-9._-]{12,})\b/u.test(
+      /\b(?:sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|gh[oprsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{16,}|glpat-[A-Za-z0-9_-]{12,}|npm_[A-Za-z0-9_-]{16,}|xox[bcaprs]-[A-Za-z0-9-]{12,}|AIza[0-9A-Za-z_-]{30,}|ya29\.[A-Za-z0-9._-]{12,})\b/u.test(
         contents,
       ) ||
       /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u.test(contents) ||
+      /\bBearer\s+[A-Za-z0-9+/_=-]{20,}\b/iu.test(contents) ||
       /^\s*(?:[^,\n]+,)*access key id\s*,\s*secret access key(?:\s*,[^\n]*)?$/imu.test(
         contents,
       ) ||
-      /(?:^|[\s{,])["']?[A-Za-z0-9_-]*(?:api[-_]?key|secret[-_]?key|private[-_]?key|password|token)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?(?:SYNTHETIC_[A-Za-z0-9_-]{4,}|[A-Za-z0-9+/_=-]{20,})["']?(?:\s|[,}]|$)/imu.test(
+      /(?:^|[\s{,])["']?[A-Za-z0-9_-]{0,64}(?:api[-_]?key|secret[-_]?key|private[-_]?key|password|token)[A-Za-z0-9_-]{0,64}["']?\s*[:=]\s*["']?(?:SYNTHETIC_[A-Za-z0-9_-]{4,}|[A-Za-z0-9+/_=-]{20,})["']?(?:\s|[,}]|$)/imu.test(
         contents,
       );
     if (staticCredential()) return true;
