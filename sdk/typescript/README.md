@@ -48,10 +48,10 @@ subprocess, mounts them read-only, disables network access, and exposes the SDK
 shell tool with context compaction before
 delegating one bounded worker. Local edits to tracked files are
 included; untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged
-deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material, Git credentials/history (including tracked nested bare repositories),
+deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config` and `.terraform.d`), Git credentials/history (including tracked nested bare repositories),
 and unrelated plugin-checkout files are excluded. Path scans also include
 applicable ancestor `SECURITY.md` files and exclude unrelated source files.
-Empty and Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when
+Credential-directory roots, empty targets, and Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when
 a path contains only untracked or ignored files. Ambient OpenAI/Codex API keys
 and Docker-configured proxy credentials are not forwarded to the scan shell. Inputs and
 results are size/type bounded before handoff. The standard `security-scan`

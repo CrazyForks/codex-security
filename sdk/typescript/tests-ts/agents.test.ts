@@ -814,6 +814,21 @@ describe("Agents SDK thin scan adapter", () => {
     await writeFile(join(repository, ".npmrc"), "SYNTHETIC_NPM_TOKEN\n");
     await mkdir(join(repository, ".ssh"));
     await writeFile(join(repository, ".ssh", "id_rsa"), "SYNTHETIC_SSH_KEY\n");
+    await mkdir(join(repository, ".config", "gcloud"), { recursive: true });
+    await writeFile(
+      join(
+        repository,
+        ".config",
+        "gcloud",
+        "application_default_credentials.json",
+      ),
+      "SYNTHETIC_GCLOUD_SECRET\n",
+    );
+    await mkdir(join(repository, ".terraform.d"));
+    await writeFile(
+      join(repository, ".terraform.d", "credentials.tfrc.json"),
+      "SYNTHETIC_TERRAFORM_SECRET\n",
+    );
     await writeFile(join(repository, "intent.ts"), "SYNTHETIC_INTENT_SECRET\n");
     await writeFile(join(repository, ".gitattributes"), "*.ts filter=unsafe\n");
     git(repository, ["add", "-f", "."]);
@@ -838,6 +853,8 @@ describe("Agents SDK thin scan adapter", () => {
             ".gitconfig",
             ".npmrc",
             ".ssh/id_rsa",
+            ".config/gcloud/application_default_credentials.json",
+            ".terraform.d/credentials.tfrc.json",
             "intent.ts",
             "fixtures/private-mirror/config",
             "fixtures/private-mirror/objects",
@@ -1085,6 +1102,12 @@ describe("Agents SDK thin scan adapter", () => {
       "PRIVATE.JKS",
       "private.keystore",
       "PRIVATE.KEYSTORE",
+      ".vault-token",
+      ".VAULT-TOKEN",
+      ".boto",
+      ".BOTO",
+      ".s3cfg",
+      ".S3CFG",
     ];
     const directories = [
       ".ssh",
@@ -1103,6 +1126,12 @@ describe("Agents SDK thin scan adapter", () => {
       ".CODEX",
       ".openai",
       ".OPENAI",
+      ".config",
+      ".CONFIG",
+      ".terraform.d",
+      ".TERRAFORM.D",
+      ".password-store",
+      ".PASSWORD-STORE",
     ];
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     await mkdir(repository);
@@ -1176,6 +1205,12 @@ describe("Agents SDK thin scan adapter", () => {
       ).rejects.toThrow("stop after secret staging inspection");
       expect(reached).toBe(true);
       reached = false;
+      await expect(
+        client.run(join(repository, ".aws"), {
+          outputDir: join(root, "credential-root-scan"),
+        }),
+      ).rejects.toThrow("Credential directory cannot be staged safely");
+      expect(reached).toBe(false);
       await expect(
         client.run(repository, {
           target: [".env"],

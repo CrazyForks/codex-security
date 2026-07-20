@@ -31,6 +31,11 @@ mkdirSync(job.destination, { recursive: true, mode: 0o700 });
 const destinationRoot = anchor(job.destination);
 
 try {
+  if (input && skip(basename(job.source), job.kind)) {
+    fail(
+      `Credential directory cannot be staged safely: ${JSON.stringify(job.source)}`,
+    );
+  }
   if (job.kind === "tracked") {
     const seen = new Set();
     const directoryEntries = new Map();
@@ -450,6 +455,12 @@ function skip(name, kind) {
       ".gnupg",
       ".codex",
       ".openai",
+      ".config",
+      ".terraform.d",
+      ".password-store",
+      ".vault-token",
+      ".boto",
+      ".s3cfg",
       ".npmrc",
       ".netrc",
       ".pypirc",
