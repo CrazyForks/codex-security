@@ -1223,6 +1223,8 @@ describe("Agents SDK thin scan adapter", () => {
       ".BOTO",
       ".s3cfg",
       ".S3CFG",
+      ".databrickscfg",
+      ".DATABRICKSCFG",
       "terraform.tfstate",
       "TERRAFORM.TFSTATE.BACKUP",
       "terraform.tfvars",
@@ -1293,6 +1295,14 @@ describe("Agents SDK thin scan adapter", () => {
       ".TERRAFORM.D",
       ".password-store",
       ".PASSWORD-STORE",
+      ".dbt",
+      ".DBT",
+      ".snowsql",
+      ".SNOWSQL",
+      ".snowflake",
+      ".SNOWFLAKE",
+      ".gsutil",
+      ".GSUTIL",
       ".cache",
       ".CACHE",
       ".local",
@@ -3033,9 +3043,12 @@ describe("Agents SDK thin scan adapter", () => {
       await chmod(join(bin, "docker"), 0o755);
       await writeFile(
         join(bin, "docker-credential-safe"),
-        ["#!/bin/sh", `printf '%s\\n' SAFE_DOCKER_HELPER >> '${log}'`, ""].join(
-          "\n",
-        ),
+        [
+          "#!/bin/sh",
+          "if command -v pass >/dev/null 2>&1; then pass; fi",
+          `printf '%s\\n' SAFE_DOCKER_HELPER >> '${log}'`,
+          "",
+        ].join("\n"),
         { mode: 0o755 },
       );
       await writeFile(
@@ -3073,6 +3086,17 @@ describe("Agents SDK thin scan adapter", () => {
         join(repositoryBin, "docker-credential-untrusted"),
         join(envBin, "DOCKER-CREDENTIAL-UNTRUSTED"),
       );
+      await writeFile(
+        join(repositoryBin, "pass"),
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "UNTRUSTED_HELPER_DEPENDENCY key=\${OPENAI_API_KEY-absent}" >> '${log}'`,
+          "exit 42",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      await symlink(join(repositoryBin, "pass"), join(envBin, "pass"));
       await writeFile(
         join(repositoryBin, "python3"),
         [
@@ -3278,6 +3302,7 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
         expect(calls).not.toContain("UNTRUSTED_ENV");
         expect(calls).not.toContain("UNTRUSTED_DOCKER_HELPER");
+        expect(calls).not.toContain("UNTRUSTED_HELPER_DEPENDENCY");
         expect(calls).not.toContain("UNTRUSTED_PTY");
         expect(calls).toContain("SAFE_DOCKER_HELPER");
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");

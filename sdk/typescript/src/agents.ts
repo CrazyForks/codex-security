@@ -831,17 +831,18 @@ function safeDockerHelperPath(safePath: string): string {
   return [...entries]
     .filter((entry) => {
       try {
-        return readdirSync(entry)
-          .filter((name) => {
-            const lower = name.toLowerCase();
+        return readdirSync(entry, { withFileTypes: true })
+          .filter((candidate) => {
+            const lower = candidate.name.toLowerCase();
             return (
+              candidate.isSymbolicLink() ||
               lower === "ssh" ||
               lower === "python3" ||
               lower.startsWith("docker-credential-")
             );
           })
-          .every((name) => {
-            const executable = realpathSync(join(entry, name));
+          .every((candidate) => {
+            const executable = realpathSync(join(entry, candidate.name));
             return [...activeHostRoots.keys()].every((target) => {
               const path = relative(target, executable);
               return path === ".." || path.startsWith(`..${sep}`);
