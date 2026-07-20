@@ -49,9 +49,9 @@ unless explicitly selected with `--path`; symlinks, Git credentials/history,
 and unrelated plugin-checkout files are always excluded. Inputs and results are
 size/type bounded before handoff. The standard `security-scan` skill runs with
 one serialized delegated ranking worker and preserves the existing pool-plan,
-receipt, and canonical output contract. A stable one-way-hashed repository
-identity is bound during validation, while SDK tracing and sensitive debug
-logging are suppressed.
+receipt, and canonical output contract. A stable one-way-hashed,
+credential-free remote identity is bound during validation when available,
+while SDK tracing and sensitive debug logging are suppressed.
 
 This intentionally keeps staging small: Git-backed targets are treated as
 directory snapshots, so history/advisory lookup is unavailable; unversioned

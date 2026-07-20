@@ -42,7 +42,9 @@ target, output, and runtime options.
 The Agents engine stages a Git-visible, regular-file snapshot and the bundled
 scan skills/helpers into a network-disabled `node:22-bookworm` Docker
 workspace, mounts them read-only, and delegates bounded scan workers through
-Agents SDK. Ignored files, symlinks, and Git credentials/history are excluded;
+Agents SDK. Ignored files are excluded unless explicitly selected with `--path`;
+symlinks and Git credentials/history are always excluded. A sanitized,
+one-way-hashed remote identity keeps finding fingerprints stable across checkouts;
 bounded results are copied to the requested output directory. SDK tracing and
 sensitive debug logging are suppressed during the scan.
 Docker must be running for the default Agents engine. Use

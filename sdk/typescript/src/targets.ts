@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { InvalidTargetError } from "./errors.js";
 
@@ -232,6 +232,37 @@ export async function normalizeTarget(
       : resolve(root, expandHome(value));
     if (!existsSync(candidate)) {
       throw new InvalidTargetError(`Path target does not exist: ${value}`);
+    }
+    const rootMetadata = await abortable(() => stat(root), signal);
+    let entry = candidate;
+    try {
+      while (true) {
+        const metadata = await abortable(() => lstat(entry), signal);
+        if (metadata.isSymbolicLink()) {
+          throw new InvalidTargetError(
+            `Path target must not traverse a symbolic link: ${value}`,
+          );
+        }
+        if (
+          metadata.dev === rootMetadata.dev &&
+          metadata.ino === rootMetadata.ino
+        ) {
+          break;
+        }
+        const parent = dirname(entry);
+        if (parent === entry) {
+          throw new InvalidTargetError(
+            `Path target is outside the repository: ${value}`,
+          );
+        }
+        entry = parent;
+      }
+    } catch (error) {
+      if (error instanceof InvalidTargetError) throw error;
+      throwIfAborted(signal);
+      throw new InvalidTargetError(`Path target does not exist: ${value}`, {
+        cause: error,
+      });
     }
     let canonical: string;
     try {

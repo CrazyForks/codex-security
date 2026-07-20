@@ -88,6 +88,7 @@ async function initializeGitRepository(path: string): Promise<void> {
 function request(root: string): AgentsScanRequest {
   return {
     repository: join(root, "repository"),
+    hostRepositoryRoot: join(root, "repository"),
     target: { kind: "repository", paths: [] },
     scanDir: join(root, "scan"),
     pluginRoot: PLUGIN_ROOT,
@@ -345,6 +346,54 @@ describe("Agents SDK thin scan adapter", () => {
     }
   });
 
+  test("uses a credential-free remote identity across equivalent Git checkouts", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "workspaces");
+    const identities: string[] = [];
+    for (const [name, remote] of [
+      [
+        "checkout-a",
+        "https://user:SYNTHETIC_REMOTE_TOKEN@example.invalid/org/shared.git?token=first#fragment",
+      ],
+      [
+        "checkout-b",
+        "https://other:SYNTHETIC_OTHER_TOKEN@example.invalid/org/shared?token=second",
+      ],
+    ] as const) {
+      const repository = join(root, name);
+      await initializeGitRepository(repository);
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      git(repository, ["add", "."]);
+      git(repository, ["commit", "--quiet", "-m", "initial"]);
+      git(repository, ["config", "remote.origin.url", remote]);
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+          },
+          runAgents: async (value: AgentsScanRequest) => {
+            identities.push(value.repositoryIdentity);
+            throw new Error("stop after identity inspection");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: join(root, `scan-${name}`) }),
+        ).rejects.toThrow("stop after identity inspection");
+      } finally {
+        await client.close();
+      }
+    }
+    expect(identities[0]).toBe(identities[1]);
+    expect(identities[0]).toMatch(
+      /^codex-security-target\/v1:sha256:[0-9a-f]{64}$/u,
+    );
+    expect(await readdir(workspace)).toEqual([]);
+  });
+
   test("stages nested Git source and explicit ignored paths without Git metadata or ignored secrets", async () => {
     const root = await temporaryDirectory();
     const child = join(root, "child");
@@ -411,7 +460,7 @@ describe("Agents SDK thin scan adapter", () => {
       "remote.origin.url",
       "https://SYNTHETIC_EXPLICIT_TOKEN@example.invalid/private.git",
     ]);
-    const bare = join(repository, "cache", "private-mirror.git");
+    const bare = join(repository, "cache", "private-mirror");
     await mkdir(join(repository, "cache"));
     git(repository, ["clone", "--quiet", "--bare", child, bare]);
     git(repository, [
@@ -434,7 +483,7 @@ describe("Agents SDK thin scan adapter", () => {
             reached = true;
             expect(existsSync(join(value.repository, ".git"))).toBe(false);
             expect(
-              existsSync(join(value.repository, "cache", "private-mirror.git")),
+              existsSync(join(value.repository, "cache", "private-mirror")),
             ).toBe(false);
             if (target === undefined) {
               expect(
@@ -511,6 +560,58 @@ describe("Agents SDK thin scan adapter", () => {
     };
     await run();
     await run(["vendor-private"]);
+
+    const nestedExclude = join(root, "nested-exclude");
+    await writeFile(nestedExclude, "hidden.ts\n");
+    await writeFile(join(nested, "hidden.ts"), "SYNTHETIC_HIDDEN_SOURCE\n");
+    await rm(join(nested, ".git", "info", "exclude"), { force: true });
+    await symlink(nestedExclude, join(nested, ".git", "info", "exclude"));
+    const nestedClient = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async () => {
+          throw new Error("must-not-run");
+        },
+      },
+    );
+    try {
+      await expect(
+        nestedClient.run(repository, {
+          outputDir: join(root, "scan-nested-unsafe"),
+        }),
+      ).rejects.toThrow("Git input must be a regular file before staging");
+      expect(await readdir(workspace)).toEqual([]);
+    } finally {
+      await nestedClient.close();
+    }
+
+    let reached = false;
+    const bareClient = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async () => {
+          reached = true;
+          throw new Error("must-not-run");
+        },
+      },
+    );
+    try {
+      await expect(
+        bareClient.run(bare, { outputDir: join(root, "scan-bare") }),
+      ).rejects.toThrow("Bare Git repositories cannot be staged safely");
+      expect(reached).toBe(false);
+      expect(await readdir(workspace)).toEqual([]);
+    } finally {
+      await bareClient.close();
+    }
   });
 
   test.skipIf(process.platform === "win32")(
@@ -520,6 +621,10 @@ describe("Agents SDK thin scan adapter", () => {
       const repository = join(root, "repository");
       const workspace = join(root, "workspaces");
       const configuredExclude = join(root, "configured-exclude");
+      const globalExclude = join(root, "global-exclude");
+      const systemExclude = join(root, "system-exclude");
+      const globalConfig = join(root, "global-config");
+      const systemConfig = join(root, "system-config");
       await initializeGitRepository(repository);
       await writeFile(join(repository, "app.ts"), "export const app = true;\n");
       await writeFile(join(repository, ".gitignore"), "private/\n");
@@ -542,6 +647,30 @@ describe("Agents SDK thin scan adapter", () => {
         "SYNTHETIC_CONFIGURED\n",
       );
       await writeFile(join(repository, "info.env"), "SYNTHETIC_INFO\n");
+      await writeFile(globalExclude, "global.env\n");
+      await writeFile(systemExclude, "system.env\n");
+      await writeFile(
+        globalConfig,
+        `[core]\n  excludesFile = ${globalExclude}\n`,
+      );
+      await writeFile(
+        systemConfig,
+        `[core]\n  excludesFile = ${systemExclude}\n`,
+      );
+      await writeFile(join(repository, "global.env"), "SYNTHETIC_GLOBAL\n");
+      await writeFile(join(repository, "system.env"), "SYNTHETIC_SYSTEM\n");
+      const repositoryBin = join(repository, "node_modules", ".bin");
+      const hostGitLog = join(root, "host-git-log");
+      await mkdir(repositoryBin, { recursive: true });
+      await writeFile(
+        join(repositoryBin, "git"),
+        `#!/bin/sh\nprintf '%s\\n' UNTRUSTED_GIT >> '${hostGitLog}'\nexit 42\n`,
+        { mode: 0o755 },
+      );
+      await writeFile(
+        join(repository, ".gitignore"),
+        "private/\nnode_modules/\n",
+      );
       const alternateIndex = join(root, "alternate.index");
       git(repository, ["add", "-f", "private/credentials.json"], {
         ...process.env,
@@ -566,14 +695,28 @@ describe("Agents SDK thin scan adapter", () => {
               false,
             );
             expect(existsSync(join(value.repository, "info.env"))).toBe(false);
+            expect(existsSync(join(value.repository, "global.env"))).toBe(
+              false,
+            );
+            expect(existsSync(join(value.repository, "system.env"))).toBe(
+              false,
+            );
             throw new Error("stop after staging inspection");
           },
         },
       );
       const previousDir = process.env["GIT_DIR"];
       const previousIndex = process.env["GIT_INDEX_FILE"];
+      const previousGlobal = process.env["GIT_CONFIG_GLOBAL"];
+      const previousSystem = process.env["GIT_CONFIG_SYSTEM"];
+      const previousNoSystem = process.env["GIT_CONFIG_NOSYSTEM"];
+      const previousPath = process.env["PATH"];
       process.env["GIT_DIR"] = "/dev/null";
       process.env["GIT_INDEX_FILE"] = alternateIndex;
+      process.env["GIT_CONFIG_GLOBAL"] = globalConfig;
+      process.env["GIT_CONFIG_SYSTEM"] = systemConfig;
+      process.env["GIT_CONFIG_NOSYSTEM"] = "0";
+      process.env["PATH"] = `${repositoryBin}:${previousPath ?? ""}`;
       try {
         await expect(
           client.run(repository, { outputDir: join(root, "regular-scan") }),
@@ -583,8 +726,20 @@ describe("Agents SDK thin scan adapter", () => {
         else process.env["GIT_DIR"] = previousDir;
         if (previousIndex === undefined) delete process.env["GIT_INDEX_FILE"];
         else process.env["GIT_INDEX_FILE"] = previousIndex;
+        if (previousGlobal === undefined)
+          delete process.env["GIT_CONFIG_GLOBAL"];
+        else process.env["GIT_CONFIG_GLOBAL"] = previousGlobal;
+        if (previousSystem === undefined)
+          delete process.env["GIT_CONFIG_SYSTEM"];
+        else process.env["GIT_CONFIG_SYSTEM"] = previousSystem;
+        if (previousNoSystem === undefined)
+          delete process.env["GIT_CONFIG_NOSYSTEM"];
+        else process.env["GIT_CONFIG_NOSYSTEM"] = previousNoSystem;
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
       }
       expect(reached).toBe(true);
+      expect(existsSync(hostGitLog)).toBe(false);
 
       const expectUnsafe = async (name: string): Promise<void> => {
         await expect(
@@ -604,9 +759,108 @@ describe("Agents SDK thin scan adapter", () => {
       await rm(join(repository, ".gitignore"));
       await symlink(configuredExclude, join(repository, ".gitignore"));
       await expectUnsafe("symlink-scan");
+      await rm(join(repository, ".gitignore"));
+      await writeFile(join(repository, ".gitignore"), "private/\n");
+      for (const metadataName of ["HEAD", "index"]) {
+        const metadataPath = join(repository, ".git", metadataName);
+        const previous = await readFile(metadataPath);
+        await rm(metadataPath);
+        execFileSync("mkfifo", [metadataPath]);
+        await expectUnsafe(`${metadataName.toLowerCase()}-fifo-scan`);
+        await rm(metadataPath);
+        await writeFile(metadataPath, previous);
+      }
+      const includedConfig = join(root, 'included-"config');
+      execFileSync("mkfifo", [includedConfig]);
+      const gitConfig = join(repository, ".git", "config");
+      await writeFile(
+        gitConfig,
+        `${await readFile(gitConfig, "utf8")}\n[include]\n  path = ${JSON.stringify(includedConfig)}\n`,
+      );
+      await expect(
+        client.run(repository, { outputDir: join(root, "include-fifo-scan") }),
+      ).rejects.toThrow(
+        "Git configuration input must be a bounded regular file",
+      );
+      expect(await readdir(workspace)).toEqual([]);
       await client.close();
     },
   );
+
+  test("stages tracked and explicitly selected ignored files in a directory once", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspace = join(root, "workspaces");
+    await initializeGitRepository(repository);
+    await mkdir(join(repository, "src"));
+    await mkdir(join(repository, "fixtures", "not-a-repository.git"), {
+      recursive: true,
+    });
+    await writeFile(join(repository, ".gitignore"), "src/ignored.ts\n");
+    await writeFile(
+      join(repository, "src", "tracked.ts"),
+      "export const tracked = true;\n",
+    );
+    await writeFile(
+      join(repository, "ordinary-source.git"),
+      "export const ordinary = true;\n",
+    );
+    await writeFile(
+      join(repository, "fixtures", "not-a-repository.git", "source.ts"),
+      "export const fixture = true;\n",
+    );
+    git(repository, ["add", "."]);
+    git(repository, ["commit", "--quiet", "-m", "tracked"]);
+    await writeFile(
+      join(repository, "src", "ignored.ts"),
+      "export const ignored = true;\n",
+    );
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(existsSync(join(value.repository, "src", "tracked.ts"))).toBe(
+            true,
+          );
+          expect(existsSync(join(value.repository, "src", "ignored.ts"))).toBe(
+            true,
+          );
+          expect(
+            existsSync(join(value.repository, "ordinary-source.git")),
+          ).toBe(true);
+          expect(
+            existsSync(
+              join(
+                value.repository,
+                "fixtures",
+                "not-a-repository.git",
+                "source.ts",
+              ),
+            ),
+          ).toBe(true);
+          throw new Error("stop after scoped staging inspection");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          target: ["src"],
+          outputDir: join(root, "scan"),
+        }),
+      ).rejects.toThrow("stop after scoped staging inspection");
+      expect(reached).toBe(true);
+      expect(await readdir(workspace)).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
 
   test("bounds staged inputs before starting the Agents runtime", async () => {
     const root = await temporaryDirectory();
@@ -642,6 +896,72 @@ describe("Agents SDK thin scan adapter", () => {
       await client.close();
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects Git metadata targets and lossy Git path output before sandbox work",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const workspace = join(root, "workspaces");
+      await initializeGitRepository(repository);
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      git(repository, ["add", "."]);
+      git(repository, ["commit", "--quiet", "-m", "initial"]);
+      git(repository, [
+        "config",
+        "remote.origin.url",
+        "https://SYNTHETIC_GIT_TOKEN@example.invalid/private.git",
+      ]);
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+          },
+          runAgents: async () => {
+            reached = true;
+            throw new Error("must-not-run");
+          },
+        },
+      );
+      try {
+        for (const [index, target] of [".git", ".git/config"].entries()) {
+          await expect(
+            client.run(repository, {
+              target: [target],
+              outputDir: join(root, `metadata-scan-${index}`),
+            }),
+          ).rejects.toThrow("must not select Git metadata");
+        }
+        const shim = join(root, "git-shim");
+        await mkdir(shim);
+        const actualGit = execFileSync("which", ["git"], {
+          encoding: "utf8",
+        }).trim();
+        await writeFile(
+          join(shim, "git"),
+          `#!/bin/sh\nfor value in "$@"; do if test "$value" = ls-files; then printf '\\377\\000'; exit 0; fi; done\nexec '${actualGit}' "$@"\n`,
+          { mode: 0o755 },
+        );
+        const previousPath = process.env["PATH"];
+        process.env["PATH"] = `${shim}:${previousPath ?? ""}`;
+        try {
+          await expect(
+            client.run(repository, { outputDir: join(root, "non-utf8-scan") }),
+          ).rejects.toThrow("Git returned a non-UTF-8 repository path");
+        } finally {
+          if (previousPath === undefined) delete process.env["PATH"];
+          else process.env["PATH"] = previousPath;
+        }
+        expect(reached).toBe(false);
+        expect(await readdir(workspace)).toEqual([]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "excludes plugin-checkout secrets and symlinked source parents, and rejects retargeted roots",
@@ -835,6 +1155,7 @@ describe("Agents SDK thin scan adapter", () => {
       const root = await temporaryDirectory();
       const value = request(root);
       const bin = join(root, "bin");
+      const repositoryBin = join(value.repository, "node_modules", ".bin");
       const log = join(root, "docker-calls");
       await mkdir(value.repository);
       await mkdir(value.scanDir);
@@ -849,6 +1170,7 @@ describe("Agents SDK thin scan adapter", () => {
         `${JSON.stringify({ targetId: value.repositoryIdentity })}\n`,
       );
       await mkdir(bin);
+      await mkdir(repositoryBin, { recursive: true });
       await writeFile(
         join(value.repository, "app.ts"),
         "export const ok = true;\n",
@@ -865,8 +1187,21 @@ describe("Agents SDK thin scan adapter", () => {
         ].join("\n"),
       );
       await chmod(join(bin, "docker"), 0o755);
+      await writeFile(
+        join(repositoryBin, "docker"),
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "UNTRUSTED_DOCKER key=\${OPENAI_API_KEY-absent}" >> '${log}'`,
+          "exit 42",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
       const previousPath = process.env["PATH"];
-      process.env["PATH"] = `${bin}:${previousPath ?? "/usr/bin:/bin"}`;
+      const previousHostKey = process.env["OPENAI_API_KEY"];
+      process.env["PATH"] =
+        `${repositoryBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
+      process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
       const tracingWasDisabled =
         getGlobalTraceProvider().createTrace({ name: "before scan" }) instanceof
         NoopTrace;
@@ -987,6 +1322,8 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).toContain("<network>");
         expect(calls).toContain("<disconnect>");
         expect(calls).toContain("<bridge>");
+        expect(calls).not.toContain("UNTRUSTED_DOCKER");
+        expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(existsSync(value.scanDir)).toBe(true);
 
         const stateToken = "SYNTHETIC_SOURCE_STATE_TOKEN";
@@ -1054,6 +1391,8 @@ describe("Agents SDK thin scan adapter", () => {
         createDebug.enable(previousDebugNamespaces);
         if (previousPath === undefined) delete process.env["PATH"];
         else process.env["PATH"] = previousPath;
+        if (previousHostKey === undefined) delete process.env["OPENAI_API_KEY"];
+        else process.env["OPENAI_API_KEY"] = previousHostKey;
       }
     },
   );

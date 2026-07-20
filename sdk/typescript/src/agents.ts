@@ -13,7 +13,16 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import createDebug from "debug";
 import OpenAI from "openai";
@@ -84,7 +93,13 @@ const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
 const MAX_INPUT_ENTRIES = 2_000_000;
 const MAX_INPUT_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_INPUT_BYTES = 4 * 1024 * 1024 * 1024;
+const MAX_GIT_CONFIG_FILES = 128;
+const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
 let tracingUsers = 0;
+let hostEnvironmentUsers = 0;
+let savedHostPath: string | undefined;
+let savedHostOpenAIKey: string | undefined;
+let savedHostCodexKey: string | undefined;
 let tracingWasDisabled = false;
 let savedModelLogGuard: string | undefined;
 let savedToolLogGuard: string | undefined;
@@ -120,6 +135,7 @@ export interface AgentsScanOptions {
 
 export interface AgentsScanRequest {
   repository: string;
+  hostRepositoryRoot?: string;
   target: NormalizedTarget;
   scanDir: string;
   pluginRoot: string;
@@ -204,6 +220,16 @@ export class AgentsSecurity {
           "Agents SDK scans support repository and path targets only; use the Codex engine for diff scans.",
         );
       }
+      if (
+        target.kind === "paths" &&
+        target.paths.some((path) =>
+          path.split("/").some((part) => part.toLowerCase() === ".git"),
+        )
+      ) {
+        throw new InvalidTargetError(
+          "Agents SDK path targets must not select Git metadata.",
+        );
+      }
       const protectedRoot =
         (await enclosingGitWorktreeRoot(repo, controller.signal)) ?? repo;
       const requestedOutput = await validateOutputDir(options.outputDir);
@@ -244,18 +270,24 @@ export class AgentsSecurity {
         (path) => requireOutsideRepository(protectedRoot, path),
         outputMetadata,
       );
-      const repositoryIdentity = `codex-security-target/v1:sha256:${createHash(
-        "sha256",
-      )
-        .update(repo.normalize("NFC"))
-        .digest("hex")}`;
       const stagedRepository = join(staging, "repository");
       const stagedPlugin = join(staging, "plugin");
       const sandboxOutput = join(staging, "output");
       const sandboxInputRoot = join(staging, "scan-inputs");
+      const inputState = { entries: 0, bytes: 0 };
       await requireUnchangedDirectory(repo, repositoryMetadata);
-      await stageRepository(repo, stagedRepository, controller.signal, target);
+      await stageRepository(
+        repo,
+        stagedRepository,
+        controller.signal,
+        target,
+        inputState,
+      );
       await requireUnchangedDirectory(repo, repositoryMetadata);
+      const repositoryIdentity = await stableRepositoryIdentity(
+        repo,
+        controller.signal,
+      );
       for (const name of [
         ...REQUIRED_PLUGIN_DIRECTORIES,
         ...OPTIONAL_PLUGIN_DIRECTORIES,
@@ -269,17 +301,23 @@ export class AgentsSecurity {
             `Selected plugin has an invalid Agents scan runtime directory: ${name}`,
           );
         }
-        await stageTree(source, join(stagedPlugin, name), controller.signal, {
-          skip: (entry) =>
-            entry === ".git" ||
-            entry.toLowerCase().endsWith(".git") ||
-            entry === ".env" ||
-            entry.startsWith(".env.") ||
-            entry.endsWith(".pem") ||
-            entry.endsWith(".key") ||
-            entry === "__pycache__" ||
-            entry.endsWith(".pyc"),
-        });
+        await stageTree(
+          source,
+          join(stagedPlugin, name),
+          controller.signal,
+          {
+            skip: (entry) =>
+              entry === ".git" ||
+              entry.toLowerCase().endsWith(".git") ||
+              entry === ".env" ||
+              entry.startsWith(".env.") ||
+              entry.endsWith(".pem") ||
+              entry.endsWith(".key") ||
+              entry === "__pycache__" ||
+              entry.endsWith(".pyc"),
+          },
+          inputState,
+        );
       }
       await mkdir(sandboxOutput, { mode: 0o700 });
       await mkdir(sandboxInputRoot, { mode: 0o700 });
@@ -298,6 +336,7 @@ export class AgentsSecurity {
       try {
         summary = await (this.#dependencies.runAgents ?? runAgentsScan)({
           repository: stagedRepository,
+          hostRepositoryRoot: repo,
           target,
           scanDir: sandboxOutput,
           pluginRoot: stagedPlugin,
@@ -399,7 +438,17 @@ export async function runAgentsScan(
     image: DEFAULT_DOCKER_IMAGE,
     workspaceBaseDir: request.sandboxBaseDir,
   });
-  const session = await createDockerSession(client, manifest, request.signal);
+  const releaseHostEnvironment = suppressUnsafeHostEnvironment(
+    request.hostRepositoryRoot,
+  );
+  const session = await createDockerSession(
+    client,
+    manifest,
+    request.signal,
+  ).catch((error: unknown) => {
+    releaseHostEnvironment();
+    throw error;
+  });
   const releaseTracing = suppressAgentsTracing();
   const releaseTimeouts = suppressReferencedSandboxTimeouts();
   let ownedProvider: OpenAIProvider | undefined;
@@ -557,8 +606,43 @@ export async function runAgentsScan(
     } finally {
       releaseTimeouts();
       releaseTracing();
+      releaseHostEnvironment();
     }
   }
+}
+
+function suppressUnsafeHostEnvironment(repository?: string): () => void {
+  if (hostEnvironmentUsers++ === 0) {
+    savedHostPath = process.env["PATH"];
+    savedHostOpenAIKey = process.env["OPENAI_API_KEY"];
+    savedHostCodexKey = process.env["CODEX_API_KEY"];
+    process.env["PATH"] = safeHostPath(repository);
+    delete process.env["OPENAI_API_KEY"];
+    delete process.env["CODEX_API_KEY"];
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--hostEnvironmentUsers !== 0) return;
+    restoreEnvironmentValue("PATH", savedHostPath);
+    restoreEnvironmentValue("OPENAI_API_KEY", savedHostOpenAIKey);
+    restoreEnvironmentValue("CODEX_API_KEY", savedHostCodexKey);
+  };
+}
+
+function safeHostPath(repository?: string): string {
+  return (process.env["PATH"] ?? "")
+    .split(delimiter)
+    .filter(
+      (entry) =>
+        entry.length > 0 &&
+        isAbsolute(entry) &&
+        !/(?:^|[\\/])node_modules[\\/]\.bin(?:[\\/]|$)/iu.test(entry) &&
+        (repository === undefined ||
+          relative(repository, resolve(entry)).startsWith(`..${sep}`)),
+    )
+    .join(delimiter);
 }
 
 function suppressAgentsTracing(): () => void {
@@ -779,14 +863,18 @@ async function stageRepository(
 ): Promise<void> {
   const gitRoot = await enclosingGitWorktreeRoot(source, signal);
   if (gitRoot === null) {
+    if (hasBareGitLayout(await readdir(source))) {
+      throw new InvalidTargetError(
+        `Bare Git repositories cannot be staged safely: ${source}`,
+      );
+    }
     await stageTree(
       source,
       destination,
       signal,
       {
         skip: (name) =>
-          name === ".git" ||
-          name.toLowerCase().endsWith(".git") ||
+          name.toLowerCase() === ".git" ||
           name === ".env" ||
           name.startsWith(".env.") ||
           name.endsWith(".pem") ||
@@ -796,17 +884,44 @@ async function stageRepository(
     );
     return;
   }
-  await requireSafeGitInputs(source, gitRoot, signal);
-  const environment: NodeJS.ProcessEnv = {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
-    ),
-    OPENAI_API_KEY: undefined,
-    CODEX_API_KEY: undefined,
-    GIT_NO_LAZY_FETCH: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_OPTIONAL_LOCKS: "0",
+  const marker = await lstat(join(source, ".git")).catch(() => null);
+  if (marker?.isSymbolicLink() === true) {
+    throw new InvalidTargetError(
+      `Git worktree metadata is not safe to stage: ${join(source, ".git")}`,
+    );
+  }
+  const localGitRoot =
+    marker?.isFile() === true || marker?.isDirectory() === true
+      ? source
+      : gitRoot;
+  const bareDirectories = await requireSafeGitInputs(
+    source,
+    localGitRoot,
+    signal,
+  );
+  const environment = sanitizedGitEnvironment(source);
+  const configuredEnvironment = {
+    ...environment,
+    GIT_CONFIG_GLOBAL: process.env["GIT_CONFIG_GLOBAL"],
+    GIT_CONFIG_SYSTEM: process.env["GIT_CONFIG_SYSTEM"],
+    GIT_CONFIG_NOSYSTEM: process.env["GIT_CONFIG_NOSYSTEM"],
   };
+  const configuredFiles = [
+    process.env["GIT_CONFIG_GLOBAL"] ?? join(homedir(), ".gitconfig"),
+    join(
+      process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"),
+      "git",
+      "config",
+    ),
+    ...(process.env["GIT_CONFIG_NOSYSTEM"] === "1"
+      ? []
+      : [process.env["GIT_CONFIG_SYSTEM"] ?? "/etc/gitconfig"]),
+  ];
+  for (const config of configuredFiles.filter(
+    (value) => value !== "/dev/null",
+  )) {
+    await requireSafeGitConfig(config, new Set<string>(), false);
+  }
   let configuredExcludes = "";
   try {
     ({ stdout: configuredExcludes } = await execFile(
@@ -817,7 +932,7 @@ async function stageRepository(
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
-        `safe.directory=${gitRoot}`,
+        `safe.directory=${localGitRoot}`,
         "config",
         "--null",
         "--path",
@@ -827,7 +942,7 @@ async function stageRepository(
       {
         cwd: source,
         encoding: "utf8",
-        env: environment,
+        env: configuredEnvironment,
         signal,
         timeout: 30_000,
       },
@@ -843,6 +958,10 @@ async function stageRepository(
   for (const value of configuredExcludes.split("\0").filter(Boolean)) {
     await requireRegularGitInput(resolve(source, value));
   }
+  const excludeFiles = configuredExcludes
+    .split("\0")
+    .filter(Boolean)
+    .map((value) => `--exclude-from=${resolve(source, value)}`);
   let stdout: Buffer;
   try {
     ({ stdout } = await execFile(
@@ -853,11 +972,12 @@ async function stageRepository(
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
-        `safe.directory=${gitRoot}`,
+        `safe.directory=${localGitRoot}`,
         "ls-files",
         "--cached",
         "--others",
         "--exclude-standard",
+        ...excludeFiles,
         "--deduplicate",
         "-z",
         "--",
@@ -879,7 +999,16 @@ async function stageRepository(
     );
   }
   await mkdir(destination, { recursive: true, mode: 0o700 });
-  for (const value of stdout.toString("utf8").split("\0")) {
+  let listedPaths: string;
+  try {
+    listedPaths = new TextDecoder("utf-8", { fatal: true }).decode(stdout);
+  } catch (error) {
+    throw new InvalidTargetError(
+      `Git returned a non-UTF-8 repository path: ${source}`,
+      { cause: error },
+    );
+  }
+  for (const value of listedPaths.split("\0")) {
     if (value.length === 0) continue;
     const path = value.endsWith("/") ? value.slice(0, -1) : value;
     const parts = path.split("/");
@@ -892,9 +1021,12 @@ async function stageRepository(
         `Git returned an unsafe repository path: ${path}`,
       );
     }
+    if (parts.some((part) => part.toLowerCase() === ".git")) {
+      continue;
+    }
     if (
-      parts.some(
-        (part) => part === ".git" || part.toLowerCase().endsWith(".git"),
+      bareDirectories.some(
+        (directory) => path === directory || path.startsWith(`${directory}/`),
       )
     ) {
       continue;
@@ -923,8 +1055,8 @@ async function stageRepository(
         output,
         signal,
         {
-          skip: (name) =>
-            name === ".git" || name.toLowerCase().endsWith(".git"),
+          skip: (name) => name.toLowerCase() === ".git",
+          skipExisting: true,
         },
         state,
       );
@@ -985,7 +1117,7 @@ async function requireSafeGitInputs(
   source: string,
   gitRoot: string,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<string[]> {
   const marker = join(gitRoot, ".git");
   const markerMetadata = await lstat(marker).catch(() => null);
   if (
@@ -1023,10 +1155,13 @@ async function requireSafeGitInputs(
       (await readFile(commonPointer, "utf8")).trim(),
     );
   }
-  await requireRegularGitInput(join(commonDirectory, "config"));
+  await requireSafeGitConfig(join(commonDirectory, "config"));
+  await requireRegularGitInput(join(gitDirectory, "HEAD"));
+  await requireRegularGitInput(join(gitDirectory, "index"));
   await requireRegularGitInput(join(commonDirectory, "info", "exclude"));
 
   const pending = [source];
+  const bareDirectories: string[] = [];
   let entries = 0;
   while (pending.length > 0) {
     throwIfAborted(signal);
@@ -1038,9 +1173,17 @@ async function requireSafeGitInputs(
         `Repository contains too many entries to stage safely: ${source}`,
       );
     }
+    if (hasBareGitLayout(children.map((child) => child.name))) {
+      if (directory === source) {
+        throw new InvalidTargetError(
+          `Bare Git repositories cannot be staged safely: ${source}`,
+        );
+      }
+      bareDirectories.push(relative(source, directory).split(sep).join("/"));
+      continue;
+    }
     for (const child of children) {
-      if (child.name === ".git" || child.name.toLowerCase().endsWith(".git"))
-        continue;
+      if (child.name.toLowerCase() === ".git") continue;
       const path = join(directory, child.name);
       if (child.name === ".gitignore") await requireRegularGitInput(path);
       if (child.isDirectory() && !child.isSymbolicLink()) pending.push(path);
@@ -1051,6 +1194,191 @@ async function requireSafeGitInputs(
     await requireRegularGitInput(join(ancestor, ".gitignore"));
     if (ancestor === gitRoot) break;
     ancestor = dirname(ancestor);
+  }
+  return bareDirectories;
+}
+
+async function requireSafeGitConfig(
+  config: string,
+  seen = new Set<string>(),
+  required = true,
+): Promise<void> {
+  const path = resolve(config);
+  if (seen.has(path)) return;
+  if (seen.size >= MAX_GIT_CONFIG_FILES) {
+    throw new InvalidTargetError(
+      "Git configuration contains too many includes.",
+    );
+  }
+  seen.add(path);
+  const metadata = await lstat(path).catch(() => null);
+  if (metadata === null && !required) return;
+  if (
+    metadata === null ||
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size > MAX_GIT_CONFIG_BYTES
+  ) {
+    throw new InvalidTargetError(
+      `Git configuration input must be a bounded regular file: ${path}`,
+    );
+  }
+  const input = await open(
+    path,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+  );
+  let content: string;
+  try {
+    const opened = await input.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== metadata.dev ||
+      opened.ino !== metadata.ino ||
+      opened.size !== metadata.size
+    ) {
+      throw new InvalidTargetError(
+        `Git configuration changed while staging: ${path}`,
+      );
+    }
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(
+        await input.readFile(),
+      );
+    } catch (error) {
+      throw new InvalidTargetError(
+        `Git configuration contains invalid UTF-8: ${path}`,
+        { cause: error },
+      );
+    }
+    const final = await input.stat();
+    if (
+      final.dev !== opened.dev ||
+      final.ino !== opened.ino ||
+      final.size !== opened.size ||
+      final.mtimeMs !== opened.mtimeMs
+    ) {
+      throw new InvalidTargetError(
+        `Git configuration changed while staging: ${path}`,
+      );
+    }
+  } finally {
+    await input.close();
+  }
+  let includeSection = false;
+  for (const line of content.split(/\r?\n/u)) {
+    const section = /^\s*\[\s*([^\s"\]]+)/u.exec(line);
+    if (section !== null) {
+      includeSection = /^include(?:if)?$/iu.test(section[1]!);
+      continue;
+    }
+    if (!includeSection) continue;
+    const include = /^\s*path\s*=\s*(?:"((?:\\.|[^"])*)"|([^#;]+))/iu.exec(
+      line,
+    );
+    if (include === null) continue;
+    let value: string;
+    try {
+      value =
+        include[1] === undefined
+          ? (include[2] ?? "").trim()
+          : (JSON.parse(`"${include[1]}"`) as string);
+    } catch (error) {
+      throw new InvalidTargetError(
+        `Git configuration contains an unsupported include path: ${path}`,
+        { cause: error },
+      );
+    }
+    if (
+      value.length === 0 ||
+      (value.startsWith("~") && !value.startsWith("~/"))
+    ) {
+      throw new InvalidTargetError(
+        `Git configuration contains an unsupported include path: ${path}`,
+      );
+    }
+    const included = value.startsWith("~/")
+      ? join(homedir(), value.slice(2))
+      : resolve(dirname(path), value);
+    await requireSafeGitConfig(included, seen, false);
+  }
+}
+
+function hasBareGitLayout(names: string[]): boolean {
+  return ["HEAD", "config", "objects", "refs"].every((name) =>
+    names.includes(name),
+  );
+}
+
+async function stableRepositoryIdentity(
+  repository: string,
+  signal: AbortSignal,
+): Promise<string> {
+  let identity = repository.normalize("NFC");
+  const gitRoot = await enclosingGitWorktreeRoot(repository, signal);
+  if (gitRoot !== null) {
+    try {
+      const { stdout } = await execFile(
+        "git",
+        [
+          "-c",
+          "core.fsmonitor=false",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          `safe.directory=${gitRoot}`,
+          "config",
+          "--get",
+          "remote.origin.url",
+        ],
+        {
+          cwd: repository,
+          encoding: "utf8",
+          signal,
+          timeout: 30_000,
+          env: sanitizedGitEnvironment(repository),
+        },
+      );
+      identity = canonicalRemoteIdentity(stdout.trim()) ?? identity;
+    } catch {
+      throwIfAborted(signal);
+    }
+  }
+  return `codex-security-target/v1:sha256:${createHash("sha256")
+    .update(identity)
+    .digest("hex")}`;
+}
+
+function sanitizedGitEnvironment(repository?: string): NodeJS.ProcessEnv {
+  return {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+    ),
+    OPENAI_API_KEY: undefined,
+    CODEX_API_KEY: undefined,
+    PATH: safeHostPath(repository),
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_NO_LAZY_FETCH: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
+  };
+}
+
+function canonicalRemoteIdentity(value: string): string | null {
+  const scp = value.includes("://")
+    ? null
+    : /^(?:[^@\s/:]+@)?([^/\s:]+):(.+)$/u.exec(value);
+  try {
+    const remote = new URL(scp === null ? value : `ssh://${scp[1]}/${scp[2]}`);
+    if (!["http:", "https:", "ssh:", "git:"].includes(remote.protocol)) {
+      return null;
+    }
+    const path = remote.pathname
+      .replace(/(?:\.git)?\/+$/u, "")
+      .replace(/\.git$/u, "");
+    return `${remote.protocol}//${remote.host.toLowerCase()}${path}`;
+  } catch {
+    return null;
   }
 }
 
@@ -1164,22 +1492,35 @@ async function stageTree(
   source: string,
   destination: string,
   signal: AbortSignal,
-  options: { skip?: (name: string) => boolean } = {},
+  options: { skip?: (name: string) => boolean; skipExisting?: boolean } = {},
   state: { entries: number; bytes: number } = { entries: 0, bytes: 0 },
 ): Promise<void> {
   throwIfAborted(signal);
   await mkdir(destination, { recursive: true, mode: 0o700 });
-  for (const entry of await readdir(source, { withFileTypes: true })) {
+  const entries = await readdir(source, { withFileTypes: true });
+  if (hasBareGitLayout(entries.map((entry) => entry.name))) return;
+  for (const entry of entries) {
     if (options.skip?.(entry.name) === true) continue;
     const from = join(source, entry.name);
     const to = join(destination, entry.name);
     const metadata = await lstat(from);
+    if (!metadata.isFile() && ++state.entries > MAX_INPUT_ENTRIES) {
+      throw new InvalidTargetError(
+        `Repository contains too many entries to stage safely: ${source}`,
+      );
+    }
     if (metadata.isSymbolicLink()) continue;
     if (metadata.isDirectory()) {
       await stageTree(from, to, signal, options, state);
       continue;
     }
     if (!metadata.isFile()) continue;
+    if (
+      options.skipExisting === true &&
+      (await lstat(to).catch(() => null)) !== null
+    ) {
+      continue;
+    }
     throwIfAborted(signal);
     await stageInputFile(from, to, metadata, state, signal);
   }

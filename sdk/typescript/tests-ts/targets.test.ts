@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,6 +69,26 @@ describe("scan target normalization", () => {
       "outside the repository",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects path targets that traverse repository symlinks",
+    async () => {
+      const repo = await repository();
+      await mkdir(join(repo, "private"));
+      await writeFile(
+        join(repo, "private", "secret.ts"),
+        "export const secret = true;\n",
+      );
+      await symlink(join("private", "secret.ts"), join(repo, "link.ts"));
+      await symlink("private", join(repo, "linked-directory"), "dir");
+      await expect(normalizeTarget(repo, ["link.ts"])).rejects.toThrow(
+        "must not traverse a symbolic link",
+      );
+      await expect(
+        normalizeTarget(repo, [join("linked-directory", "secret.ts")]),
+      ).rejects.toThrow("must not traverse a symbolic link");
+    },
+  );
 
   test("reports a path that disappears during normalization as invalid", async () => {
     const repo = await repository();
