@@ -365,9 +365,7 @@ function isCredentialDocument(source, expected, name) {
       ) ||
       /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u.test(contents) ||
       /\bBearer\s+[A-Za-z0-9+/_=-]{20,}\b/iu.test(contents) ||
-      /\b(?:jdbc:)?(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?):\/\/[^\s"'@/]*:[^\s"'@/]{4,}@/iu.test(
-        contents,
-      ) ||
+      hasCredentialUri(contents) ||
       (() => {
         const prefix = contents.slice(0, 256 * 1024).toLowerCase();
         return (
@@ -481,6 +479,22 @@ function isCredentialDocument(source, expected, name) {
   } finally {
     if (handle !== undefined) closeSync(handle);
   }
+}
+
+function hasCredentialUri(contents) {
+  const scheme =
+    /\b(?:jdbc:)?(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?):\/\//giu;
+  for (const match of contents.matchAll(scheme)) {
+    const start = (match.index ?? 0) + match[0].length;
+    const authority = contents
+      .slice(start, start + 4096)
+      .split(/[\s"'/?#]/u, 1)[0];
+    const at = authority.lastIndexOf("@");
+    if (at < 0) continue;
+    const password = authority.slice(0, at).split(":").slice(1).join(":");
+    if (password.length >= 4) return true;
+  }
+  return false;
 }
 
 function anchor(path) {
