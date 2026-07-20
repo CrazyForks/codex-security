@@ -615,6 +615,10 @@ function skip(name, kind) {
       "pg_service.conf",
       ".sqliterc",
       ".odbc.ini",
+      ".lfsconfig",
+      ".dev.vars",
+      ".htpasswd",
+      "local.settings.json",
       "cookies",
       "cookies.sqlite",
       "login data",
@@ -631,6 +635,9 @@ function skip(name, kind) {
     lower.startsWith(".bazelrc") ||
     (lower.startsWith(".") && lower.endsWith("_history")) ||
     /^cookies(?:\.sqlite)?(?:[._-]|$)/u.test(lower) ||
+    /^(?:credentials|service[-_]account(?:[-_].+)?|client[-_]secret(?:[-_].+)?)\.json$/u.test(
+      lower,
+    ) ||
     /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     /^ssh_host_(?:rsa|dsa|ecdsa|ed25519)_key(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||

@@ -899,6 +899,17 @@ describe("Agents SDK thin scan adapter", () => {
     );
     await writeFile(join(repository, ".npmrc"), "SYNTHETIC_NPM_TOKEN\n");
     await writeFile(join(repository, "deploy.ppk"), "SYNTHETIC_PUTTY_KEY\n");
+    for (const [file, secret] of [
+      [".lfsconfig", "SYNTHETIC_LFS_TOKEN"],
+      ["credentials.json", "SYNTHETIC_SERVICE_ACCOUNT_KEY"],
+      ["service-account.json", "SYNTHETIC_SERVICE_ACCOUNT_KEY"],
+      ["client_secret_123.json", "SYNTHETIC_OAUTH_CLIENT_SECRET"],
+      ["local.settings.json", "SYNTHETIC_AZURE_FUNCTION_SECRET"],
+      [".dev.vars", "SYNTHETIC_CLOUDFLARE_WORKERS_SECRET"],
+      [".htpasswd", "SYNTHETIC_APACHE_PASSWORD_HASH"],
+    ] as const) {
+      await writeFile(join(repository, file), `${secret}\n`);
+    }
     await writeFile(
       join(repository, "bunfig.toml"),
       'token="SYNTHETIC_BUN_TOKEN"\n',
@@ -1013,6 +1024,13 @@ describe("Agents SDK thin scan adapter", () => {
             "Browser/Profile/Network/Cookies.binarycookies",
             "etc/ssh/ssh_host_ed25519_key",
             "deploy.ppk",
+            ".lfsconfig",
+            "credentials.json",
+            "service-account.json",
+            "client_secret_123.json",
+            "local.settings.json",
+            ".dev.vars",
+            ".htpasswd",
             ".bazelrc",
             ".bazelrc.user",
             "tools/bazel.rc",
@@ -1458,6 +1476,20 @@ describe("Agents SDK thin scan adapter", () => {
       ".SQLITERC",
       ".odbc.ini",
       ".ODBC.INI",
+      ".lfsconfig",
+      ".LFSCONFIG",
+      ".dev.vars",
+      ".DEV.VARS",
+      ".htpasswd",
+      ".HTPASSWD",
+      "credentials.json",
+      "CREDENTIALS.JSON",
+      "service-account.json",
+      "SERVICE_ACCOUNT.JSON",
+      "client_secret_123.json",
+      "CLIENT-SECRET-123.JSON",
+      "local.settings.json",
+      "LOCAL.SETTINGS.JSON",
     ];
     const directories = [
       ".ssh",
