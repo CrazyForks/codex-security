@@ -481,6 +481,10 @@ function skip(name, kind) {
       ".netrc",
       ".pypirc",
       ".pgpass",
+      ".terraformrc",
+      "terraform.rc",
+      "auth.json",
+      "gradle.properties",
       "nuget.config",
       "pip.conf",
       "pip.ini",
@@ -496,6 +500,7 @@ function skip(name, kind) {
     lower.endsWith(".pkcs12") ||
     lower.endsWith(".jks") ||
     lower.endsWith(".keystore") ||
+    /\.tfrc(?:\.json)?$/u.test(lower) ||
     /\.(?:tfstate(?:\..+)?|(?:auto\.)?tfvars(?:\.json)?)$/u.test(lower)
   ) {
     return true;

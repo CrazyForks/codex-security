@@ -809,6 +809,22 @@ describe("Agents SDK thin scan adapter", () => {
     await writeFile(join(repository, ".env"), "SYNTHETIC_ENV_SECRET\n");
     await writeFile(join(repository, ".envrc"), "SYNTHETIC_ENVRC_SECRET\n");
     await writeFile(
+      join(repository, ".terraformrc"),
+      "SYNTHETIC_TERRAFORMRC_SECRET\n",
+    );
+    await writeFile(
+      join(repository, "credentials.tfrc.json"),
+      "SYNTHETIC_TFRC_SECRET\n",
+    );
+    await writeFile(
+      join(repository, "auth.json"),
+      "SYNTHETIC_COMPOSER_TOKEN\n",
+    );
+    await writeFile(
+      join(repository, "gradle.properties"),
+      "SYNTHETIC_GRADLE_TOKEN\n",
+    );
+    await writeFile(
       join(repository, ".gitconfig"),
       "SYNTHETIC_GITCONFIG_SECRET\n",
     );
@@ -862,6 +878,10 @@ describe("Agents SDK thin scan adapter", () => {
           for (const path of [
             ".env",
             ".envrc",
+            ".terraformrc",
+            "credentials.tfrc.json",
+            "auth.json",
+            "gradle.properties",
             ".gitconfig",
             ".npmrc",
             ".ssh/id_rsa",
@@ -1084,6 +1104,18 @@ describe("Agents SDK thin scan adapter", () => {
       ".ENV.PRODUCTION",
       ".envrc",
       ".ENVRC",
+      ".terraformrc",
+      ".TERRAFORMRC",
+      "terraform.rc",
+      "TERRAFORM.RC",
+      "credentials.tfrc.json",
+      "CREDENTIALS.TFRC.JSON",
+      "custom.tfrc",
+      "CUSTOM.TFRC.JSON",
+      "auth.json",
+      "AUTH.JSON",
+      "gradle.properties",
+      "GRADLE.PROPERTIES",
       "private.pem",
       "PRIVATE.PEM",
       "private.key",
