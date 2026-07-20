@@ -1237,6 +1237,26 @@ describe("Agents SDK thin scan adapter", () => {
         "secrets.sh",
         `export OPENAI_API_KEY=sk-SYNTHETIC_SHELL_RELEASE_TOKEN\nexport GITHUB_TOKEN=${["ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"].join("")}\n`,
       ],
+      [
+        "exported-k8s-secret.json",
+        '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"registry"},"type":"kubernetes.io/dockerconfigjson","data":{".dockerconfigjson":"eyJhdXRocyI6eyJyZWdpc3RyeS5leGFtcGxlIjp7ImF1dGgiOiJTVVBFUl9TRUNSRVRfRE9DS0VSX0FVVEhfQllURVMifX19"}}\n',
+      ],
+      [
+        "exported-k8s-secret.jsonc",
+        '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"registry"},"type":"kubernetes.io/dockerconfigjson","data":{".dockerconfigjson":"eyJhdXRocyI6eyJyZWdpc3RyeS5leGFtcGxlIjp7ImF1dGgiOiJTVVBFUl9TRUNSRVRfRE9DS0VSX0FVVEhfQllURVMifX19"}}\n',
+      ],
+      [
+        "demo.ipynb",
+        `{"cells":[{"cell_type":"code","source":["OPENAI_API_KEY = \'${["sk-", "SYNTHETIC_NOTEBOOK_RELEASE_TOKEN"].join("")}\'\\n","DATABASE_URL = \'postgres://user:SYNTHETIC_NOTEBOOK_DB_PASSWORD@example.invalid/app\'\\n"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}\n`,
+      ],
+      [
+        "requests.http",
+        "GET https://example.invalid/private\nAuthorization: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n",
+      ],
+      [
+        "example.exs",
+        'System.put_env("OPENAI_API_KEY", "sk-SYNTHETIC_ELIXIR_RELEASE_TOKEN")\n',
+      ],
     ] as const) {
       await writeFile(join(repository, "deploy", file), contents);
     }
@@ -1476,6 +1496,11 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/config.json",
             "deploy/secrets.ts",
             "deploy/secrets.sh",
+            "deploy/exported-k8s-secret.json",
+            "deploy/exported-k8s-secret.jsonc",
+            "deploy/demo.ipynb",
+            "deploy/requests.http",
+            "deploy/example.exs",
             "deploy/oversized.json",
             "deploy/identity",
             "deploy/pgp-backup.asc",

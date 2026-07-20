@@ -186,11 +186,7 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    (((/\.(?:jsonc?|ya?ml|conf|txt|toml|properties|ini|cfg|cnf|xml|csv|(?:m|c)?js|jsx|tsx?|sh|bash|zsh|py|rb|go|rs|java|kt|cs|c|cc|cpp|h|hpp|php|pl|scala|swift|sql|tf|hcl|md|vue|svelte|ps1)$/u.test(
-      name,
-    ) ||
-      !name.includes(".")) &&
-      isCredentialDocument(source, expected, name)) ||
+    (isCredentialDocument(source, expected, name) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
           gitCaseFold(basename(dirname(source))),
@@ -297,7 +293,7 @@ function copyFile(source, destination, expected) {
 function isCredentialDocument(source, expected, name) {
   if (expected.size > MAX_INPUT_FILE_BYTES) return false;
   if (
-    /\.jsonc?$/u.test(name) &&
+    /\.(?:jsonc?|ipynb)$/u.test(name) &&
     expected.size > MAX_STRUCTURED_CREDENTIAL_BYTES
   ) {
     return true;
@@ -328,7 +324,7 @@ function isCredentialDocument(source, expected, name) {
     ) {
       fail(`Repository input changed while staging: ${JSON.stringify(source)}`);
     }
-    const json = /\.jsonc?$/u.test(name);
+    const json = /\.(?:jsonc?|ipynb)$/u.test(name);
     const structured = /\.(?:ya?ml|conf)$/u.test(name);
     const field = (name) =>
       new RegExp(`(?:^|[\\s{,])["']?${name}["']?\\s*:`, "imu").test(contents);
@@ -399,6 +395,15 @@ function isCredentialDocument(source, expected, name) {
       );
     }
     if (credentialFields()) return true;
+    if (
+      ["api[-_]?version", "kind"].every(field) &&
+      /(?:^|[\s{,])["']?kind["']?\s*:\s*["']?secret(?:["']|\s|[,}]|$)/imu.test(
+        contents,
+      ) &&
+      ["string[-_]?data", "data"].some(field)
+    ) {
+      return true;
+    }
     try {
       const pending = [JSON.parse(contents)];
       let entries = 0;
