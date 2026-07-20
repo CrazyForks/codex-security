@@ -1,12 +1,24 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  accessSync,
+  closeSync,
   constants as fsConstants,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
+  openSync,
+  readdirSync,
+  readSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
+  writeSync,
   writeFileSync,
+  type Dirent,
   type Stats,
 } from "node:fs";
 import {
@@ -104,6 +116,8 @@ let tracingUsers = 0;
 let hostEnvironmentUsers = 0;
 let savedHostPath: string | undefined;
 let savedDockerWrapper: string | undefined;
+let savedDockerExecutable: string | undefined;
+const activeHostRoots = new Map<string, number>();
 let tracingWasDisabled = false;
 let savedModelLogGuard: string | undefined;
 let savedToolLogGuard: string | undefined;
@@ -180,6 +194,16 @@ interface StagingState {
   entries: number;
   bytes: number;
   files: number;
+}
+
+interface DirectoryAnchor {
+  path: string;
+  metadata: Pick<Stats, "dev" | "ino">;
+}
+
+interface CopyAnchors {
+  source: DirectoryAnchor;
+  destination: DirectoryAnchor;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = { environment: process.env };
@@ -469,6 +493,7 @@ export async function runAgentsScan(
   });
   const releaseHostEnvironment = suppressUnsafeHostEnvironment(
     request.hostRepositoryRoot,
+    dirname(request.sandboxBaseDir),
   );
   const session = await createDockerSession(
     client,
@@ -614,65 +639,92 @@ export async function runAgentsScan(
   }
 }
 
-function suppressUnsafeHostEnvironment(repository?: string): () => void {
-  if (hostEnvironmentUsers === 0) {
-    savedHostPath = process.env["PATH"];
-    const safePath = safeHostPath(repository);
-    const root =
-      repository === undefined ? undefined : realpathSync(repository);
-    const docker = safePath
+function suppressUnsafeHostEnvironment(
+  repository: string | undefined,
+  workspace: string,
+): () => void {
+  const root = repository === undefined ? undefined : realpathSync(repository);
+  if (root !== undefined) {
+    requireOutsideRepository(root, realpathSync(workspace));
+    activeHostRoots.set(root, (activeHostRoots.get(root) ?? 0) + 1);
+  }
+  try {
+    if (hostEnvironmentUsers === 0) savedHostPath = process.env["PATH"];
+    const safePath = safeHostPath(repository)
       .split(delimiter)
-      .map((entry) => join(entry, "docker"))
-      .find((entry) => {
-        try {
-          const executable = realpathSync(entry);
-          const path = root === undefined ? ".." : relative(root, executable);
-          return (
-            statSync(executable).isFile() &&
-            (path === ".." || path.startsWith(`..${sep}`))
-          );
-        } catch {
-          return false;
-        }
-      });
-    if (docker !== undefined) {
-      savedDockerWrapper = mkdtempSync(
-        join(tmpdir(), "codex-security-docker-"),
-      );
+      .filter((entry) => entry !== savedDockerWrapper)
+      .join(delimiter);
+    const docker = [
+      ...(savedDockerExecutable === undefined ? [] : [savedDockerExecutable]),
+      ...safePath.split(delimiter).map((entry) => join(entry, "docker")),
+    ].find((entry) => {
       try {
-        const executable = realpathSync(docker).replaceAll("'", "'\"'\"'");
+        const executable = realpathSync(entry);
+        accessSync(executable, fsConstants.X_OK);
+        return (
+          statSync(executable).isFile() &&
+          [...activeHostRoots.keys()].every((target) => {
+            const path = relative(target, executable);
+            return path === ".." || path.startsWith(`..${sep}`);
+          })
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (docker !== undefined) {
+      if (savedDockerWrapper === undefined) {
+        savedDockerWrapper = mkdtempSync(
+          join(workspace, "codex-security-docker-"),
+        );
+      }
+      const executable = realpathSync(docker);
+      if (savedDockerExecutable !== executable) {
+        const next = join(savedDockerWrapper, "docker.next");
         writeFileSync(
-          join(savedDockerWrapper, "docker"),
-          `#!/bin/sh\nunset OPENAI_API_KEY CODEX_API_KEY\nexec '${executable}' "$@"\n`,
+          next,
+          `#!/bin/sh\nunset OPENAI_API_KEY CODEX_API_KEY\nexec '${executable.replaceAll("'", "'\"'\"'")}' "$@"\n`,
           { flag: "wx", mode: 0o700 },
         );
-      } catch (error) {
-        rmSync(savedDockerWrapper, { recursive: true, force: true });
-        savedDockerWrapper = undefined;
-        throw error;
+        renameSync(next, join(savedDockerWrapper, "docker"));
+        savedDockerExecutable = executable;
       }
       process.env["PATH"] = `${savedDockerWrapper}${delimiter}${safePath}`;
     } else {
       process.env["PATH"] = safePath;
     }
-  } else if (savedDockerWrapper !== undefined) {
-    process.env["PATH"] =
-      `${savedDockerWrapper}${delimiter}${safeHostPath(repository)}`;
-  } else {
-    process.env["PATH"] = safeHostPath(repository);
+    hostEnvironmentUsers += 1;
+  } catch (error) {
+    if (root !== undefined) releaseHostRoot(root);
+    if (savedDockerWrapper !== undefined) {
+      rmSync(join(savedDockerWrapper, "docker.next"), { force: true });
+    }
+    if (hostEnvironmentUsers === 0 && savedDockerWrapper !== undefined) {
+      rmSync(savedDockerWrapper, { recursive: true, force: true });
+      savedDockerWrapper = undefined;
+      savedDockerExecutable = undefined;
+    }
+    throw error;
   }
-  hostEnvironmentUsers += 1;
   let released = false;
   return () => {
     if (released) return;
     released = true;
+    if (root !== undefined) releaseHostRoot(root);
     if (--hostEnvironmentUsers !== 0) return;
     restoreEnvironmentValue("PATH", savedHostPath);
     if (savedDockerWrapper !== undefined) {
       rmSync(savedDockerWrapper, { recursive: true, force: true });
       savedDockerWrapper = undefined;
+      savedDockerExecutable = undefined;
     }
   };
+}
+
+function releaseHostRoot(root: string): void {
+  const count = activeHostRoots.get(root)! - 1;
+  if (count === 0) activeHostRoots.delete(root);
+  else activeHostRoots.set(root, count);
 }
 
 function safeHostPath(repository?: string): string {
@@ -974,6 +1026,7 @@ async function stageRepository(
           isGitCredentialPath([name]) ||
           isCommonSecretFile(name),
         scopes: target.kind === "paths" ? target.paths : undefined,
+        rejectHardlinks: true,
       },
       state,
     );
@@ -1019,6 +1072,7 @@ async function stageRepository(
     );
   }
   await mkdir(destination, { recursive: true, mode: 0o700 });
+  const anchors = copyAnchors(source, destination, "input");
   let listedPaths: string;
   try {
     listedPaths = new TextDecoder("utf-8", { fatal: true }).decode(stdout);
@@ -1068,7 +1122,15 @@ async function stageRepository(
     seen.add(path);
     throwIfAborted(signal);
     const entry = join(source, path);
-    const metadata = await repositoryEntryMetadata(source, parts);
+    let metadata: Stats | null;
+    try {
+      metadata = anchoredMetadata(anchors.source, entry, "input");
+    } catch (error) {
+      throw new InvalidTargetError(
+        `Tracked repository input is missing or non-regular: ${displayPath(path)}`,
+        { cause: error },
+      );
+    }
     if (metadata === null && (status === "S" || deleted.has(listedPath!))) {
       continue;
     }
@@ -1080,7 +1142,7 @@ async function stageRepository(
         `Tracked repository input is missing or non-regular: ${displayPath(path)}`,
       );
     }
-    await stageInputFile(entry, target, metadata, state, signal);
+    await stageInputFile(entry, target, metadata, state, signal, anchors, true);
   }
   await requireStagedScope(destination, target, state);
 }
@@ -1112,7 +1174,7 @@ async function requireStagedScope(
     );
   }
   for (const scope of scopes) {
-    if ((await lstat(join(destination, scope)).catch(() => null)) === null) {
+    if (!(await containsStagedFile(join(destination, scope)))) {
       throw new InvalidTargetError(
         `Agents SDK path targets must contain tracked regular files or included source files; use the Codex engine for untracked or ignored paths: ${displayPath(scope)}`,
       );
@@ -1120,23 +1182,19 @@ async function requireStagedScope(
   }
 }
 
-function displayPath(value: string): string {
-  return JSON.stringify(value);
+async function containsStagedFile(path: string): Promise<boolean> {
+  const metadata = await lstat(path).catch(() => null);
+  if (metadata === null || metadata.isSymbolicLink()) return false;
+  if (metadata.isFile()) return true;
+  if (!metadata.isDirectory()) return false;
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    if (await containsStagedFile(join(path, entry.name))) return true;
+  }
+  return false;
 }
 
-async function repositoryEntryMetadata(
-  root: string,
-  parts: string[],
-): Promise<Stats | null> {
-  let entry = root;
-  for (const [index, part] of parts.entries()) {
-    entry = join(entry, part);
-    const metadata = await lstat(entry).catch(() => null);
-    if (metadata === null || metadata.isSymbolicLink()) return null;
-    if (index < parts.length - 1 && !metadata.isDirectory()) return null;
-    if (index === parts.length - 1) return metadata;
-  }
-  return null;
+function displayPath(value: string): string {
+  return JSON.stringify(value);
 }
 
 async function requireUnchangedDirectory(
@@ -1551,6 +1609,7 @@ function sanitizedGitEnvironment(repository?: string): NodeJS.ProcessEnv {
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_NO_LAZY_FETCH: "1",
+    GIT_LITERAL_PATHSPECS: "1",
     GIT_TERMINAL_PROMPT: "0",
     GIT_OPTIONAL_LOCKS: "0",
   };
@@ -1600,9 +1659,20 @@ async function stageInputFile(
   metadata: Stats,
   state: StagingState,
   signal: AbortSignal,
+  anchors: CopyAnchors,
+  rejectHardlinks: boolean,
 ): Promise<void> {
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  await copyRegularFile(source, destination, metadata, state, "input", signal);
+  await copyRegularFile(
+    source,
+    destination,
+    metadata,
+    state,
+    "input",
+    anchors,
+    signal,
+    rejectHardlinks,
+  );
 }
 
 async function copyRegularFile(
@@ -1611,7 +1681,9 @@ async function copyRegularFile(
   metadata: Stats,
   state: StagingState,
   kind: "input" | "output",
+  anchors: CopyAnchors,
   signal?: AbortSignal,
+  rejectHardlinks = false,
 ): Promise<void> {
   const input = kind === "input";
   state.entries += 1;
@@ -1638,18 +1710,26 @@ async function copyRegularFile(
         : "Agents SDK scan output contains an oversized file.",
     );
   }
-  const sourceHandle = await open(
-    source,
-    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
-  );
-  let output;
+  if (input && rejectHardlinks && metadata.nlink !== 1) {
+    fail(`Repository input has an unsafe hard link: ${displayPath(source)}`);
+  }
+  let sourceHandle: number | undefined;
+  let output: number | undefined;
   try {
-    const opened = await sourceHandle.stat();
+    sourceHandle = anchoredOpen(
+      anchors.source,
+      source,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      undefined,
+      kind,
+    );
+    const opened = fstatSync(sourceHandle);
     if (
       !opened.isFile() ||
       opened.dev !== metadata.dev ||
       opened.ino !== metadata.ino ||
-      opened.size !== metadata.size
+      opened.size !== metadata.size ||
+      (input && rejectHardlinks && opened.nlink !== 1)
     ) {
       fail(
         input
@@ -1657,19 +1737,22 @@ async function copyRegularFile(
           : "Agents SDK scan output changed during artifact handoff.",
       );
     }
-    output = await open(
+    output = anchoredOpen(
+      anchors.destination,
       destination,
       fsConstants.O_WRONLY |
         fsConstants.O_CREAT |
         fsConstants.O_EXCL |
         fsConstants.O_NOFOLLOW,
       input ? metadata.mode & 0o777 : 0o600,
+      kind,
     );
     const buffer = new Uint8Array(1024 * 1024);
     let offset = 0;
     while (offset < opened.size) {
       if (signal !== undefined) throwIfAborted(signal);
-      const { bytesRead } = await sourceHandle.read(
+      const bytesRead = readSync(
+        sourceHandle,
         buffer,
         0,
         Math.min(buffer.byteLength, opened.size - offset),
@@ -1684,7 +1767,8 @@ async function copyRegularFile(
       }
       let written = 0;
       while (written < bytesRead) {
-        const { bytesWritten } = await output.write(
+        const bytesWritten = writeSync(
+          output,
           buffer,
           written,
           bytesRead - written,
@@ -1701,7 +1785,7 @@ async function copyRegularFile(
       }
       offset += bytesRead;
     }
-    const final = await sourceHandle.stat();
+    const final = fstatSync(sourceHandle);
     if (
       final.dev !== opened.dev ||
       final.ino !== opened.ino ||
@@ -1714,16 +1798,10 @@ async function copyRegularFile(
           : "Agents SDK scan output changed during artifact handoff.",
       );
     }
-    if (input) await output.chmod(metadata.mode & 0o7777);
-  } catch (error) {
-    const created = output !== undefined;
-    await output?.close();
-    output = undefined;
-    if (created) await rm(destination, { force: true });
-    throw error;
+    if (input) fchmodSync(output, metadata.mode & 0o7777);
   } finally {
-    await output?.close();
-    await sourceHandle.close();
+    if (output !== undefined) closeSync(output);
+    if (sourceHandle !== undefined) closeSync(sourceHandle);
   }
 }
 
@@ -1734,13 +1812,16 @@ async function stageTree(
   options: {
     skip?: (name: string) => boolean;
     scopes?: readonly string[];
+    rejectHardlinks?: boolean;
   } = {},
   state: StagingState = { entries: 0, bytes: 0, files: 0 },
   prefix = "",
+  anchors?: CopyAnchors,
 ): Promise<void> {
   throwIfAborted(signal);
   await mkdir(destination, { recursive: true, mode: 0o700 });
-  const entries = await readdir(source, { withFileTypes: true });
+  const activeAnchors = anchors ?? copyAnchors(source, destination, "input");
+  const entries = anchoredReadDir(activeAnchors.source, source, "input");
   if (isBareGitDirectory(entries.map((entry) => entry.name))) {
     throw new InvalidTargetError(
       `Bare Git-like directory cannot be staged safely: ${displayPath(source)}`,
@@ -1757,7 +1838,12 @@ async function stageTree(
     }
     const from = join(source, entry.name);
     const to = join(destination, entry.name);
-    const metadata = await lstat(from);
+    const metadata = anchoredMetadata(activeAnchors.source, from, "input");
+    if (metadata === null) {
+      throw new InvalidTargetError(
+        `Repository input changed while staging: ${displayPath(from)}`,
+      );
+    }
     if (!metadata.isFile() && ++state.entries > MAX_INPUT_ENTRIES) {
       throw new InvalidTargetError(
         `Repository contains too many entries to stage safely: ${displayPath(source)}`,
@@ -1765,12 +1851,20 @@ async function stageTree(
     }
     if (metadata.isSymbolicLink()) continue;
     if (metadata.isDirectory()) {
-      await stageTree(from, to, signal, options, state, path);
+      await stageTree(from, to, signal, options, state, path, activeAnchors);
       continue;
     }
     if (!metadata.isFile()) continue;
     throwIfAborted(signal);
-    await stageInputFile(from, to, metadata, state, signal);
+    await stageInputFile(
+      from,
+      to,
+      metadata,
+      state,
+      signal,
+      activeAnchors,
+      options.rejectHardlinks === true,
+    );
   }
 }
 
@@ -1794,31 +1888,180 @@ function includeStagedPath(path: string, scopes: readonly string[]): boolean {
   );
 }
 
+function copyAnchors(
+  source: string,
+  destination: string,
+  kind: "input" | "output",
+): CopyAnchors {
+  return {
+    source: directoryAnchor(source, kind),
+    destination: directoryAnchor(destination, kind),
+  };
+}
+
+function directoryAnchor(
+  path: string,
+  kind: "input" | "output",
+): DirectoryAnchor {
+  try {
+    const metadata = lstatSync(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error("not a directory");
+    }
+    return { path, metadata };
+  } catch (error) {
+    throw anchoredFailure(
+      kind,
+      "Unable to bind a safe staging directory.",
+      error,
+    );
+  }
+}
+
+function withDirectoryAnchor<T>(
+  anchor: DirectoryAnchor,
+  directory: string,
+  kind: "input" | "output",
+  callback: () => T,
+): T {
+  const path = relative(anchor.path, directory);
+  if (isAbsolute(path) || path === ".." || path.startsWith(`..${sep}`)) {
+    throw anchoredFailure(kind, "Staging path escaped its directory boundary.");
+  }
+  const parts = path.length === 0 ? [] : path.split(sep);
+  const previous = process.cwd();
+  try {
+    const root = lstatSync(anchor.path);
+    if (
+      !root.isDirectory() ||
+      root.isSymbolicLink() ||
+      root.dev !== anchor.metadata.dev ||
+      root.ino !== anchor.metadata.ino
+    ) {
+      throw new Error("root changed");
+    }
+    process.chdir(anchor.path);
+    let opened = statSync(".");
+    if (opened.dev !== root.dev || opened.ino !== root.ino) {
+      throw new Error("root changed while opening");
+    }
+    for (const part of parts) {
+      if (part.length === 0 || part === "." || part === "..") {
+        throw new Error("invalid directory component");
+      }
+      const metadata = lstatSync(part);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error("unsafe directory component");
+      }
+      process.chdir(part);
+      opened = statSync(".");
+      if (opened.dev !== metadata.dev || opened.ino !== metadata.ino) {
+        throw new Error("directory changed while opening");
+      }
+    }
+    return callback();
+  } catch (error) {
+    if (
+      error instanceof InvalidTargetError ||
+      error instanceof OutputDirectoryError
+    ) {
+      throw error;
+    }
+    throw anchoredFailure(
+      kind,
+      "A staging directory changed or contained a symbolic link.",
+      error,
+    );
+  } finally {
+    process.chdir(previous);
+  }
+}
+
+function anchoredMetadata(
+  anchor: DirectoryAnchor,
+  path: string,
+  kind: "input" | "output",
+): Stats | null {
+  try {
+    if (path === anchor.path) {
+      return withDirectoryAnchor(anchor, path, kind, () => lstatSync("."));
+    }
+    return withDirectoryAnchor(anchor, dirname(path), kind, () =>
+      lstatSync(basename(path)),
+    );
+  } catch (error) {
+    const cause =
+      error instanceof InvalidTargetError ||
+      error instanceof OutputDirectoryError
+        ? error.cause
+        : error;
+    if (
+      typeof cause === "object" &&
+      cause !== null &&
+      "code" in cause &&
+      cause.code === "ENOENT"
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function anchoredReadDir(
+  anchor: DirectoryAnchor,
+  path: string,
+  kind: "input" | "output",
+): Dirent[] {
+  return withDirectoryAnchor(anchor, path, kind, () =>
+    readdirSync(".", { withFileTypes: true }),
+  );
+}
+
+function anchoredOpen(
+  anchor: DirectoryAnchor,
+  path: string,
+  flags: number,
+  mode: number | undefined,
+  kind: "input" | "output",
+): number {
+  return withDirectoryAnchor(anchor, dirname(path), kind, () =>
+    openSync(basename(path), flags, mode),
+  );
+}
+
+function anchoredMkdir(
+  anchor: DirectoryAnchor,
+  path: string,
+  mode: number,
+  kind: "input" | "output",
+): void {
+  withDirectoryAnchor(anchor, dirname(path), kind, () => {
+    mkdirSync(basename(path), { mode });
+  });
+}
+
+function anchoredFailure(
+  kind: "input" | "output",
+  message: string,
+  cause?: unknown,
+): InvalidTargetError | OutputDirectoryError {
+  return kind === "input"
+    ? new InvalidTargetError(
+        message,
+        cause === undefined ? undefined : { cause },
+      )
+    : new OutputDirectoryError(
+        message,
+        cause === undefined ? undefined : { cause },
+      );
+}
+
 async function copyStagedOutput(
   source: string,
   destination: string,
 ): Promise<void> {
   const state: StagingState = { entries: 0, bytes: 0, files: 0 };
-  const directories = new Map<string, Pick<Stats, "dev" | "ino">>();
-  const requireSafeParents = async (path: string): Promise<void> => {
-    let parent = dirname(path);
-    while (directories.has(parent)) {
-      const expected = directories.get(parent)!;
-      const metadata = await lstat(parent).catch(() => null);
-      if (
-        metadata === null ||
-        !metadata.isDirectory() ||
-        metadata.isSymbolicLink() ||
-        metadata.dev !== expected.dev ||
-        metadata.ino !== expected.ino
-      ) {
-        throw new OutputDirectoryError(
-          "Agents SDK scan output destination changed during artifact handoff.",
-        );
-      }
-      parent = dirname(parent);
-    }
-  };
+  const anchors = copyAnchors(source, destination, "output");
   const copy = async (
     from: string,
     to: string,
@@ -1829,17 +2072,21 @@ async function copyStagedOutput(
         "Agents SDK scan output exceeds the entry limit.",
       );
     }
-    const metadata = await lstat(from);
+    const metadata = anchoredMetadata(anchors.source, from, "output");
+    if (metadata === null) {
+      throw new OutputDirectoryError(
+        "Agents SDK scan output changed during artifact handoff.",
+      );
+    }
     if (metadata.isDirectory()) {
       if (++state.entries > MAX_OUTPUT_ENTRIES) {
         throw new OutputDirectoryError(
           "Agents SDK scan output exceeds the entry limit.",
         );
       }
-      await requireSafeParents(to);
       if (depth > 0) {
         try {
-          await mkdir(to, { mode: 0o700 });
+          anchoredMkdir(anchors.destination, to, 0o700, "output");
         } catch (error) {
           throw new OutputDirectoryError(
             "Agents SDK scan output destination contains a non-directory entry.",
@@ -1847,7 +2094,11 @@ async function copyStagedOutput(
           );
         }
       }
-      const destinationMetadata = await lstat(to).catch(() => null);
+      const destinationMetadata = anchoredMetadata(
+        anchors.destination,
+        to,
+        "output",
+      );
       if (
         destinationMetadata === null ||
         !destinationMetadata.isDirectory() ||
@@ -1857,8 +2108,7 @@ async function copyStagedOutput(
           "Agents SDK scan output destination contains a non-directory entry.",
         );
       }
-      directories.set(to, destinationMetadata);
-      for (const entry of await readdir(from, { withFileTypes: true })) {
+      for (const entry of anchoredReadDir(anchors.source, from, "output")) {
         await copy(join(from, entry.name), join(to, entry.name), depth + 1);
       }
       return;
@@ -1868,8 +2118,7 @@ async function copyStagedOutput(
         "Agents SDK scan output contains a non-regular file.",
       );
     }
-    await requireSafeParents(to);
-    await copyRegularFile(from, to, metadata, state, "output");
+    await copyRegularFile(from, to, metadata, state, "output", anchors);
   };
   await copy(source, destination, 0);
 }
@@ -1992,10 +2241,35 @@ async function dockerWorkspaceRoot(
     configured ?? join(homedir(), ".cache", "codex-security", "sandboxes"),
   );
   requireOutsideRepository(protectedRoot, candidate);
-  await mkdir(candidate, { recursive: true, mode: 0o700 });
-  const root = await realpath(candidate);
+  const safeCandidate = await resolveCreatablePath(candidate);
+  requireOutsideRepository(protectedRoot, safeCandidate);
+  await mkdir(safeCandidate, { recursive: true, mode: 0o700 });
+  const root = await realpath(safeCandidate);
   requireOutsideRepository(protectedRoot, root);
   return root;
+}
+
+async function resolveCreatablePath(candidate: string): Promise<string> {
+  const missing: string[] = [];
+  let current = candidate;
+  while (true) {
+    try {
+      return resolve(await realpath(current), ...missing.reverse());
+    } catch (error) {
+      if (
+        typeof error !== "object" ||
+        error === null ||
+        !("code" in error) ||
+        (error.code !== "ENOENT" && error.code !== "ENOTDIR")
+      ) {
+        throw error;
+      }
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
 }
 
 function environmentApiKey(environment: ProcessEnvironment): string | null {

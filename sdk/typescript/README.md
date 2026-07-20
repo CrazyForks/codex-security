@@ -45,7 +45,7 @@ repository. When SARIF is produced, it is written to
 The default Agents engine stages the requested tracked, regular-file scope
 and the plugin into the SDK Docker workspace, mounts them read-only, and
 disables network access before tool execution. Local edits to tracked files are
-included; untracked/ignored files, submodule contents, symlinks, unstaged
+included; untracked/ignored files, submodule contents, symlinks, hard-linked source files, unstaged
 deletions, sparse-checkout paths absent from the worktree, Git credentials/history,
 and unrelated plugin-checkout files are excluded. Path scans also include
 applicable ancestor `SECURITY.md` files and exclude unrelated source files.

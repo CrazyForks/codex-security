@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   chmod,
   cp,
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -430,6 +431,49 @@ describe("Agents SDK thin scan adapter", () => {
         await expect(
           client.run("/", { outputDir: join(root, "scan") }),
         ).rejects.toThrow("must be outside the repository");
+        expect(reached).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "does not create a Docker workspace through a symlink into the repository",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const outside = join(root, "outside");
+      const controlled = join(repository, "attacker-controlled");
+      await mkdir(repository);
+      await mkdir(outside);
+      await mkdir(controlled);
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      await symlink(controlled, join(outside, "work-link"), "dir");
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: join(
+              outside,
+              "work-link",
+              "new-cache",
+              "nested",
+            ),
+          },
+          runAgents: async () => {
+            reached = true;
+            throw new Error("must-not-run");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: join(root, "scan") }),
+        ).rejects.toThrow("must be outside the repository");
+        expect(existsSync(join(controlled, "new-cache"))).toBe(false);
         expect(reached).toBe(false);
       } finally {
         await client.close();
@@ -876,10 +920,244 @@ describe("Agents SDK thin scan adapter", () => {
         }),
       ).rejects.toThrow("must contain tracked regular files");
       expect(reached).toBe(false);
+      await mkdir(join(repository, "private-only"));
+      await writeFile(
+        join(repository, "private-only", ".env"),
+        "SYNTHETIC_SOURCE_SECRET\n",
+      );
+      await writeFile(join(repository, "SECURITY.md"), "root policy\n");
+      await expect(
+        client.run(repository, {
+          target: ["private-only"],
+          outputDir: join(root, "empty-scope-scan"),
+        }),
+      ).rejects.toThrow("must contain tracked regular files");
+      expect(reached).toBe(false);
     } finally {
       await client.close();
     }
   });
+
+  test("treats Git path scopes containing pathspec metacharacters literally", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const workspace = join(root, "workspaces");
+    await initializeGitRepository(repository);
+    await mkdir(join(repository, "src"));
+    await mkdir(join(repository, ":(glob)**"));
+    await writeFile(join(repository, "SECURITY.md"), "root policy\n");
+    await writeFile(
+      join(repository, "src", "a*b.ts"),
+      "export const star = true;\n",
+    );
+    await writeFile(
+      join(repository, "src", "axb.ts"),
+      "SYNTHETIC_OUT_OF_SCOPE_SECRET\n",
+    );
+    await writeFile(
+      join(repository, "src", "[api].ts"),
+      "export const bracket = true;\n",
+    );
+    await writeFile(
+      join(repository, "src", "a.ts"),
+      "SYNTHETIC_OUT_OF_SCOPE_SECRET\n",
+    );
+    await writeFile(
+      join(repository, ":(glob)**", "app.ts"),
+      "export const glob = true;\n",
+    );
+    await writeFile(
+      join(repository, "private.ts"),
+      "SYNTHETIC_OUT_OF_SCOPE_SECRET\n",
+    );
+    git(repository, ["add", "."]);
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          for (const path of [
+            "SECURITY.md",
+            "src/a*b.ts",
+            "src/[api].ts",
+            ":(glob)**/app.ts",
+          ]) {
+            expect(existsSync(join(value.repository, path))).toBe(true);
+          }
+          for (const path of ["src/axb.ts", "src/a.ts", "private.ts"]) {
+            expect(existsSync(join(value.repository, path))).toBe(false);
+          }
+          throw new Error("stop after literal staging inspection");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          target: ["src/a*b.ts", "src/[api].ts", ":(glob)**"],
+          outputDir: join(root, "scan"),
+        }),
+      ).rejects.toThrow("stop after literal staging inspection");
+      expect(reached).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects externally hard-linked tracked inputs before starting the runtime",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const workspace = join(root, "workspaces");
+      const outside = join(root, "outside-secret");
+      await initializeGitRepository(repository);
+      await writeFile(
+        join(repository, "source.ts"),
+        "export const safe = true;\n",
+      );
+      git(repository, ["add", "."]);
+      await writeFile(outside, "SYNTHETIC_OUTSIDE_SECRET\n");
+      await rm(join(repository, "source.ts"));
+      await link(outside, join(repository, "source.ts"));
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+          },
+          runAgents: async () => {
+            reached = true;
+            throw new Error("must-not-run");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: join(root, "scan") }),
+        ).rejects.toThrow("Repository input has an unsafe hard link");
+        expect(reached).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "keeps source reads and artifact writes anchored when checked directories are swapped",
+    async () => {
+      const root = await temporaryDirectory();
+      const gitRepository = join(root, "git-repository");
+      const unversioned = join(root, "unversioned");
+      const outputRepository = join(root, "output-repository");
+      const outsideGit = join(root, "outside-git");
+      const outsideTree = join(root, "outside-tree");
+      const protectedOutput = join(root, "protected-output");
+      const workspace = join(root, "workspaces");
+      const output = join(root, "output");
+      await initializeGitRepository(gitRepository);
+      for (const path of [
+        join(gitRepository, "victim"),
+        join(unversioned, "victim"),
+        outputRepository,
+        outsideGit,
+        outsideTree,
+        protectedOutput,
+      ]) {
+        await mkdir(path, { recursive: true });
+      }
+      await writeFile(join(gitRepository, "victim", "source.ts"), "SAFE_GIT\n");
+      git(gitRepository, ["add", "."]);
+      await writeFile(join(unversioned, "victim", "source.ts"), "SAFE_TREE\n");
+      await writeFile(join(outputRepository, "app.ts"), "SAFE_OUTPUT\n");
+      await writeFile(
+        join(outsideGit, "source.ts"),
+        "SYNTHETIC_OUTSIDE_SECRET\n",
+      );
+      await writeFile(
+        join(outsideTree, "source.ts"),
+        "SYNTHETIC_OUTSIDE_SECRET\n",
+      );
+      const script = `
+        import { mock } from "bun:test";
+        import * as fs from "node:fs";
+        import { mkdir, writeFile } from "node:fs/promises";
+        import { join } from "node:path";
+        const [gitRepo, treeRepo, outputRepo, outsideGit, outsideTree, protectedOutput, workspace, output, plugin, agents] = process.argv.slice(1);
+        const originalLstat = fs.lstatSync;
+        const swaps = new Map([[gitRepo, outsideGit], [treeRepo, outsideTree], [output, protectedOutput]]);
+        const swapped = new Set();
+        mock.module("node:fs", () => ({
+          ...fs,
+          lstatSync(path, ...args) {
+            const metadata = originalLstat(path, ...args);
+            const cwd = process.cwd();
+            const name = cwd === output ? "artifacts" : "victim";
+            if (path === name && swaps.has(cwd) && !swapped.has(cwd)) {
+              swapped.add(cwd);
+              fs.renameSync(join(cwd, name), join(cwd, name + "-original"));
+              fs.symlinkSync(swaps.get(cwd), join(cwd, name), "dir");
+            }
+            return metadata;
+          },
+        }));
+        const { AgentsSecurity } = await import(agents);
+        let reached = 0;
+        const inputClient = new AgentsSecurity({ pluginPath: plugin }, {
+          environment: { OPENAI_API_KEY: "synthetic-key", CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace },
+          runAgents: async () => { reached += 1; throw new Error("must-not-run"); },
+        });
+        const failures = [];
+        for (const [index, repo] of [gitRepo, treeRepo].entries()) {
+          try { await inputClient.run(repo, { outputDir: join(workspace, "input-" + index) }); } catch (error) { failures.push(error.message); }
+        }
+        await inputClient.close();
+        const outputClient = new AgentsSecurity({ pluginPath: plugin }, {
+          environment: { OPENAI_API_KEY: "synthetic-key", CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace },
+          runAgents: async (request) => {
+            await mkdir(join(request.scanDir, "artifacts"));
+            await writeFile(join(request.scanDir, "artifacts", "payload.txt"), "MODEL_CONTROLLED_PAYLOAD\\n");
+            return { finalResponse: "complete" };
+          },
+        });
+        try { await outputClient.run(outputRepo, { outputDir: output }); } catch (error) { failures.push(error.message); }
+        await outputClient.close();
+        console.log(JSON.stringify({ reached, swapped: swapped.size, failures: failures.length, escaped: fs.existsSync(join(protectedOutput, "payload.txt")) }));
+      `;
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          script,
+          gitRepository,
+          unversioned,
+          outputRepository,
+          outsideGit,
+          outsideTree,
+          protectedOutput,
+          workspace,
+          output,
+          PLUGIN_ROOT,
+          join(import.meta.dir, "../src/agents.ts"),
+        ],
+        { encoding: "utf8", env: { ...process.env, TMPDIR: "/private/tmp" } },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout.trim())).toEqual({
+        reached: 0,
+        swapped: 3,
+        failures: 3,
+        escaped: false,
+      });
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "sanitizes ambient Git state and validates only the metadata needed for tracked staging",
@@ -1660,7 +1938,7 @@ describe("Agents SDK thin scan adapter", () => {
     try {
       await expect(
         client.run(repository, { outputDir: output }),
-      ).rejects.toMatchObject({ code: "EEXIST" });
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
       expect(await readFile(join(output, "receipt.txt"), "utf8")).toBe(
         "user-owned\n",
       );
@@ -1675,7 +1953,9 @@ describe("Agents SDK thin scan adapter", () => {
       const root = await temporaryDirectory();
       const value = request(root);
       const bin = join(root, "bin");
+      const badBin = join(root, "bad-bin");
       const repositoryBin = join(value.repository, "node_modules", ".bin");
+      const repositoryTmp = join(value.repository, "tmp");
       const log = join(root, "docker-calls");
       await mkdir(value.repository);
       await mkdir(value.scanDir);
@@ -1690,7 +1970,12 @@ describe("Agents SDK thin scan adapter", () => {
         `${JSON.stringify({ targetId: value.repositoryIdentity })}\n`,
       );
       await mkdir(bin);
+      await mkdir(badBin);
+      await writeFile(join(badBin, "docker"), "not executable\n", {
+        mode: 0o644,
+      });
       await mkdir(repositoryBin, { recursive: true });
+      await mkdir(repositoryTmp);
       await writeFile(
         join(value.repository, "app.ts"),
         "export const ok = true;\n",
@@ -1721,10 +2006,12 @@ describe("Agents SDK thin scan adapter", () => {
       const previousPath = process.env["PATH"];
       const previousHostKey = process.env["OPENAI_API_KEY"];
       const previousCodexKey = process.env["CODEX_API_KEY"];
+      const previousTmp = process.env["TMPDIR"];
       process.env["PATH"] =
-        `${repositoryBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
+        `${repositoryBin}:${badBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
       process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
       process.env["CODEX_API_KEY"] = "SYNTHETIC_CODEX_HOST_KEY";
+      process.env["TMPDIR"] = repositoryTmp;
       const tracingWasDisabled =
         getGlobalTraceProvider().createTrace({ name: "before scan" }) instanceof
         NoopTrace;
@@ -1756,6 +2043,12 @@ describe("Agents SDK thin scan adapter", () => {
           expect(process.env["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"]).toBe("1");
           expect(process.env["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"]).toBe("1");
           expect(process.env["OPENAI_LOG"]).toBe("warn");
+          expect(process.env["PATH"]?.split(":")[0]).toStartWith(
+            join(root, "codex-security-docker-"),
+          );
+          expect(process.env["PATH"]?.split(":")[0]).not.toStartWith(
+            repositoryTmp,
+          );
           expect(createDebug.enabled("openai-agents:core")).toBe(false);
           requests.push(modelRequest);
           response += 1;
@@ -1940,6 +2233,8 @@ describe("Agents SDK thin scan adapter", () => {
         else process.env["OPENAI_API_KEY"] = previousHostKey;
         if (previousCodexKey === undefined) delete process.env["CODEX_API_KEY"];
         else process.env["CODEX_API_KEY"] = previousCodexKey;
+        if (previousTmp === undefined) delete process.env["TMPDIR"];
+        else process.env["TMPDIR"] = previousTmp;
       }
     },
   );
@@ -2272,6 +2567,158 @@ describe("Agents SDK thin scan adapter", () => {
         else
           process.env["CODEX_SECURITY_DOCKER_WORKSPACE_ROOT"] =
             previousWorkspace;
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "revalidates the Docker executable against every overlapping target",
+    async () => {
+      const root = await temporaryDirectory();
+      const safeBin = join(root, "safe-bin");
+      const first = request(join(root, "first"));
+      const second = request(join(root, "second"));
+      const targetBin = join(second.repository, "tools");
+      const log = join(root, "docker-log");
+      for (const path of [
+        first.repository,
+        first.scanDir,
+        first.sandboxBaseDir,
+        first.sandboxInputRoot,
+        second.repository,
+        second.scanDir,
+        second.sandboxBaseDir,
+        second.sandboxInputRoot,
+        safeBin,
+        targetBin,
+      ]) {
+        await mkdir(path, { recursive: true });
+      }
+      for (const value of [first, second]) {
+        await writeFile(
+          join(value.repository, "app.ts"),
+          "export const app = true;\n",
+        );
+        await writeFile(
+          join(value.sandboxInputRoot, "target-paths.json"),
+          '["."]\n',
+        );
+        await writeFile(
+          join(value.sandboxInputRoot, "repository-identity.json"),
+          `${JSON.stringify({ targetId: value.repositoryIdentity })}\n`,
+        );
+      }
+      const dockerScript = (label: string): string =>
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' \"${label} \${PHASE-first} \${1-} openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent}\" >> '${log}'`,
+          'case "${1-}" in run) printf "%s\\n" synthetic-container;; inspect) printf "%s\\n" "{}";; esac',
+          "exit 0",
+          "",
+        ].join("\n");
+      await writeFile(join(targetBin, "docker"), dockerScript("TARGET"), {
+        mode: 0o755,
+      });
+      await writeFile(join(safeBin, "docker"), dockerScript("SAFE"), {
+        mode: 0o755,
+      });
+      const previousPath = process.env["PATH"];
+      const previousOpenAI = process.env["OPENAI_API_KEY"];
+      const previousCodex = process.env["CODEX_API_KEY"];
+      const previousPhase = process.env["PHASE"];
+      process.env["PATH"] =
+        `${targetBin}:${safeBin}:${previousPath ?? "/usr/bin:/bin"}`;
+      process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
+      process.env["CODEX_API_KEY"] = "SYNTHETIC_CODEX_HOST_KEY";
+      let enter!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const output = (id: string) => [
+        {
+          id,
+          type: "message" as const,
+          role: "assistant" as const,
+          status: "completed" as const,
+          content: [{ type: "output_text" as const, text: "done" }],
+        },
+      ];
+      const blocking: Model = {
+        async getResponse(): Promise<ModelResponse> {
+          return { usage: new Usage(), output: [] };
+        },
+        async *getStreamedResponse(): AsyncIterable<StreamEvent> {
+          enter();
+          await released;
+          yield { type: "response_started" };
+          yield {
+            type: "response_done",
+            response: {
+              id: "first",
+              usage: {
+                requests: 1,
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              },
+              output: output("first"),
+            },
+          };
+        },
+      };
+      const complete: Model = {
+        async getResponse(): Promise<ModelResponse> {
+          return { usage: new Usage(), output: [] };
+        },
+        async *getStreamedResponse(): AsyncIterable<StreamEvent> {
+          yield { type: "response_started" };
+          yield {
+            type: "response_done",
+            response: {
+              id: "second",
+              usage: {
+                requests: 1,
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              },
+              output: output("second"),
+            },
+          };
+        },
+      };
+      const firstRun = runAgentsScan(first, {
+        modelProvider: { getModel: () => blocking },
+      });
+      try {
+        await entered;
+        process.env["PHASE"] = "second";
+        await runAgentsScan(second, {
+          modelProvider: { getModel: () => complete },
+        });
+        release();
+        await firstRun;
+        const calls = await readFile(log, "utf8");
+        expect(calls).toContain("TARGET first run");
+        expect(calls).toContain("SAFE second run");
+        expect(calls).not.toContain("TARGET second");
+        expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
+        expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");
+      } finally {
+        release();
+        await firstRun.catch(() => undefined);
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
+        if (previousOpenAI === undefined) delete process.env["OPENAI_API_KEY"];
+        else process.env["OPENAI_API_KEY"] = previousOpenAI;
+        if (previousCodex === undefined) delete process.env["CODEX_API_KEY"];
+        else process.env["CODEX_API_KEY"] = previousCodex;
+        if (previousPhase === undefined) delete process.env["PHASE"];
+        else process.env["PHASE"] = previousPhase;
       }
     },
   );
