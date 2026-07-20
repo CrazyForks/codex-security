@@ -1069,6 +1069,29 @@ describe("Agents SDK thin scan adapter", () => {
       "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\nusers:\n- name: admin\n  user:\n    auth-provider:\n      name: oidc\n      config:\n        id-token: SYNTHETIC_KUBE_ID_TOKEN\n        refresh-token: SYNTHETIC_KUBE_REFRESH_TOKEN\n",
     );
     await writeFile(
+      join(repository, "deploy", "cluster-inline.yaml"),
+      "apiVersion: v1\nkind: Config\nclusters: [{name: prod, cluster: {server: 'https://cluster.invalid'}}]\nusers: [{name: admin, user: {token: SYNTHETIC_KUBE_INLINE_TOKEN, client-key-data: SYNTHETIC_KUBE_INLINE_KEY}}]\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "cluster-export.json"),
+      `${JSON.stringify({
+        apiVersion: "v1",
+        kind: "Config",
+        clusters: [
+          { name: "prod", cluster: { server: "https://cluster.invalid" } },
+        ],
+        users: [
+          {
+            name: "admin",
+            user: {
+              token: "SYNTHETIC_KUBE_JSON_TOKEN",
+              "client-key-data": "SYNTHETIC_KUBE_JSON_KEY",
+            },
+          },
+        ],
+      })}\n`,
+    );
+    await writeFile(
       join(repository, "deploy", "azure-sp.json"),
       `${JSON.stringify({
         appId: "11111111-1111-1111-1111-111111111111",
@@ -1234,6 +1257,8 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/azure-token-cache.json",
             "deploy/cluster-export.yaml",
             "deploy/exported-kube.yaml",
+            "deploy/cluster-inline.yaml",
+            "deploy/cluster-export.json",
             "deploy/azure-sp.json",
             "deploy/new-user-credentials.csv",
             "deploy/deploy_rsa",

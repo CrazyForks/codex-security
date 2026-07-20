@@ -324,7 +324,7 @@ function isCredentialDocument(source, expected, name) {
         /^\s*kind\s*:\s*config\s*$/imu.test(contents) &&
         /^\s*clusters\s*:/imu.test(contents) &&
         /^\s*users\s*:/imu.test(contents) &&
-        /^\s*(?:token|client-key-data|id-token|refresh-token|access-token)\s*:/imu.test(
+        /(?:^|[\s{,])(?:token|client-key-data|id-token|refresh-token|access-token)\s*:/imu.test(
           contents,
         )
       );
@@ -332,6 +332,8 @@ function isCredentialDocument(source, expected, name) {
     try {
       const pending = [JSON.parse(contents)];
       let entries = 0;
+      let kubeconfig = false;
+      let kubeCredential = false;
       while (pending.length > 0) {
         const value = pending.pop();
         if (value === null || typeof value !== "object") continue;
@@ -360,6 +362,16 @@ function isCredentialDocument(source, expected, name) {
           }
           if (entry !== null && typeof entry === "object") pending.push(entry);
         }
+        kubeconfig ||= ["apiversion", "kind", "clusters", "users"].every(
+          (key) => keys.has(key),
+        );
+        kubeCredential ||= [
+          "token",
+          "clientkeydata",
+          "idtoken",
+          "refreshtoken",
+          "accesstoken",
+        ].some((key) => keys.has(key));
         if (
           ["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
             (key) => keys.has(key),
@@ -389,7 +401,7 @@ function isCredentialDocument(source, expected, name) {
           return true;
         }
       }
-      return false;
+      return kubeconfig && kubeCredential;
     } catch {
       return false;
     }
