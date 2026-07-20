@@ -31,7 +31,12 @@ mkdirSync(job.destination, { recursive: true, mode: 0o700 });
 const destinationRoot = anchor(job.destination);
 
 try {
-  if (input) requireSafeSourceRoot(job.source, job.kind);
+  if (input)
+    requireSafeSourceRoot(
+      job.source,
+      job.kind,
+      job.kind === "plugin" && job.rejectHardlinks === false,
+    );
   if (job.kind === "tracked") {
     const seen = new Set();
     const directoryEntries = new Map();
@@ -358,18 +363,31 @@ function isBareGitDirectory(entries) {
   );
 }
 
-function requireSafeSourceRoot(source, kind) {
+function requireSafeSourceRoot(source, kind, bundledPlugin) {
   let directory = source;
   while (true) {
-    if (skip(basename(directory), kind)) {
+    if (
+      skip(basename(directory), kind) &&
+      !(bundledPlugin && directory !== source)
+    ) {
       fail(
         `Credential directory cannot be staged safely: ${JSON.stringify(source)}`,
       );
     }
     if (directory !== source) {
-      const names = readdirSync(directory, { withFileTypes: true }).map(
-        (entry) => entry.name,
-      );
+      let names;
+      try {
+        names = readdirSync(directory, { withFileTypes: true }).map(
+          (entry) => entry.name,
+        );
+      } catch (error) {
+        if (!error || !["EACCES", "EPERM"].includes(error.code)) throw error;
+        names = ["HEAD", "config", "objects", "refs", ".git"].filter(
+          (name) =>
+            lstatSync(join(directory, name), { throwIfNoEntry: false }) !==
+            undefined,
+        );
+      }
       if (
         isBareGitDirectory(names) &&
         !names.some((name) => gitCaseFold(name) === ".git")

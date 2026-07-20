@@ -1633,7 +1633,7 @@ describe("Agents SDK thin scan adapter", () => {
     "stages content-addressable bundled-plugin hard links",
     async () => {
       const root = await temporaryDirectory();
-      const source = join(root, "plugin");
+      const source = join(root, ".npm", "_npx", "plugin");
       const destination = join(root, "destination");
       const storeFile = join(root, "store-file");
       await mkdir(join(source, "scripts"), { recursive: true });
@@ -1656,6 +1656,60 @@ describe("Agents SDK thin scan adapter", () => {
       );
       expect(staged.status, staged.stderr).toBe(0);
       expect(existsSync(join(destination, "scripts", "bundled.py"))).toBe(true);
+      const custom = spawnSync(
+        process.execPath,
+        [join(import.meta.dir, "../bin/stage-scan.mjs")],
+        {
+          encoding: "utf8",
+          input: JSON.stringify({
+            kind: "plugin",
+            source,
+            destination: join(root, "custom-destination"),
+            scopes: ["scripts"],
+            rejectHardlinks: true,
+            state: { entries: 0, bytes: 0, files: 0 },
+          }),
+        },
+      );
+      expect(custom.status).toBe(1);
+      expect(custom.stderr).toContain(
+        "Credential directory cannot be staged safely",
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "stages a readable repository below an execute-only parent",
+    async () => {
+      const root = await temporaryDirectory();
+      const parent = join(root, "execute-only");
+      const source = join(parent, "repository");
+      const destination = join(root, "destination");
+      await mkdir(join(source, "src"), { recursive: true });
+      await writeFile(
+        join(source, "src", "app.ts"),
+        "export const app = true;\n",
+      );
+      await chmod(parent, 0o111);
+      try {
+        const staged = spawnSync(
+          process.execPath,
+          [join(import.meta.dir, "../bin/stage-scan.mjs")],
+          {
+            encoding: "utf8",
+            input: JSON.stringify({
+              kind: "tree",
+              source,
+              destination,
+              state: { entries: 0, bytes: 0, files: 0 },
+            }),
+          },
+        );
+        expect(staged.status, staged.stderr).toBe(0);
+        expect(existsSync(join(destination, "src", "app.ts"))).toBe(true);
+      } finally {
+        await chmod(parent, 0o700);
+      }
     },
   );
 
