@@ -1002,6 +1002,20 @@ describe("Agents SDK thin scan adapter", () => {
       })}\n`,
     );
     await writeFile(
+      join(repository, "deploy", "aws-assume-role.json"),
+      `${JSON.stringify({
+        Credentials: {
+          AccessKeyId: "ASIA_SYNTHETIC",
+          SecretAccessKey: "SYNTHETIC_AWS_STS_SECRET",
+          SessionToken: "SYNTHETIC_AWS_STS_SESSION",
+          Expiration: "2026-07-21T00:00:00Z",
+        },
+        AssumedRoleUser: {
+          Arn: "arn:aws:sts::123:assumed-role/demo/test",
+        },
+      })}\n`,
+    );
+    await writeFile(
       join(repository, "deploy", "azure-prod.json"),
       `${JSON.stringify({
         clientId: "client",
@@ -1152,6 +1166,7 @@ describe("Agents SDK thin scan adapter", () => {
             "config.json",
             "deploy/docker-prod.json",
             "deploy/aws-export.json",
+            "deploy/aws-assume-role.json",
             "deploy/azure-prod.json",
             "my-project-ab12cd34ef56.json",
             "credentials.json",

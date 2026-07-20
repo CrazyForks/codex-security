@@ -318,18 +318,19 @@ function isCredentialJson(source, expected) {
       fail(`Repository input changed while staging: ${JSON.stringify(source)}`);
     }
     try {
-      const value = JSON.parse(contents);
-      const keys = new Set(
-        value !== null && typeof value === "object"
-          ? Object.keys(value).map((key) => key.toLowerCase())
-          : [],
-      );
-      return (
-        value !== null &&
-        typeof value === "object" &&
-        (["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
-          (key) => keys.has(key),
-        ) ||
+      const pending = [JSON.parse(contents)];
+      let entries = 0;
+      while (pending.length > 0) {
+        const value = pending.pop();
+        if (value === null || typeof value !== "object") continue;
+        const fields = Object.entries(value);
+        entries += fields.length;
+        if (entries > MAX_INPUT_ENTRIES) return true;
+        const keys = new Set(fields.map(([key]) => key.toLowerCase()));
+        if (
+          ["auths", "credsstore", "credhelpers", "proxies", "httpheaders"].some(
+            (key) => keys.has(key),
+          ) ||
           (keys.has("accesskeyid") &&
             (keys.has("secretaccesskey") || keys.has("sessiontoken"))) ||
           (keys.has("clientid") &&
@@ -337,14 +338,19 @@ function isCredentialJson(source, expected) {
             ["tenantid", "subscriptionid", "activedirectoryendpointurl"].some(
               (key) => keys.has(key),
             )) ||
-          (Object.entries(value).some(
+          (fields.some(
             ([key, entry]) =>
               key.toLowerCase() === "type" &&
               typeof entry === "string" &&
               entry.toLowerCase() === "service_account",
           ) &&
-            keys.has("private_key")))
-      );
+            keys.has("private_key"))
+        ) {
+          return true;
+        }
+        for (const [, entry] of fields) pending.push(entry);
+      }
+      return false;
     } catch {
       return false;
     }
