@@ -185,7 +185,8 @@ function copyFile(source, destination, expected) {
   const name = gitCaseFold(basename(source));
   if (
     input &&
-    ((name.endsWith(".json") && isCredentialJson(source, expected)) ||
+    (((name.endsWith(".json") || /\.ya?ml$/u.test(name)) &&
+      isCredentialDocument(source, expected, name)) ||
       (name === "config" &&
         ["kube", "kubernetes"].includes(
           gitCaseFold(basename(dirname(source))),
@@ -289,7 +290,7 @@ function copyFile(source, destination, expected) {
   }
 }
 
-function isCredentialJson(source, expected) {
+function isCredentialDocument(source, expected, name) {
   if (expected.size > MAX_INPUT_FILE_BYTES) return false;
   let handle;
   try {
@@ -316,6 +317,15 @@ function isCredentialJson(source, expected) {
       final.mtimeMs !== opened.mtimeMs
     ) {
       fail(`Repository input changed while staging: ${JSON.stringify(source)}`);
+    }
+    if (/\.ya?ml$/u.test(name)) {
+      return (
+        /^\s*apiversion\s*:\s*v1\s*$/imu.test(contents) &&
+        /^\s*kind\s*:\s*config\s*$/imu.test(contents) &&
+        /^\s*clusters\s*:/imu.test(contents) &&
+        /^\s*users\s*:/imu.test(contents) &&
+        /^\s*(?:token|client-key-data)\s*:/imu.test(contents)
+      );
     }
     try {
       const pending = [JSON.parse(contents)];
@@ -354,6 +364,10 @@ function isCredentialJson(source, expected) {
           ) ||
           (keys.has("accesskeyid") &&
             (keys.has("secretaccesskey") || keys.has("sessiontoken"))) ||
+          ((keys.has("accesstoken") || keys.has("refreshtoken")) &&
+            ["tokentype", "expiresin", "expireson", "tenant"].some((key) =>
+              keys.has(key),
+            )) ||
           (keys.has("clientid") &&
             keys.has("clientsecret") &&
             [
@@ -765,10 +779,12 @@ function skip(name, kind) {
     /^(?:credentials|service[-_]account(?:[-_].+)?|client[-_]secret(?:[-_].+)?)\.json$/u.test(
       lower,
     ) ||
+    /credentials?[^/]*\.csv$/u.test(lower) ||
     /firebase-adminsdk[-_].*\.json$/u.test(lower) ||
     /^kube[-_]?config(?:[._-].+)?$/u.test(lower) ||
     /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     /^ssh_host_(?:rsa|dsa|ecdsa|ed25519)_key(?:$|[._-])/u.test(lower) ||
+    /(?:^|[._-])(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||
     lower.endsWith(".key") ||
     lower.endsWith(".ppk") ||

@@ -1040,6 +1040,38 @@ describe("Agents SDK thin scan adapter", () => {
       join(repository, "deploy", "large-array.json"),
       `[${"0,".repeat(2_000_000)}0]\n`,
     );
+    await writeFile(
+      join(repository, "deploy", "oauth-token.json"),
+      `${JSON.stringify({
+        access_token: "SYNTHETIC_OAUTH_ACCESS",
+        refresh_token: "SYNTHETIC_OAUTH_REFRESH",
+        token_type: "Bearer",
+        expires_in: 3600,
+      })}\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "azure-token-cache.json"),
+      `${JSON.stringify([
+        {
+          accessToken: "SYNTHETIC_AZURE_ACCESS",
+          refreshToken: "SYNTHETIC_AZURE_REFRESH",
+          tenant: "demo",
+          expiresOn: "2026-07-21",
+        },
+      ])}\n`,
+    );
+    await writeFile(
+      join(repository, "deploy", "cluster-export.yaml"),
+      "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\nusers:\n- name: admin\n  user:\n    token: SYNTHETIC_KUBE_BEARER\n    client-key-data: SYNTHETIC_KUBE_CLIENT_KEY\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "new-user-credentials.csv"),
+      "User name,Password,Access key ID,Secret access key,Console login link\nalice,SYNTHETIC_AWS_PASSWORD,AKIASYNTHETIC,SYNTHETIC_AWS_SECRET,https://console.aws.amazon.com/\n",
+    );
+    await writeFile(
+      join(repository, "deploy", "deploy_rsa"),
+      "SYNTHETIC_OPENSSH_PRIVATE_KEY\n",
+    );
     await mkdir(join(repository, "deploy", "kube"), { recursive: true });
     await writeFile(
       join(repository, "deploy", "kube", "config"),
@@ -1185,6 +1217,11 @@ describe("Agents SDK thin scan adapter", () => {
             "deploy/azure-prod.json",
             "deploy/oauth-client.json",
             "deploy/large-array.json",
+            "deploy/oauth-token.json",
+            "deploy/azure-token-cache.json",
+            "deploy/cluster-export.yaml",
+            "deploy/new-user-credentials.csv",
+            "deploy/deploy_rsa",
             "my-project-ab12cd34ef56.json",
             "credentials.json",
             "service-account.json",
