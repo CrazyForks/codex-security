@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   accessSync,
   constants as fsConstants,
+  lstatSync,
   mkdtempSync,
   readdirSync,
   realpathSync,
@@ -103,6 +104,7 @@ const MAX_GIT_INDEX_RECORD_BYTES = 64 * 1024;
 const MAX_GIT_PATHSPEC_BYTES = 64 * 1024;
 const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
 const MAX_GIT_POINTER_BYTES = 64 * 1024;
+const MAX_DOCKER_CONFIG_ENTRIES = 100_000;
 const HOST_PTY_ENV = [
   "OPENAI_AGENTS_PYTHON",
   "PYTHONPATH",
@@ -828,7 +830,11 @@ function requireSafeDockerConfig(): void {
       ? configured
       : join(process.env["HOME"] ?? homedir(), ".docker"),
   );
-  for (let current of [config, join(config, "config.json")]) {
+  const pending = [config];
+  const visited = new Set<string>();
+  let entries = 0;
+  while (pending.length > 0) {
+    let current = pending.pop()!;
     const missing: string[] = [];
     while (true) {
       try {
@@ -846,6 +852,15 @@ function requireSafeDockerConfig(): void {
             { cause: error },
           );
         }
+        try {
+          if (lstatSync(current).isSymbolicLink()) {
+            throw new CodexSecurityError(
+              "Docker configuration contains an unresolved symbolic link.",
+            );
+          }
+        } catch (linkError) {
+          if (linkError instanceof CodexSecurityError) throw linkError;
+        }
         const parent = dirname(current);
         if (parent === current) break;
         missing.push(basename(current));
@@ -860,6 +875,49 @@ function requireSafeDockerConfig(): void {
         );
       }
     }
+    let metadata: Stats;
+    try {
+      metadata = statSync(current);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error.code === "ENOENT" || error.code === "ENOTDIR")
+      ) {
+        continue;
+      }
+      throw new CodexSecurityError(
+        "Unable to validate the host Docker configuration directory.",
+        { cause: error },
+      );
+    }
+    if (metadata.isFile()) {
+      if (metadata.nlink > 1) {
+        throw new CodexSecurityError(
+          "Docker configuration contains an unsafe hard-linked file.",
+        );
+      }
+      continue;
+    }
+    if (!metadata.isDirectory() || visited.has(current)) continue;
+    visited.add(current);
+    let children;
+    try {
+      children = readdirSync(current, { withFileTypes: true });
+    } catch (error) {
+      throw new CodexSecurityError(
+        "Unable to validate the host Docker configuration directory.",
+        { cause: error },
+      );
+    }
+    entries += children.length;
+    if (entries > MAX_DOCKER_CONFIG_ENTRIES) {
+      throw new CodexSecurityError(
+        "Docker configuration contains too many entries to validate safely.",
+      );
+    }
+    pending.push(...children.map((entry) => join(current, entry.name)));
   }
 }
 

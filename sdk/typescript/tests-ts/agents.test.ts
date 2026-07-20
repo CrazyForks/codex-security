@@ -3728,6 +3728,8 @@ describe("Agents SDK thin scan adapter", () => {
       const config = join(value.repository, ".docker");
       const linked = join(root, "config-link");
       const fileLinked = join(root, "file-linked-config");
+      const contextLinked = join(root, "context-linked-config");
+      const hardLinked = join(root, "hard-linked-config");
       for (const path of [
         value.repository,
         value.scanDir,
@@ -3735,6 +3737,8 @@ describe("Agents SDK thin scan adapter", () => {
         value.sandboxInputRoot,
         config,
         fileLinked,
+        join(contextLinked, "contexts", "meta", "example"),
+        hardLinked,
       ]) {
         await mkdir(path, { recursive: true });
       }
@@ -3756,10 +3760,23 @@ describe("Agents SDK thin scan adapter", () => {
         join(fileLinked, "config.json"),
         "file",
       );
+      await symlink(
+        join(config, "config.json"),
+        join(contextLinked, "contexts", "meta", "example", "meta.json"),
+        "file",
+      );
+      await link(join(config, "config.json"), join(hardLinked, "config.json"));
       const previousConfig = process.env["DOCKER_CONFIG"];
       const previousHome = process.env["HOME"];
       try {
-        for (const configured of [config, linked, fileLinked, undefined]) {
+        for (const configured of [
+          config,
+          linked,
+          fileLinked,
+          contextLinked,
+          hardLinked,
+          undefined,
+        ]) {
           if (configured === undefined) {
             delete process.env["DOCKER_CONFIG"];
             process.env["HOME"] = value.repository;
@@ -3768,7 +3785,9 @@ describe("Agents SDK thin scan adapter", () => {
             process.env["HOME"] = root;
           }
           await expect(runAgentsScan(value)).rejects.toThrow(
-            "Docker configuration must be outside the scan target",
+            configured === hardLinked
+              ? "Docker configuration contains an unsafe hard-linked file"
+              : "Docker configuration must be outside the scan target",
           );
         }
       } finally {
