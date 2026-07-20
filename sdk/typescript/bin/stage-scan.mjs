@@ -286,7 +286,7 @@ function copyFile(source, destination, expected) {
 }
 
 function isDockerConfig(source, expected) {
-  if (expected.size > 1024 * 1024) return false;
+  if (expected.size > MAX_INPUT_FILE_BYTES) return false;
   let handle;
   try {
     handle = openAt(
@@ -318,8 +318,8 @@ function isDockerConfig(source, expected) {
       return (
         value !== null &&
         typeof value === "object" &&
-        ["auths", "credsStore", "credHelpers"].some((key) =>
-          Object.hasOwn(value, key),
+        Object.keys(value).some((key) =>
+          ["auths", "credsstore", "credhelpers"].includes(key.toLowerCase()),
         )
       );
     } catch {
@@ -684,6 +684,12 @@ function skip(name, kind) {
       "application_default_credentials.json",
       "profiles.yml",
       "profiles.yaml",
+      "admin.conf",
+      "super-admin.conf",
+      "controller-manager.conf",
+      "scheduler.conf",
+      "kubelet.conf",
+      "bootstrap-kubelet.conf",
       "cookies",
       "cookies.sqlite",
       "login data",
@@ -704,6 +710,7 @@ function skip(name, kind) {
       lower,
     ) ||
     /firebase-adminsdk[-_].*\.json$/u.test(lower) ||
+    /^kube[-_]?config(?:[._-].+)?$/u.test(lower) ||
     /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
     /^ssh_host_(?:rsa|dsa|ecdsa|ed25519)_key(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||

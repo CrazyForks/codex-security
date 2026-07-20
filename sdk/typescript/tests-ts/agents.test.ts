@@ -905,6 +905,13 @@ describe("Agents SDK thin scan adapter", () => {
       ["application_default_credentials.json", "SYNTHETIC_GCP_REFRESH"],
       ["profiles.yml", "SYNTHETIC_DBT_PASSWORD"],
       ["profiles.yaml", "SYNTHETIC_DBT_PASSWORD"],
+      ["kubeconfig.yaml", "SYNTHETIC_KUBE_TOKEN"],
+      ["admin.conf", "SYNTHETIC_KUBE_KEY"],
+      ["super-admin.conf", "SYNTHETIC_KUBE_KEY"],
+      ["controller-manager.conf", "SYNTHETIC_KUBE_KEY"],
+      ["scheduler.conf", "SYNTHETIC_KUBE_KEY"],
+      ["kubelet.conf", "SYNTHETIC_KUBE_KEY"],
+      ["bootstrap-kubelet.conf", "SYNTHETIC_KUBE_KEY"],
       [
         "project-firebase-adminsdk-ab12c-1234567890.json",
         "SYNTHETIC_FIREBASE_PRIVATE_KEY",
@@ -920,7 +927,14 @@ describe("Agents SDK thin scan adapter", () => {
     }
     await writeFile(
       join(repository, "config.json"),
-      '{"auths":{"example.invalid":{"auth":"SYNTHETIC_DOCKER_CONFIG_AUTH"}}}\n',
+      `${JSON.stringify({
+        AUTHS: {
+          "example.invalid": { auth: "SYNTHETIC_DOCKER_CONFIG_AUTH" },
+        },
+        CREDSSTORE: "synthetic",
+        CREDHELPERS: { "example.invalid": "synthetic" },
+        padding: "x".repeat(1024 * 1024 + 64),
+      })}\n`,
     );
     await mkdir(join(repository, "src"));
     await writeFile(
@@ -1049,6 +1063,13 @@ describe("Agents SDK thin scan adapter", () => {
             "application_default_credentials.json",
             "profiles.yml",
             "profiles.yaml",
+            "kubeconfig.yaml",
+            "admin.conf",
+            "super-admin.conf",
+            "controller-manager.conf",
+            "scheduler.conf",
+            "kubelet.conf",
+            "bootstrap-kubelet.conf",
             "project-firebase-adminsdk-ab12c-1234567890.json",
             "config.json",
             "credentials.json",
@@ -1524,6 +1545,26 @@ describe("Agents SDK thin scan adapter", () => {
       "PROFILES.YML",
       "profiles.yaml",
       "PROFILES.YAML",
+      "kubeconfig",
+      "KUBECONFIG",
+      "kubeconfig.yaml",
+      "KUBECONFIG.YAML",
+      "kube-config.yml",
+      "KUBE-CONFIG.YML",
+      "kube_config.json",
+      "KUBE_CONFIG.JSON",
+      "admin.conf",
+      "ADMIN.CONF",
+      "super-admin.conf",
+      "SUPER-ADMIN.CONF",
+      "controller-manager.conf",
+      "CONTROLLER-MANAGER.CONF",
+      "scheduler.conf",
+      "SCHEDULER.CONF",
+      "kubelet.conf",
+      "KUBELET.CONF",
+      "bootstrap-kubelet.conf",
+      "BOOTSTRAP-KUBELET.CONF",
       "project-firebase-adminsdk-ab12c-1234567890.json",
       "PROJECT-FIREBASE-ADMINSDK-AB12C-1234567890.JSON",
     ];
@@ -1665,7 +1706,14 @@ describe("Agents SDK thin scan adapter", () => {
     );
     await writeFile(
       join(repository, "config.json"),
-      '{"auths":{"example.invalid":{"auth":"SYNTHETIC_DOCKER_CONFIG_AUTH"}}}\n',
+      `${JSON.stringify({
+        AUTHS: {
+          "example.invalid": { auth: "SYNTHETIC_DOCKER_CONFIG_AUTH" },
+        },
+        CREDSSTORE: "synthetic",
+        CREDHELPERS: { "example.invalid": "synthetic" },
+        padding: "x".repeat(1024 * 1024 + 64),
+      })}\n`,
     );
     const mirror = join(repository, "private-mirror");
     await mkdir(join(mirror, "Objects"), { recursive: true });
