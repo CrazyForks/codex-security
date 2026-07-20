@@ -815,9 +815,12 @@ describe("Agents SDK thin scan adapter", () => {
     await mkdir(join(repository, ".ssh"));
     await writeFile(join(repository, ".ssh", "id_rsa"), "SYNTHETIC_SSH_KEY\n");
     await writeFile(join(repository, "intent.ts"), "SYNTHETIC_INTENT_SECRET\n");
+    await writeFile(join(repository, ".gitattributes"), "*.ts filter=unsafe\n");
     git(repository, ["add", "-f", "."]);
     git(repository, ["reset", "--", "intent.ts"]);
     git(repository, ["add", "-N", "intent.ts"]);
+    const filterMarker = join(root, "host-clean-filter-executed");
+    git(repository, ["config", "filter.unsafe.clean", `touch ${filterMarker}`]);
     let reached = false;
     const client = new TestClient(
       { pluginPath: PLUGIN_ROOT },
@@ -829,6 +832,7 @@ describe("Agents SDK thin scan adapter", () => {
         runAgents: async (value: AgentsScanRequest) => {
           reached = true;
           expect(existsSync(join(value.repository, "app.ts"))).toBe(true);
+          expect(existsSync(filterMarker)).toBe(false);
           for (const path of [
             ".env",
             ".gitconfig",
@@ -849,6 +853,7 @@ describe("Agents SDK thin scan adapter", () => {
         client.run(repository, { outputDir: join(root, "scan") }),
       ).rejects.toThrow("stop after staging inspection");
       expect(reached).toBe(true);
+      expect(existsSync(filterMarker)).toBe(false);
     } finally {
       await client.close();
     }
@@ -1342,7 +1347,7 @@ describe("Agents SDK thin scan adapter", () => {
       const appHash = git(repository, ["hash-object", "app.ts"]);
       await writeFile(
         join(shim, "git"),
-        `#!/bin/sh\nfor value in "$@"; do\n  if test "$value" = --deleted; then exit 41; fi\n  if test "$value" = ls-files; then\n    awk 'BEGIN { for (i=0; i<120000; i++) printf "100644 0000000000000000000000000000000000000000 0\\tmissing/${longPart}/${longPart}/${longPart}/%06d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.ts%c", i, 0; printf "100644 ${appHash} 0\\tapp.ts%c", 0 }'\n    exit 0\n  fi\ndone\nexec '${actualGit}' "$@"\n`,
+        `#!/bin/sh\nfor value in "$@"; do\n  if test "$value" = --deleted; then exit 41; fi\n  if test "$value" = ls-files; then\n    awk 'BEGIN { debug="  ctime: 0:0\\n  mtime: 0:0\\n  dev: 0\\tino: 0\\n  uid: 0\\tgid: 0\\n  size: 0\\tflags: 0\\n"; for (i=0; i<120000; i++) printf "100644 0000000000000000000000000000000000000000 0\\tmissing/${longPart}/${longPart}/${longPart}/%06d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.ts%c%s", i, 0, debug; printf "100644 ${appHash} 0\\tapp.ts%c%s", 0, debug }'\n    exit 0\n  fi\ndone\nexec '${actualGit}' "$@"\n`,
         { mode: 0o755 },
       );
       const previousPath = process.env["PATH"];

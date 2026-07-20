@@ -1041,33 +1041,13 @@ async function stageRepository(
       { cause: error },
     );
   }
-  const values = await gitPathRecords(
+  const values = await gitIndexEntries(
     source,
     localGitRoot,
     target,
     ignoreCase,
     environment,
     signal,
-    ["ls-files", "--cached", "--stage", "-z"],
-  );
-  const intentToAdd = new Set(
-    await gitPathRecords(
-      source,
-      localGitRoot,
-      target,
-      ignoreCase,
-      environment,
-      signal,
-      [
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--ignore-submodules=all",
-        "--name-only",
-        "--diff-filter=A",
-        "-z",
-      ],
-    ),
   );
   const indexEntryPattern =
     /^(100(?:644|755)|120000|160000) [0-9a-f]{40,64} [0-3]\t(.+)$/isu;
@@ -1096,7 +1076,7 @@ async function stageRepository(
     if (parts.some((part) => part.toLowerCase() === ".git")) {
       continue;
     }
-    if (isGitCredentialPath(parts) || intentToAdd.has(path)) continue;
+    if (isGitCredentialPath(parts)) continue;
     if (mode === "120000" || mode === "160000") continue;
     paths.add(path);
   }
@@ -1133,14 +1113,13 @@ function gitPathspecs(
   return [...paths].map((path) => `${literal}${path}`);
 }
 
-async function gitPathRecords(
+async function gitIndexEntries(
   source: string,
   gitRoot: string,
   target: Pick<NormalizedTarget, "kind" | "paths">,
   ignoreCase: boolean,
   environment: NodeJS.ProcessEnv,
   signal: AbortSignal,
-  command: readonly string[],
 ): Promise<string[]> {
   const child = spawn(
     "git",
@@ -1152,7 +1131,11 @@ async function gitPathRecords(
       "core.hooksPath=/dev/null",
       "-c",
       `safe.directory=${gitRoot}`,
-      ...command,
+      "ls-files",
+      "--cached",
+      "--stage",
+      "--debug",
+      "-z",
       "--",
       ...gitPathspecs(target, ignoreCase),
     ],
@@ -1170,19 +1153,42 @@ async function gitPathRecords(
   const values: string[] = [];
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let pending = "";
+  let previous: string | undefined;
+  let entries = 0;
+  const finishPrevious = (record: string): string => {
+    const debug =
+      /^  ctime: [^\n]+\n  mtime: [^\n]+\n  dev: [^\n]+\n  uid: [^\n]+\n  size: [^\n]+\tflags: ([0-9a-f]+)\n/iu.exec(
+        record,
+      );
+    if (debug === null || previous === undefined) {
+      throw new InvalidTargetError(
+        `Git returned an invalid index entry: ${displayPath(source)}`,
+      );
+    }
+    if ((Number.parseInt(debug[1]!, 16) & 0x20000000) === 0) {
+      values.push(previous);
+    }
+    return record.slice(debug[0].length);
+  };
   try {
     for await (const chunk of child.stdout) {
       const records =
         `${pending}${decoder.decode(chunk, { stream: true })}`.split("\0");
       pending = records.pop() ?? "";
-      for (const record of records) {
+      for (let record of records) {
+        if (previous !== undefined) record = finishPrevious(record);
         if (record.length > MAX_GIT_INDEX_RECORD_BYTES) {
           throw new InvalidTargetError(
             `Git returned an oversized index entry: ${displayPath(source)}`,
           );
         }
-        if (record.length > 0) values.push(record);
-        if (values.length > MAX_INPUT_ENTRIES) {
+        if (record.length === 0) {
+          throw new InvalidTargetError(
+            `Git returned an invalid index entry: ${displayPath(source)}`,
+          );
+        }
+        previous = record;
+        if (++entries > MAX_INPUT_ENTRIES) {
           throw new InvalidTargetError(
             `Repository contains too many entries to stage safely: ${displayPath(source)}`,
           );
@@ -1195,6 +1201,7 @@ async function gitPathRecords(
       }
     }
     pending += decoder.decode();
+    if (previous !== undefined) pending = finishPrevious(pending);
     const exitCode = await completed;
     if (pending.length > 0 || exitCode !== 0 || failure !== undefined) {
       throw failure ?? new Error("Git returned an incomplete index stream");
