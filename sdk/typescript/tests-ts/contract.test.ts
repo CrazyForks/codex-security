@@ -126,6 +126,21 @@ describe("canonical scan contract", () => {
     );
   });
 
+  test("rejects a completed scan whose snapshot digest does not match the staged repository", async () => {
+    const scanDir = await copyExample();
+    await expect(
+      loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          ...expectation({ kind: "repository", paths: [] }),
+          repositorySnapshotDigest: `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`,
+        },
+      }),
+    ).rejects.toThrow(
+      "Scan target snapshot digest does not match the staged repository",
+    );
+  });
+
   test("honors cancellation during contract validation", async () => {
     const scanDir = await copyExample();
     const controller = new AbortController();

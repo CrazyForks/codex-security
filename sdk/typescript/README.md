@@ -42,12 +42,13 @@ repository and path targets. The output directory must be outside the scanned
 repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
-The default Agents engine stages a compact Git-visible, regular-file snapshot
+The default Agents engine stages a compact tracked, regular-file snapshot
 and the plugin into the SDK Docker workspace, mounts them read-only, and
-disables network access before tool execution. Ignored files are excluded
-unless explicitly selected with `--path`; symlinks, Git credentials/history,
-and unrelated plugin-checkout files are always excluded. Inputs and results are
-size/type bounded before handoff. The standard `security-scan` skill runs with
+disables network access before tool execution. Local edits to tracked files are
+included; untracked/ignored files, submodule contents, symlinks, Git
+credentials/history, and unrelated plugin-checkout files are excluded. Use the
+Codex engine when a path contains only untracked or ignored files. Inputs and
+results are size/type bounded before handoff. The standard `security-scan` skill runs with
 one serialized delegated ranking worker and preserves the existing pool-plan,
 receipt, and canonical output contract. A stable one-way-hashed,
 credential-free remote identity is bound during validation when available,

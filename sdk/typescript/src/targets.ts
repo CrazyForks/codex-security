@@ -146,6 +146,7 @@ export async function normalizeTarget(
   repository: string,
   target: ScanTarget,
   signal?: AbortSignal,
+  rejectSymbolicLinks = false,
 ): Promise<NormalizedTarget> {
   const root = await normalizeRepository(repository, signal);
   throwIfAborted(signal);
@@ -233,36 +234,38 @@ export async function normalizeTarget(
     if (!existsSync(candidate)) {
       throw new InvalidTargetError(`Path target does not exist: ${value}`);
     }
-    const rootMetadata = await abortable(() => stat(root), signal);
-    let entry = candidate;
-    try {
-      while (true) {
-        const metadata = await abortable(() => lstat(entry), signal);
-        if (metadata.isSymbolicLink()) {
-          throw new InvalidTargetError(
-            `Path target must not traverse a symbolic link: ${value}`,
-          );
+    if (rejectSymbolicLinks) {
+      const rootMetadata = await abortable(() => stat(root), signal);
+      let entry = candidate;
+      try {
+        while (true) {
+          const metadata = await abortable(() => lstat(entry), signal);
+          if (metadata.isSymbolicLink()) {
+            throw new InvalidTargetError(
+              `Path target must not traverse a symbolic link: ${value}`,
+            );
+          }
+          if (
+            metadata.dev === rootMetadata.dev &&
+            metadata.ino === rootMetadata.ino
+          ) {
+            break;
+          }
+          const parent = dirname(entry);
+          if (parent === entry) {
+            throw new InvalidTargetError(
+              `Path target is outside the repository: ${value}`,
+            );
+          }
+          entry = parent;
         }
-        if (
-          metadata.dev === rootMetadata.dev &&
-          metadata.ino === rootMetadata.ino
-        ) {
-          break;
-        }
-        const parent = dirname(entry);
-        if (parent === entry) {
-          throw new InvalidTargetError(
-            `Path target is outside the repository: ${value}`,
-          );
-        }
-        entry = parent;
+      } catch (error) {
+        if (error instanceof InvalidTargetError) throw error;
+        throwIfAborted(signal);
+        throw new InvalidTargetError(`Path target does not exist: ${value}`, {
+          cause: error,
+        });
       }
-    } catch (error) {
-      if (error instanceof InvalidTargetError) throw error;
-      throwIfAborted(signal);
-      throw new InvalidTargetError(`Path target does not exist: ${value}`, {
-        cause: error,
-      });
     }
     let canonical: string;
     try {

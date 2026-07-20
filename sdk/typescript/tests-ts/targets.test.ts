@@ -81,11 +81,20 @@ describe("scan target normalization", () => {
       );
       await symlink(join("private", "secret.ts"), join(repo, "link.ts"));
       await symlink("private", join(repo, "linked-directory"), "dir");
-      await expect(normalizeTarget(repo, ["link.ts"])).rejects.toThrow(
-        "must not traverse a symbolic link",
-      );
+      expect(await normalizeTarget(repo, ["link.ts"])).toEqual({
+        kind: "paths",
+        paths: ["private/secret.ts"],
+      });
       await expect(
-        normalizeTarget(repo, [join("linked-directory", "secret.ts")]),
+        normalizeTarget(repo, ["link.ts"], undefined, true),
+      ).rejects.toThrow("must not traverse a symbolic link");
+      await expect(
+        normalizeTarget(
+          repo,
+          [join("linked-directory", "secret.ts")],
+          undefined,
+          true,
+        ),
       ).rejects.toThrow("must not traverse a symbolic link");
     },
   );

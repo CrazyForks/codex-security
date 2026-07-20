@@ -41,6 +41,7 @@ export interface ScanExpectation {
   repository: string;
   repositoryRevision: string | null;
   repositoryIdentity?: string;
+  repositorySnapshotDigest?: string;
   target: NormalizedTarget;
   mode: ScanMode;
   pluginVersion: string;
@@ -1234,6 +1235,14 @@ function validateExpectation(
   ) {
     throw new ContractValidationError(
       "Scan target identity does not match the requested repository.",
+    );
+  }
+  if (
+    expectation.repositorySnapshotDigest !== undefined &&
+    target.snapshotDigest !== expectation.repositorySnapshotDigest
+  ) {
+    throw new ContractValidationError(
+      "Scan target snapshot digest does not match the staged repository.",
     );
   }
   const requested = expectation.target;
