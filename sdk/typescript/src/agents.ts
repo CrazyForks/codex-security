@@ -302,6 +302,12 @@ export class AgentsSecurity {
         protectedRoot,
       );
       staging = await mkdtemp(join(workspaceRoot, "codex-security-agents-"));
+      const stagingMetadata = await lstat(staging);
+      const stagingRoot = {
+        path: staging,
+        dev: stagingMetadata.dev,
+        ino: stagingMetadata.ino,
+      };
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,
         staging,
@@ -322,6 +328,11 @@ export class AgentsSecurity {
         (path) => requireOutsideRepository(protectedRoot, path),
         outputMetadata,
       );
+      await requireUnchangedDirectory(
+        staging,
+        stagingMetadata,
+        "Agents SDK staging workspace",
+      );
       const stagedRepository = join(staging, "repository");
       const stagedPlugin = join(staging, "plugin");
       const sandboxOutput = join(staging, "output");
@@ -339,6 +350,12 @@ export class AgentsSecurity {
         target,
         inputState,
         initialGitRoot,
+        stagingRoot,
+      );
+      await requireUnchangedDirectory(
+        staging,
+        stagingMetadata,
+        "Agents SDK staging workspace",
       );
       await requireUnchangedDirectory(repo, repositoryMetadata);
       const repositoryIdentity = await stableRepositoryIdentity(
@@ -376,9 +393,15 @@ export class AgentsSecurity {
               fileURLToPath(new URL("../_bundled_plugin/", import.meta.url)),
             ).catch(() => null)),
           state: inputState,
+          stagingRoot,
         },
         controller.signal,
         protectedRoot,
+      );
+      await requireUnchangedDirectory(
+        staging,
+        stagingMetadata,
+        "Agents SDK staging workspace",
       );
       await mkdir(sandboxOutput, { mode: 0o700 });
       await mkdir(sandboxInputRoot, { mode: 0o700 });
@@ -442,6 +465,7 @@ export class AgentsSecurity {
               source: sandboxOutput,
               destination: scanDir,
               state: { entries: 0, bytes: 0, files: 0 },
+              stagingRoot,
             },
             new AbortController().signal,
             protectedRoot,
@@ -808,12 +832,14 @@ function safeDockerHelperPath(safePath: string): string {
     .filter((entry) => {
       try {
         return readdirSync(entry)
-          .filter(
-            (name) =>
-              name === "ssh" ||
-              name === "python3" ||
-              name.startsWith("docker-credential-"),
-          )
+          .filter((name) => {
+            const lower = name.toLowerCase();
+            return (
+              lower === "ssh" ||
+              lower === "python3" ||
+              lower.startsWith("docker-credential-")
+            );
+          })
           .every((name) => {
             const executable = realpathSync(join(entry, name));
             return [...activeHostRoots.keys()].every((target) => {
@@ -1075,6 +1101,7 @@ async function stageRepository(
     files: 0,
   },
   expectedGitRoot?: string | null,
+  stagingRoot?: StagingRoot,
 ): Promise<void> {
   const gitRoot = await enclosingGitWorktreeRoot(source, signal);
   if (expectedGitRoot !== undefined && gitRoot !== expectedGitRoot) {
@@ -1095,6 +1122,7 @@ async function stageRepository(
         destination,
         scopes: target.kind === "paths" ? target.paths : undefined,
         state,
+        stagingRoot,
       },
       signal,
       source,
@@ -1186,6 +1214,7 @@ async function stageRepository(
       scopes: target.kind === "paths" ? target.paths : undefined,
       ignoreCase,
       state,
+      stagingRoot,
     },
     signal,
     gitRoot,
@@ -1370,6 +1399,7 @@ function displayPath(value: string): string {
 async function requireUnchangedDirectory(
   path: string,
   expected: Pick<Stats, "dev" | "ino">,
+  label = "Repository",
 ): Promise<void> {
   const metadata = await lstat(path).catch(() => null);
   if (
@@ -1380,7 +1410,7 @@ async function requireUnchangedDirectory(
     metadata.ino !== expected.ino
   ) {
     throw new InvalidTargetError(
-      `Repository changed before staging: ${displayPath(path)}`,
+      `${label} changed before staging: ${displayPath(path)}`,
     );
   }
 }
@@ -1788,6 +1818,13 @@ interface StagingJob {
   ignoreCase?: boolean;
   rejectHardlinks?: boolean;
   state: StagingState;
+  stagingRoot?: StagingRoot;
+}
+
+interface StagingRoot {
+  path: string;
+  dev: number;
+  ino: number;
 }
 
 async function runStagingJob(
@@ -1799,6 +1836,7 @@ async function runStagingJob(
     new URL("../bin/stage-scan.mjs", import.meta.url),
   );
   const child = spawn(process.execPath, [script], {
+    cwd: job.stagingRoot?.path,
     env: sanitizedGitEnvironment(protectedRoot),
     signal,
     stdio: ["pipe", "pipe", "pipe"],

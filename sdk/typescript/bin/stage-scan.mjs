@@ -24,6 +24,24 @@ const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
 
 const job = JSON.parse(readFileSync(0, "utf8"));
+if (job.stagingRoot) {
+  const metadata = statSync(".");
+  if (
+    !metadata.isDirectory() ||
+    metadata.dev !== job.stagingRoot.dev ||
+    metadata.ino !== job.stagingRoot.ino
+  ) {
+    fail("Agents SDK staging workspace changed before staging.");
+  }
+  const rebase = (path) => {
+    const value = relative(job.stagingRoot.path, path);
+    return isAbsolute(value) || value === ".." || value.startsWith(`..${sep}`)
+      ? path
+      : value || ".";
+  };
+  job.source = rebase(job.source);
+  job.destination = rebase(job.destination);
+}
 const input = job.kind !== "output";
 const state = job.state ?? { entries: 0, bytes: 0, files: 0 };
 const sourceRoot = anchor(job.source);

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
   cp,
@@ -575,6 +575,55 @@ describe("Agents SDK thin scan adapter", () => {
         ).rejects.toThrow("must be outside the repository");
         expect(existsSync(join(controlled, "new-cache"))).toBe(false);
         expect(reached).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "does not stage repository inputs into a replaced Docker workspace",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const workspace = join(root, "workspaces");
+      const attacker = join(root, "attacker-visible");
+      await mkdir(repository);
+      await mkdir(workspace);
+      await mkdir(attacker);
+      await writeFile(join(repository, "app.ts"), "SYNTHETIC_PRIVATE_SOURCE\n");
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+          },
+          runAgents: async () => {
+            reached = true;
+            throw new Error("must-not-run");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, {
+            outputDir: join(root, "scan"),
+            onOutputDirReady: () => {
+              const stage = readdirSync(workspace).find((name) =>
+                name.startsWith("codex-security-agents-"),
+              )!;
+              const original = join(workspace, stage);
+              renameSync(original, `${original}.moved`);
+              symlinkSync(attacker, original, "dir");
+            },
+          }),
+        ).rejects.toThrow(
+          "Agents SDK staging workspace changed before staging",
+        );
+        expect(reached).toBe(false);
+        expect(existsSync(join(attacker, "repository", "app.ts"))).toBe(false);
       } finally {
         await client.close();
       }
@@ -2911,7 +2960,7 @@ describe("Agents SDK thin scan adapter", () => {
           "set -eu",
           "command -v docker-credential-safe >/dev/null 2>&1 || exit 43",
           "docker-credential-safe",
-          "if command -v docker-credential-untrusted >/dev/null 2>&1; then docker-credential-untrusted; fi",
+          "if command -v DOCKER-CREDENTIAL-UNTRUSTED >/dev/null 2>&1; then DOCKER-CREDENTIAL-UNTRUSTED; fi",
           `printf '%s\\n' "SAFE_DOCKER openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent} aws=\${AWS_SECRET_ACCESS_KEY-absent} gh=\${GH_TOKEN-absent}" >> '${log}'`,
           `printf '<%s>\\n' \"$@\" >> '${log}'`,
           `case "\${1-}" in run) printf "%s\\n" synthetic-container;; inspect) if grep -q "<disconnect>" '${log}'; then printf "%s\\n" '{}'; else printf "%s\\n" '{"bridge":{}}'; fi;; exec) printf "%s\\n" '## Phase Sequence';; esac`,
@@ -2960,7 +3009,7 @@ describe("Agents SDK thin scan adapter", () => {
       );
       await symlink(
         join(repositoryBin, "docker-credential-untrusted"),
-        join(envBin, "docker-credential-untrusted"),
+        join(envBin, "DOCKER-CREDENTIAL-UNTRUSTED"),
       );
       await writeFile(
         join(repositoryBin, "python3"),
