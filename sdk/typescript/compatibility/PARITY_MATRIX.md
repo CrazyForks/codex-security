@@ -82,10 +82,10 @@ compaction, and delegates one bounded worker. Local edits to tracked files are i
 untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged deletions,
 sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, `.envrc`, Composer/Bundler/Gradle credentials, and Terraform CLI/state), and Git credentials/history (including tracked nested bare repositories)
 are excluded. Path scans include applicable ancestor `SECURITY.md` files and
-exclude unrelated source files. Credential-directory roots, empty targets, and Git-shaped unversioned targets fail
+exclude unrelated source files. Credential-directory roots, empty targets, Git-config includes, and Git-shaped unversioned targets fail
 closed; bundled content-addressable installs are supported. Use Codex for paths containing only untracked or ignored files. Inputs
 are mounted read-only, ambient API keys and Docker-configured proxy credentials
-are not forwarded to the scan shell, and the sandbox has a writable temporary home/cache. Bounded
+are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, and the sandbox has a writable temporary home/cache. Bounded
 output is copied to the requested directory. It runs the `security-scan` skill
 with one delegated ranking worker and validates the canonical output contract
 against a stable repository and relative-scope identity. SDK tracing and

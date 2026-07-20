@@ -99,7 +99,6 @@ const REQUIRED_PLUGIN_DIRECTORIES = ["references", "schemas", "scripts"];
 const OPTIONAL_PLUGIN_DIRECTORIES = [".codex-plugin", "examples", "preflight"];
 const MAX_INPUT_ENTRIES = 2_000_000;
 const MAX_GIT_INDEX_RECORD_BYTES = 64 * 1024;
-const MAX_GIT_CONFIG_FILES = 128;
 const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
 const MAX_GIT_POINTER_BYTES = 64 * 1024;
 let tracingUsers = 0;
@@ -686,12 +685,12 @@ function suppressUnsafeHostEnvironment(
           next,
           [
             "#!/bin/sh",
-            "unset OPENAI_API_KEY CODEX_API_KEY",
+            'clean_exec() { exec env -i PATH="${PATH-}" HOME="${HOME-}" USER="${USER-}" TMPDIR="${TMPDIR-/tmp}" DOCKER_CONFIG="${DOCKER_CONFIG-}" DOCKER_HOST="${DOCKER_HOST-}" DOCKER_CONTEXT="${DOCKER_CONTEXT-}" DOCKER_CERT_PATH="${DOCKER_CERT_PATH-}" DOCKER_TLS_VERIFY="${DOCKER_TLS_VERIFY-}" DOCKER_API_VERSION="${DOCKER_API_VERSION-}" "$@"; }',
             'if [ "${1-}" = run ]; then',
             "  shift",
-            `  exec '${executable.replaceAll("'", "'\"'\"'")}' run -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= -e FTP_PROXY= -e ALL_PROXY= -e http_proxy= -e https_proxy= -e no_proxy= -e ftp_proxy= -e all_proxy= "$@"`,
+            `  clean_exec '${executable.replaceAll("'", "'\"'\"'")}' run -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY= -e FTP_PROXY= -e ALL_PROXY= -e http_proxy= -e https_proxy= -e no_proxy= -e ftp_proxy= -e all_proxy= "$@"`,
             "fi",
-            `exec '${executable.replaceAll("'", "'\"'\"'")}' "$@"`,
+            `clean_exec '${executable.replaceAll("'", "'\"'\"'")}' "$@"`,
             "",
           ].join("\n"),
           { flag: "wx", mode: 0o700 },
@@ -1344,11 +1343,7 @@ async function requireSafeGitInputs(gitRoot: string): Promise<void> {
     commonDirectory = resolve(gitDirectory, pointer.trim());
   }
   await requireSafeGitConfig(join(commonDirectory, "config"));
-  await requireSafeGitConfig(
-    join(gitDirectory, "config.worktree"),
-    new Set<string>(),
-    false,
-  );
+  await requireSafeGitConfig(join(gitDirectory, "config.worktree"), false);
   await requireRegularGitInput(join(gitDirectory, "HEAD"));
   await requireRegularGitInput(join(gitDirectory, "index"));
   for (const name of await readdir(gitDirectory)) {
@@ -1360,62 +1355,23 @@ async function requireSafeGitInputs(gitRoot: string): Promise<void> {
 
 async function requireSafeGitConfig(
   config: string,
-  seen = new Set<string>(),
   required = true,
 ): Promise<void> {
-  const path = resolve(config);
-  if (seen.has(path)) return;
-  if (seen.size >= MAX_GIT_CONFIG_FILES) {
-    throw new InvalidTargetError(
-      "Git configuration contains too many includes.",
-    );
-  }
-  seen.add(path);
   const content = await readBoundedGitInput(
-    path,
+    resolve(config),
     MAX_GIT_CONFIG_BYTES,
     "Git configuration input",
     required,
   );
-  if (content === null) return;
-  let includeSection = false;
-  for (const rawLine of content.replace(/\\\r?\n/gu, "").split(/\r?\n/u)) {
-    let line = rawLine;
-    const section =
-      /^\s*\[\s*([^\s"\]]+)(?:\s+"(?:\\.|[^"])*")?\s*\](.*)$/u.exec(line);
-    if (section !== null) {
-      includeSection = /^include(?:if)?$/iu.test(section[1]!);
-      line = section[2]!;
-    }
-    if (!includeSection) continue;
-    const include = /^\s*path\s*=\s*(?:"((?:\\.|[^"])*)"|([^#;]+))/iu.exec(
-      line,
+  if (
+    content !== null &&
+    /^\s*\[\s*include(?:if)?(?:\s|[".\]])/imu.test(
+      content.replace(/\\\r?\n/gu, ""),
+    )
+  ) {
+    throw new InvalidTargetError(
+      "Git configuration includes are unsupported for Agents scans; use the Codex engine.",
     );
-    if (include === null) continue;
-    let value: string;
-    try {
-      value =
-        include[1] === undefined
-          ? (include[2] ?? "").trim()
-          : (JSON.parse(`"${include[1]}"`) as string);
-    } catch (error) {
-      throw new InvalidTargetError(
-        `Git configuration contains an unsupported include path: ${displayPath(path)}`,
-        { cause: error },
-      );
-    }
-    if (
-      value.length === 0 ||
-      (value.startsWith("~") && !value.startsWith("~/"))
-    ) {
-      throw new InvalidTargetError(
-        `Git configuration contains an unsupported include path: ${displayPath(path)}`,
-      );
-    }
-    const included = value.startsWith("~/")
-      ? join(homedir(), value.slice(2))
-      : resolve(dirname(path), value);
-    await requireSafeGitConfig(included, seen, false);
   }
 }
 
@@ -1667,12 +1623,8 @@ async function stableRepositoryIdentity(
 
 function sanitizedGitEnvironment(repository?: string): NodeJS.ProcessEnv {
   return {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
-    ),
-    OPENAI_API_KEY: undefined,
-    CODEX_API_KEY: undefined,
     PATH: safeHostPath(repository),
+    LC_ALL: "C",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_NO_LAZY_FETCH: "1",
@@ -1740,13 +1692,8 @@ async function runStagingJob(
   const script = fileURLToPath(
     new URL("../bin/stage-scan.mjs", import.meta.url),
   );
-  const environment = Object.fromEntries(
-    Object.entries(sanitizedGitEnvironment(protectedRoot)).filter(
-      ([key]) => !key.startsWith("NODE_") && !key.startsWith("BUN_"),
-    ),
-  );
   const child = spawn(process.execPath, [script], {
-    env: environment,
+    env: sanitizedGitEnvironment(protectedRoot),
     signal,
     stdio: ["pipe", "pipe", "pipe"],
   });

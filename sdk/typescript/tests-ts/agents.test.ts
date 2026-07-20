@@ -1567,6 +1567,40 @@ describe("Agents SDK thin scan adapter", () => {
     },
   );
 
+  test.skipIf(process.platform !== "darwin")(
+    "stages decomposed macOS filenames using Git precompose semantics",
+    async () => {
+      const root = await temporaryDirectory();
+      const source = join(root, "source");
+      const destination = join(root, "destination");
+      await mkdir(join(source, "src"), { recursive: true });
+      await writeFile(
+        join(source, "src", "cafe\u0301.ts"),
+        "export const cafe = true;\n",
+      );
+      const staged = spawnSync(
+        process.execPath,
+        [join(import.meta.dir, "../bin/stage-scan.mjs")],
+        {
+          encoding: "utf8",
+          input: JSON.stringify({
+            kind: "tracked",
+            source,
+            destination,
+            paths: ["src/café.ts"],
+            ignoreCase: false,
+            state: { entries: 0, bytes: 0, files: 0 },
+          }),
+        },
+      );
+      expect(staged.status, staged.stderr).toBe(0);
+      expect(JSON.parse(staged.stdout).files).toBe(1);
+      expect(await readFile(join(destination, "src", "café.ts"), "utf8")).toBe(
+        "export const cafe = true;\n",
+      );
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "stages content-addressable bundled-plugin hard links",
     async () => {
@@ -1857,39 +1891,15 @@ describe("Agents SDK thin scan adapter", () => {
       await expectUnsafe("shared-index-link-scan");
       await rm(sharedIndex);
       await writeFile(sharedIndex, await readFile(sharedTarget));
-      const includedConfig = join(root, 'included-"config');
-      const continuedConfig = join(root, "continued-config");
-      const inlineConfig = join(root, "inline-config");
-      execFileSync("mkfifo", [includedConfig]);
-      execFileSync("mkfifo", [continuedConfig]);
-      execFileSync("mkfifo", [inlineConfig]);
       const gitConfig = join(repository, ".git", "config");
       await writeFile(
         gitConfig,
-        `${await readFile(gitConfig, "utf8")}\n[include]\n  path = ${JSON.stringify(includedConfig)}\n  path = ${continuedConfig.replace("continued-config", "continued-\\\nconfig")}\n[include] path = ${inlineConfig}\n`,
+        `${await readFile(gitConfig, "utf8")}\n[include] path = /dev/null\n`,
       );
       await expect(
         client.run(repository, { outputDir: join(root, "include-fifo-scan") }),
       ).rejects.toThrow(
-        "Git configuration input must be a bounded regular file",
-      );
-      expect(await readdir(workspace)).toEqual([]);
-      await rm(includedConfig);
-      await expect(
-        client.run(repository, {
-          outputDir: join(root, "continued-include-fifo-scan"),
-        }),
-      ).rejects.toThrow(
-        "Git configuration input must be a bounded regular file",
-      );
-      expect(await readdir(workspace)).toEqual([]);
-      await rm(continuedConfig);
-      await expect(
-        client.run(repository, {
-          outputDir: join(root, "inline-include-fifo-scan"),
-        }),
-      ).rejects.toThrow(
-        "Git configuration input must be a bounded regular file",
+        "Git configuration includes are unsupported for Agents scans",
       );
       expect(await readdir(workspace)).toEqual([]);
       await client.close();
@@ -2115,10 +2125,30 @@ describe("Agents SDK thin scan adapter", () => {
         await expect(
           client.run(worktree, { outputDir: join(root, "worktree-scan") }),
         ).rejects.toThrow(
-          "Git configuration input must be a bounded regular file",
+          "Git configuration includes are unsupported for Agents scans",
         );
         expect(reached).toBe(false);
         await rm(join(gitDirectory, "config.worktree"));
+        const configPath = join(main, ".git", "config");
+        const originalConfig = await readFile(configPath, "utf8");
+        const prefixTarget = join(root, "included-prefix-target");
+        const prefixLink = join(root, "included-prefix-link");
+        await writeFile(prefixTarget, "[core]\n  ignoreCase = false\n");
+        await symlink(prefixTarget, prefixLink);
+        await writeFile(
+          configPath,
+          `${originalConfig}\n[include]\n  path = "${join(root, "included-prefix")}"-link\n`,
+        );
+        expect(
+          git(main, ["config", "--type=bool", "--get", "core.ignoreCase"]),
+        ).toBe("false");
+        await expect(
+          client.run(worktree, { outputDir: join(root, "mixed-include") }),
+        ).rejects.toThrow(
+          "Git configuration includes are unsupported for Agents scans",
+        );
+        expect(reached).toBe(false);
+        await writeFile(configPath, originalConfig);
         const commonPointer = join(gitDirectory, "commondir");
         const originalPointer = await readFile(commonPointer);
         await truncate(commonPointer, 64 * 1024 + 1);
@@ -2153,6 +2183,82 @@ describe("Agents SDK thin scan adapter", () => {
         expect(existsSync(marker)).toBe(false);
         expect(await readdir(workspace)).toEqual([]);
       } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "does not load repository-controlled dynamic libraries during host staging",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const workspace = join(root, "workspaces");
+      const marker = join(root, "loader-executed");
+      const source = join(root, "loader.c");
+      const library = join(
+        repository,
+        process.platform === "darwin" ? "loader.dylib" : "loader.so",
+      );
+      await initializeGitRepository(repository);
+      await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+      git(repository, ["add", "."]);
+      await writeFile(
+        source,
+        [
+          "#include <fcntl.h>",
+          "#include <unistd.h>",
+          "__attribute__((constructor)) static void injected(void) {",
+          `  int fd = open(${JSON.stringify(marker)}, O_WRONLY | O_CREAT | O_APPEND, 0600);`,
+          '  if (fd >= 0) { write(fd, "loaded\\n", 7); close(fd); }',
+          "}",
+          "",
+        ].join("\n"),
+      );
+      execFileSync(
+        "cc",
+        [
+          ...(process.platform === "darwin"
+            ? ["-dynamiclib"]
+            : ["-shared", "-fPIC"]),
+          "-o",
+          library,
+          source,
+        ],
+        { stdio: "pipe" },
+      );
+      const loaderName =
+        process.platform === "darwin" ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD";
+      const previousLoader = process.env[loaderName];
+      const previousAws = process.env["AWS_SECRET_ACCESS_KEY"];
+      process.env[loaderName] = library;
+      process.env["AWS_SECRET_ACCESS_KEY"] = "SYNTHETIC_AWS_HOST_SECRET";
+      let reached = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-agents-key",
+            CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+          },
+          runAgents: async () => {
+            reached = true;
+            throw new Error("stop after loader inspection");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: join(root, "scan") }),
+        ).rejects.toThrow("stop after loader inspection");
+        expect(reached).toBe(true);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (previousLoader === undefined) delete process.env[loaderName];
+        else process.env[loaderName] = previousLoader;
+        if (previousAws === undefined)
+          delete process.env["AWS_SECRET_ACCESS_KEY"];
+        else process.env["AWS_SECRET_ACCESS_KEY"] = previousAws;
         await client.close();
       }
     },
@@ -2589,7 +2695,7 @@ describe("Agents SDK thin scan adapter", () => {
         [
           "#!/bin/sh",
           "set -eu",
-          `printf '%s\\n' "SAFE_DOCKER openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent}" >> '${log}'`,
+          `printf '%s\\n' "SAFE_DOCKER openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent} aws=\${AWS_SECRET_ACCESS_KEY-absent} gh=\${GH_TOKEN-absent}" >> '${log}'`,
           `printf '<%s>\\n' \"$@\" >> '${log}'`,
           `case "\${1-}" in run) printf "%s\\n" synthetic-container;; inspect) if grep -q "<disconnect>" '${log}'; then printf "%s\\n" '{}'; else printf "%s\\n" '{"bridge":{}}'; fi;; exec) printf "%s\\n" '## Phase Sequence';; esac`,
           "exit 0",
@@ -2610,11 +2716,15 @@ describe("Agents SDK thin scan adapter", () => {
       const previousPath = process.env["PATH"];
       const previousHostKey = process.env["OPENAI_API_KEY"];
       const previousCodexKey = process.env["CODEX_API_KEY"];
+      const previousAws = process.env["AWS_SECRET_ACCESS_KEY"];
+      const previousGh = process.env["GH_TOKEN"];
       const previousTmp = process.env["TMPDIR"];
       process.env["PATH"] =
         `${repositoryBin}:${badBin}:${bin}:${previousPath ?? "/usr/bin:/bin"}`;
       process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
       process.env["CODEX_API_KEY"] = "SYNTHETIC_CODEX_HOST_KEY";
+      process.env["AWS_SECRET_ACCESS_KEY"] = "SYNTHETIC_AWS_HOST_SECRET";
+      process.env["GH_TOKEN"] = "SYNTHETIC_GH_HOST_TOKEN";
       process.env["TMPDIR"] = repositoryTmp;
       const tracingWasDisabled =
         getGlobalTraceProvider().createTrace({ name: "before scan" }) instanceof
@@ -2785,6 +2895,8 @@ describe("Agents SDK thin scan adapter", () => {
         expect(calls).not.toContain("UNTRUSTED_DOCKER");
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");
+        expect(calls).not.toContain("SYNTHETIC_AWS_HOST_SECRET");
+        expect(calls).not.toContain("SYNTHETIC_GH_HOST_TOKEN");
         expect(existsSync(value.scanDir)).toBe(true);
 
         const stateToken = "SYNTHETIC_SOURCE_STATE_TOKEN";
@@ -2856,6 +2968,11 @@ describe("Agents SDK thin scan adapter", () => {
         else process.env["OPENAI_API_KEY"] = previousHostKey;
         if (previousCodexKey === undefined) delete process.env["CODEX_API_KEY"];
         else process.env["CODEX_API_KEY"] = previousCodexKey;
+        if (previousAws === undefined)
+          delete process.env["AWS_SECRET_ACCESS_KEY"];
+        else process.env["AWS_SECRET_ACCESS_KEY"] = previousAws;
+        if (previousGh === undefined) delete process.env["GH_TOKEN"];
+        else process.env["GH_TOKEN"] = previousGh;
         if (previousTmp === undefined) delete process.env["TMPDIR"];
         else process.env["TMPDIR"] = previousTmp;
       }
@@ -3234,7 +3351,7 @@ describe("Agents SDK thin scan adapter", () => {
       const dockerScript = (label: string): string =>
         [
           "#!/bin/sh",
-          `printf '%s\\n' \"${label} \${PHASE-first} \${1-} openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent}\" >> '${log}'`,
+          `printf '%s\\n' \"${label} \${1-} openai=\${OPENAI_API_KEY-absent} codex=\${CODEX_API_KEY-absent}\" >> '${log}'`,
           'case "${1-}" in run) printf "%s\\n" synthetic-container;; inspect) printf "%s\\n" "{}";; esac',
           "exit 0",
           "",
@@ -3248,7 +3365,6 @@ describe("Agents SDK thin scan adapter", () => {
       const previousPath = process.env["PATH"];
       const previousOpenAI = process.env["OPENAI_API_KEY"];
       const previousCodex = process.env["CODEX_API_KEY"];
-      const previousPhase = process.env["PHASE"];
       process.env["PATH"] =
         `${targetBin}:${safeBin}:${previousPath ?? "/usr/bin:/bin"}`;
       process.env["OPENAI_API_KEY"] = "SYNTHETIC_HOST_KEY";
@@ -3319,16 +3435,14 @@ describe("Agents SDK thin scan adapter", () => {
       });
       try {
         await entered;
-        process.env["PHASE"] = "second";
         await runAgentsScan(second, {
           modelProvider: { getModel: () => complete },
         });
         release();
         await firstRun;
         const calls = await readFile(log, "utf8");
-        expect(calls).toContain("TARGET first run");
-        expect(calls).toContain("SAFE second run");
-        expect(calls).not.toContain("TARGET second");
+        expect(calls.match(/^TARGET run /gmu)).toHaveLength(1);
+        expect(calls.match(/^SAFE run /gmu)).toHaveLength(1);
         expect(calls).not.toContain("SYNTHETIC_HOST_KEY");
         expect(calls).not.toContain("SYNTHETIC_CODEX_HOST_KEY");
       } finally {
@@ -3340,8 +3454,6 @@ describe("Agents SDK thin scan adapter", () => {
         else process.env["OPENAI_API_KEY"] = previousOpenAI;
         if (previousCodex === undefined) delete process.env["CODEX_API_KEY"];
         else process.env["CODEX_API_KEY"] = previousCodex;
-        if (previousPhase === undefined) delete process.env["PHASE"];
-        else process.env["PHASE"] = previousPhase;
       }
     },
   );

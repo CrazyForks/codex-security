@@ -51,9 +51,9 @@ included; untracked/ignored files, submodule contents, symlinks, hard-linked sou
 deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, `.envrc`, Composer/Bundler/Gradle credentials, and Terraform CLI/state), Git credentials/history (including tracked nested bare repositories),
 and unrelated plugin-checkout files are excluded. Path scans also include
 applicable ancestor `SECURITY.md` files and exclude unrelated source files.
-Credential-directory roots, empty targets, and Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when
+Credential-directory roots, empty targets, Git-config includes, and Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when
 a path contains only untracked or ignored files. Ambient OpenAI/Codex API keys
-and Docker-configured proxy credentials are not forwarded to the scan shell. Inputs and
+and Docker-configured proxy credentials are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment. Inputs and
 results are size/type bounded before handoff. The standard `security-scan`
 skill runs with one serialized delegated ranking worker and preserves the
 existing pool-plan, receipt, and canonical output contract. A stable one-way-hashed,

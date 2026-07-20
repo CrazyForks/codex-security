@@ -341,8 +341,11 @@ function resolveSourcePath(path, cache, ignoreCase) {
     }
     const name =
       entries.find((entry) => entry === part) ??
-      (ignoreCase
-        ? entries.find((entry) => gitCaseFold(entry) === gitCaseFold(part))
+      (process.platform === "darwin" || ignoreCase
+        ? entries.find(
+            (entry) =>
+              gitPathFold(entry, ignoreCase) === gitPathFold(part, ignoreCase),
+          )
         : undefined);
     if (name === undefined) return null;
     current = join(current, name);
@@ -394,6 +397,17 @@ function hasGitHead(directory) {
 
 function gitCaseFold(value) {
   return value.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+}
+
+function gitPathFold(value, ignoreCase) {
+  const normalized =
+    process.platform === "darwin"
+      ? value.replace(
+          /[^\u2000-\u2fff\uf900-\ufaff\u{2f800}-\u{2faff}]+/gu,
+          (part) => part.normalize("NFC"),
+        )
+      : value;
+  return ignoreCase ? gitCaseFold(normalized) : normalized;
 }
 
 function openAt(root, path, flags, mode) {
