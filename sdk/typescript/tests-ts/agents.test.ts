@@ -898,6 +898,7 @@ describe("Agents SDK thin scan adapter", () => {
       "SYNTHETIC_GITCONFIG_SECRET\n",
     );
     await writeFile(join(repository, ".npmrc"), "SYNTHETIC_NPM_TOKEN\n");
+    await writeFile(join(repository, "deploy.ppk"), "SYNTHETIC_PUTTY_KEY\n");
     await writeFile(
       join(repository, "bunfig.toml"),
       'token="SYNTHETIC_BUN_TOKEN"\n',
@@ -919,6 +920,13 @@ describe("Agents SDK thin scan adapter", () => {
       [".fly", "config.yml", "SYNTHETIC_FLY_TOKEN"],
       [".cf", "config.json", "SYNTHETIC_CF_TOKEN"],
       ["Library/Keychains", "login.keychain-db", "SYNTHETIC_KEYCHAIN_BYTES"],
+      ["Browser/Profile/Network", "Cookies-wal", "SYNTHETIC_BROWSER_COOKIE"],
+      [
+        "Browser/Profile/Network",
+        "Cookies.binarycookies",
+        "SYNTHETIC_SAFARI_COOKIE",
+      ],
+      ["etc/ssh", "ssh_host_ed25519_key", "SYNTHETIC_OPENSSH_HOST_KEY"],
     ] as const) {
       await mkdir(join(repository, directory), { recursive: true });
       await writeFile(join(repository, directory, file), `${secret}\n`);
@@ -1001,6 +1009,10 @@ describe("Agents SDK thin scan adapter", () => {
             ".fly/config.yml",
             ".cf/config.json",
             "Library/Keychains/login.keychain-db",
+            "Browser/Profile/Network/Cookies-wal",
+            "Browser/Profile/Network/Cookies.binarycookies",
+            "etc/ssh/ssh_host_ed25519_key",
+            "deploy.ppk",
             ".bazelrc",
             ".bazelrc.user",
             "tools/bazel.rc",

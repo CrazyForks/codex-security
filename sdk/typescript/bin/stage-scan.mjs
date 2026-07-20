@@ -630,9 +630,12 @@ function skip(name, kind) {
     lower.startsWith(".yarnrc") ||
     lower.startsWith(".bazelrc") ||
     (lower.startsWith(".") && lower.endsWith("_history")) ||
+    /^cookies(?:\.sqlite)?(?:[._-]|$)/u.test(lower) ||
     /^id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[._-])/u.test(lower) ||
+    /^ssh_host_(?:rsa|dsa|ecdsa|ed25519)_key(?:$|[._-])/u.test(lower) ||
     lower.endsWith(".pem") ||
     lower.endsWith(".key") ||
+    lower.endsWith(".ppk") ||
     lower.endsWith(".p12") ||
     lower.endsWith(".pfx") ||
     lower.endsWith(".pkcs12") ||
