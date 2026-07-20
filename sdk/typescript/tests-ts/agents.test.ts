@@ -771,6 +771,89 @@ describe("Agents SDK thin scan adapter", () => {
     }
   });
 
+  test("excludes tracked credential stores, intent-to-add files, and nested bare Git history", async () => {
+    const root = await temporaryDirectory();
+    const child = join(root, "child");
+    const repository = join(root, "repository");
+    const workspace = join(root, "workspaces");
+    await initializeGitRepository(child);
+    await writeFile(join(child, "old.ts"), "SYNTHETIC_OLD_HISTORY_SECRET\n");
+    git(child, ["add", "."]);
+    git(child, ["commit", "--quiet", "-m", "old"]);
+    await rm(join(child, "old.ts"));
+    await writeFile(
+      join(child, "current.ts"),
+      "export const current = true;\n",
+    );
+    git(child, ["add", "-A"]);
+    git(child, ["commit", "--quiet", "-m", "current"]);
+    await initializeGitRepository(repository);
+    const bare = join(repository, "fixtures", "private-mirror");
+    await mkdir(join(repository, "fixtures"), { recursive: true });
+    git(repository, [
+      "clone",
+      "--quiet",
+      "--no-hardlinks",
+      "--bare",
+      child,
+      bare,
+    ]);
+    const revision = git(bare, ["rev-parse", "HEAD"]);
+    await mkdir(join(bare, "refs", "heads"), { recursive: true });
+    await writeFile(join(bare, "refs", "heads", "main"), `${revision}\n`);
+    await writeFile(
+      join(bare, "config"),
+      `${await readFile(join(bare, "config"), "utf8")}\n[remote "origin"]\n  url = https://user:SYNTHETIC_BARE_TOKEN@example.invalid/private.git\n`,
+    );
+    await writeFile(join(repository, "app.ts"), "export const app = true;\n");
+    await writeFile(join(repository, ".env"), "SYNTHETIC_ENV_SECRET\n");
+    await writeFile(
+      join(repository, ".gitconfig"),
+      "SYNTHETIC_GITCONFIG_SECRET\n",
+    );
+    await writeFile(join(repository, ".npmrc"), "SYNTHETIC_NPM_TOKEN\n");
+    await mkdir(join(repository, ".ssh"));
+    await writeFile(join(repository, ".ssh", "id_rsa"), "SYNTHETIC_SSH_KEY\n");
+    await writeFile(join(repository, "intent.ts"), "SYNTHETIC_INTENT_SECRET\n");
+    git(repository, ["add", "-f", "."]);
+    git(repository, ["reset", "--", "intent.ts"]);
+    git(repository, ["add", "-N", "intent.ts"]);
+    let reached = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-agents-key",
+          CODEX_SECURITY_DOCKER_WORKSPACE_ROOT: workspace,
+        },
+        runAgents: async (value: AgentsScanRequest) => {
+          reached = true;
+          expect(existsSync(join(value.repository, "app.ts"))).toBe(true);
+          for (const path of [
+            ".env",
+            ".gitconfig",
+            ".npmrc",
+            ".ssh/id_rsa",
+            "intent.ts",
+            "fixtures/private-mirror/config",
+            "fixtures/private-mirror/objects",
+          ]) {
+            expect(existsSync(join(value.repository, path))).toBe(false);
+          }
+          throw new Error("stop after staging inspection");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("stop after staging inspection");
+      expect(reached).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("distinguishes Git subdirectories while keeping equivalent checkout identities stable", async () => {
     const root = await temporaryDirectory();
     const identities = new Map<string, string[]>();

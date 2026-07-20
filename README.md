@@ -46,8 +46,8 @@ exposes the SDK shell tool with context compaction, and delegates one bounded
 scan worker. Path scans include
 applicable ancestor `SECURITY.md` files while
 excluding unrelated source files. Local edits to tracked files are included; untracked/ignored files,
-submodule contents, symlinks, hard-linked source/custom-plugin files, unstaged deletions, sparse-checkout paths absent
-from the worktree, and Git credentials/history are excluded. Empty and
+submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged deletions, sparse-checkout paths absent
+from the worktree, common local credential stores/key material, and Git credentials/history (including tracked nested bare repositories) are excluded. Empty and
 Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when a path
 contains only untracked or ignored files. Ambient OpenAI/Codex API keys and
 Docker-configured proxy credentials are not forwarded to the scan shell. A sanitized,

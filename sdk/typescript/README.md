@@ -47,8 +47,8 @@ and the plugin into the SDK Docker workspace using a credential-free staging
 subprocess, mounts them read-only, disables network access, and exposes the SDK
 shell tool with context compaction before
 delegating one bounded worker. Local edits to tracked files are
-included; untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, unstaged
-deletions, sparse-checkout paths absent from the worktree, Git credentials/history,
+included; untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged
+deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material, Git credentials/history (including tracked nested bare repositories),
 and unrelated plugin-checkout files are excluded. Path scans also include
 applicable ancestor `SECURITY.md` files and exclude unrelated source files.
 Empty and Git-shaped unversioned targets fail closed; bundled content-addressable installs are supported. Use the Codex engine when
@@ -63,7 +63,7 @@ Repository instruction files such as `AGENTS.md` are treated as untrusted scan
 input.
 
 This intentionally keeps staging small: Git-backed targets are treated as
-directory snapshots, so history/advisory lookup is unavailable; unversioned
+directory snapshots, so history/advisory lookup is unavailable; staged
 directories omit common `.env` and key files but remain a trusted-local input.
 Docker-host resource limits apply. `--model`, `--reasoning-effort`,
 `--max-turns`, and `--worker-max-turns` control the Agents workflow.

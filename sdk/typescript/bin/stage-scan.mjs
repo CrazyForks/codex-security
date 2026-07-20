@@ -109,12 +109,7 @@ function copyTree(source, destination, prefix, depth) {
   }
   ensureDirectory(destination);
   const entries = readDirectory(sourceRoot, source);
-  if (
-    input &&
-    ["head", "config", "objects", "refs"].every((name) =>
-      entries.some((entry) => gitCaseFold(entry.name) === name),
-    )
-  ) {
+  if (input && isBareGitDirectory(entries.map((entry) => entry.name))) {
     fail(
       `Bare Git-like directory cannot be staged safely: ${JSON.stringify(source)}`,
     );
@@ -317,6 +312,7 @@ function readDirectory(root, path) {
 function resolveSourcePath(path, cache, ignoreCase) {
   let current = job.source;
   for (const part of path.split("/")) {
+    if (job.kind === "tracked" && skip(part, job.kind)) return null;
     let entries = cache.get(current);
     if (entries === undefined) {
       try {
@@ -330,6 +326,14 @@ function resolveSourcePath(path, cache, ignoreCase) {
       cache.set(current, entries);
     }
     if (entries === null) return null;
+    if (
+      job.kind === "tracked" &&
+      current !== job.source &&
+      isBareGitDirectory(entries) &&
+      hasGitHead(current)
+    ) {
+      return null;
+    }
     const name =
       entries.find((entry) => entry === part) ??
       (ignoreCase
@@ -339,6 +343,48 @@ function resolveSourcePath(path, cache, ignoreCase) {
     current = join(current, name);
   }
   return current;
+}
+
+function isBareGitDirectory(entries) {
+  return ["head", "config", "objects", "refs"].every((name) =>
+    entries.some((entry) => gitCaseFold(entry) === name),
+  );
+}
+
+function hasGitHead(directory) {
+  const path = join(directory, "HEAD");
+  const metadata = metadataAt(sourceRoot, path);
+  if (
+    metadata === null ||
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size > 64 * 1024
+  ) {
+    return true;
+  }
+  const handle = openAt(
+    sourceRoot,
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const opened = fstatSync(handle);
+    if (
+      !opened.isFile() ||
+      opened.dev !== metadata.dev ||
+      opened.ino !== metadata.ino ||
+      opened.size !== metadata.size
+    ) {
+      return true;
+    }
+    const head = new Uint8Array(opened.size);
+    if (readSync(handle, head, 0, head.length, 0) !== head.length) return true;
+    return /^(?:ref:\s*refs\/[^\r\n]+|[0-9a-f]{40,64})\s*$/iu.test(
+      Buffer.from(head).toString("utf8"),
+    );
+  } finally {
+    closeSync(handle);
+  }
 }
 
 function gitCaseFold(value) {

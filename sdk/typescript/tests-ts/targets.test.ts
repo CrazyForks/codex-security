@@ -12,6 +12,7 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
+import { safeHostPath } from "../src/targets.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -263,4 +264,23 @@ describe("scan target normalization", () => {
       project,
     ]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "does not reintroduce repository-local host tools through the PATH fallback",
+    () => {
+      const previousPath = process.env["PATH"];
+      process.env["PATH"] = "/definitely-missing-codex-security-path";
+      try {
+        const entries = safeHostPath("/usr").split(":");
+        expect(entries.length).toBeGreaterThan(0);
+        expect(entries.some((entry) => entry.startsWith("/usr/"))).toBe(false);
+        expect(() => safeHostPath("/")).toThrow(
+          "No safe host-tool PATH entries remain outside the scan target",
+        );
+      } finally {
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
+      }
+    },
+  );
 });

@@ -79,8 +79,8 @@ Standard repository/path CLI scans use `@openai/agents@0.13.5`. The thin Agents
 adapter stages the requested tracked regular-file scope and the plugin with a credential-free
 subprocess into a network-disabled `node:22-bookworm` Docker sandbox, exposes the SDK shell tool with context
 compaction, and delegates one bounded worker. Local edits to tracked files are included;
-untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, unstaged deletions,
-sparse-checkout paths absent from the worktree, and Git credentials/history
+untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged deletions,
+sparse-checkout paths absent from the worktree, common local credential stores/key material, and Git credentials/history (including tracked nested bare repositories)
 are excluded. Path scans include applicable ancestor `SECURITY.md` files and
 exclude unrelated source files. Empty and Git-shaped unversioned targets fail
 closed; bundled content-addressable installs are supported. Use Codex for paths containing only untracked or ignored files. Inputs
@@ -94,7 +94,7 @@ sensitive debug logging are suppressed. Repository instruction files such as
 does not consume file-backed Codex authentication.
 
 Git-backed targets are deliberately treated as directory snapshots, so history
-and advisory lookup is unavailable; unversioned targets omit common local
+and advisory lookup is unavailable; staged targets omit common local
 credential files and directories but remain trusted-local input. Docker-host limits apply. Native
 Windows paths route to Codex; WSL can be used for Agents execution. Docker
 workspaces default to

@@ -1041,13 +1041,33 @@ async function stageRepository(
       { cause: error },
     );
   }
-  const values = await gitIndexEntries(
+  const values = await gitPathRecords(
     source,
     localGitRoot,
     target,
     ignoreCase,
     environment,
     signal,
+    ["ls-files", "--cached", "--stage", "-z"],
+  );
+  const intentToAdd = new Set(
+    await gitPathRecords(
+      source,
+      localGitRoot,
+      target,
+      ignoreCase,
+      environment,
+      signal,
+      [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=all",
+        "--name-only",
+        "--diff-filter=A",
+        "-z",
+      ],
+    ),
   );
   const indexEntryPattern =
     /^(100(?:644|755)|120000|160000) [0-9a-f]{40,64} [0-3]\t(.+)$/isu;
@@ -1076,7 +1096,7 @@ async function stageRepository(
     if (parts.some((part) => part.toLowerCase() === ".git")) {
       continue;
     }
-    if (isGitCredentialPath(parts)) continue;
+    if (isGitCredentialPath(parts) || intentToAdd.has(path)) continue;
     if (mode === "120000" || mode === "160000") continue;
     paths.add(path);
   }
@@ -1113,13 +1133,14 @@ function gitPathspecs(
   return [...paths].map((path) => `${literal}${path}`);
 }
 
-async function gitIndexEntries(
+async function gitPathRecords(
   source: string,
   gitRoot: string,
   target: Pick<NormalizedTarget, "kind" | "paths">,
   ignoreCase: boolean,
   environment: NodeJS.ProcessEnv,
   signal: AbortSignal,
+  command: readonly string[],
 ): Promise<string[]> {
   const child = spawn(
     "git",
@@ -1131,10 +1152,7 @@ async function gitIndexEntries(
       "core.hooksPath=/dev/null",
       "-c",
       `safe.directory=${gitRoot}`,
-      "ls-files",
-      "--cached",
-      "--stage",
-      "-z",
+      ...command,
       "--",
       ...gitPathspecs(target, ignoreCase),
     ],
@@ -1485,7 +1503,11 @@ async function readBoundedGitInput(
 
 function isGitCredentialPath(parts: string[]): boolean {
   const leaf = parts.at(-1)?.toLowerCase();
-  return leaf === ".git-credentials" || leaf === ".gitmodules";
+  return (
+    leaf === ".git-credentials" ||
+    leaf === ".gitconfig" ||
+    leaf === ".gitmodules"
+  );
 }
 
 async function directorySnapshotDigest(
