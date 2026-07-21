@@ -334,17 +334,20 @@ describe("CLI compatibility contract", () => {
     const repository = join(root, "repository");
     const relativeHome = join(repository, ".codex-security-home");
     const tildeHome = join(root, ".codex-security-home");
+    const mountedHome = join(root, "mounted-codex-home");
     await mkdir(relativeHome, { recursive: true });
     await mkdir(tildeHome, { recursive: true });
+    await mkdir(mountedHome, { recursive: true });
     try {
-      for (const [configuredHome, expectedHome] of [
-        [".codex-security-home", relativeHome],
-        ["~/.codex-security-home", tildeHome],
+      for (const [configuredHome, expectedHome, userHome] of [
+        [".codex-security-home", relativeHome, root],
+        ["~/.codex-security-home", tildeHome, root],
+        [mountedHome, mountedHome, join(root, "missing-home")],
       ] as const) {
         const environment = {
           ...process.env,
-          HOME: root,
-          USERPROFILE: root,
+          HOME: userHome,
+          USERPROFILE: userHome,
           CODEX_HOME: configuredHome,
           OPENAI_API_KEY: undefined,
           CODEX_API_KEY: undefined,

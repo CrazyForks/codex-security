@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync, statSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, parse, resolve } from "node:path";
 import { cwd } from "node:process";
 import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
@@ -130,7 +130,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
                 ...process.env,
                 CODEX_HOME: resolve(expandHome(configuredHome)),
               },
-        cwd: homedir(),
+        cwd: parse(homedir()).root,
         stdio: "inherit",
         windowsHide: true,
       },
