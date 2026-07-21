@@ -335,14 +335,18 @@ describe("CLI compatibility contract", () => {
     const relativeHome = join(repository, ".codex-security-home");
     const tildeHome = join(root, ".codex-security-home");
     const mountedHome = join(root, "mounted-codex-home");
+    const defaultHome = join(root, ".codex");
     await mkdir(relativeHome, { recursive: true });
     await mkdir(tildeHome, { recursive: true });
     await mkdir(mountedHome, { recursive: true });
+    await mkdir(defaultHome, { recursive: true });
     try {
       for (const [configuredHome, expectedHome, userHome] of [
         [".codex-security-home", relativeHome, root],
         ["~/.codex-security-home", tildeHome, root],
         [mountedHome, mountedHome, join(root, "missing-home")],
+        ["", defaultHome, root],
+        ["   ", defaultHome, root],
       ] as const) {
         const environment = {
           ...process.env,
@@ -375,6 +379,7 @@ describe("CLI compatibility contract", () => {
           ),
         ).toBe(0);
         expect(await stat(join(expectedHome, "auth.json"))).toBeDefined();
+        await expect(stat(join(repository, "auth.json"))).rejects.toThrow();
         expect(run(["login", "status"])).toBe(0);
         expect(run(["logout"])).toBe(0);
       }

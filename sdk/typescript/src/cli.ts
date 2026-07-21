@@ -119,18 +119,18 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   runCodex: async (args) => {
     const command = resolveCodexCommand();
     const configuredHome = process.env["CODEX_HOME"];
+    const environment = { ...process.env };
+    if (configuredHome?.trim()) {
+      environment["CODEX_HOME"] = resolve(expandHome(configuredHome));
+    } else {
+      delete environment["CODEX_HOME"];
+    }
     const invocation = spawn(
       command.command,
       [...command.prefixArgs, ...args],
       {
-        env:
-          configuredHome === undefined
-            ? process.env
-            : {
-                ...process.env,
-                CODEX_HOME: resolve(expandHome(configuredHome)),
-              },
-        cwd: parse(homedir()).root,
+        env: environment,
+        cwd: parse(process.execPath).root,
         stdio: "inherit",
         windowsHide: true,
       },
@@ -680,10 +680,13 @@ export function hasReusableCodexSignIn(
   if (environmentApiKey(environment) !== null) {
     return false;
   }
+  const configuredHome = environment["CODEX_HOME"];
   try {
     return statSync(
       join(
-        expandHome(environment["CODEX_HOME"] ?? join(homedir(), ".codex")),
+        expandHome(
+          configuredHome?.trim() ? configuredHome : join(homedir(), ".codex"),
+        ),
         "auth.json",
       ),
     ).isFile();

@@ -763,8 +763,10 @@ export class CodexSecurity {
         environment: processEnvironment,
         signal,
       });
-      const ambientHome =
-        processEnvironment["CODEX_HOME"] ?? join(homedir(), ".codex");
+      const configuredHome = processEnvironment["CODEX_HOME"];
+      const ambientHome = configuredHome?.trim()
+        ? configuredHome
+        : join(homedir(), ".codex");
       const credentialsAvailable = await initialCredentialsAvailable(
         processEnvironment,
         ambientHome,
