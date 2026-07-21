@@ -344,6 +344,7 @@ describe("CLI compatibility contract", () => {
         const environment = {
           ...process.env,
           HOME: root,
+          USERPROFILE: root,
           CODEX_HOME: configuredHome,
           OPENAI_API_KEY: undefined,
           CODEX_API_KEY: undefined,
