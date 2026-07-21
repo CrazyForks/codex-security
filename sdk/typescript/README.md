@@ -2,9 +2,10 @@
 
 TypeScript SDK and CLI for running Codex Security scans. The package is
 ESM-only, includes TypeScript declarations, and installs the `codex-security`
-executable. Standard repository/path scans use OpenAI Agents SDK with an API
-key or the aligned `@openai/codex` runtime with a stored sign-in. Codex also
-handles diff, deep, and explicit Codex-backed scans.
+executable. On macOS and Linux, standard repository/path scans use OpenAI
+Agents SDK with an API key and the aligned `@openai/codex` runtime with a
+stored sign-in. Codex also handles diff, working-tree, deep, `--codex`, and
+native Windows scans.
 
 > [!WARNING]
 > Codex Security is in beta. APIs, CLI options, and output formats may change.
@@ -50,9 +51,10 @@ Check or remove the stored sign-in with `npx codex-security login status` and
 sign-in. If Codex stores credentials in the system keyring, run
 `npx codex-security login` once before scanning.
 
-An environment API key takes precedence over a stored sign-in. Standard
-repository/path scans use Agents with an API key and Codex with a stored
-sign-in. Unset the API key to use your ChatGPT sign-in.
+An environment API key takes precedence over a stored sign-in. On macOS and
+Linux, standard repository/path scans use Agents with an API key and Codex with
+a stored sign-in. Unset both `OPENAI_API_KEY` and `CODEX_API_KEY` to use your
+ChatGPT sign-in.
 
 ## CLI
 
@@ -71,31 +73,22 @@ repository and path targets. The output directory must be outside the scanned
 repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
-The Agents engine stages the requested tracked, regular-file scope
-and the plugin into the SDK Docker workspace using a credential-free staging
-subprocess, mounts them read-only, disables network access, and exposes the SDK
-shell tool with context compaction before
-delegating one bounded worker. Local edits to tracked files are
-included; untracked/ignored files, submodule contents, symlinks, hard-linked source/custom-plugin files, intent-to-add files, unstaged
-deletions, sparse-checkout paths absent from the worktree, common local credential stores/key material (including `.config`, shell profiles/histories/caches, alternate-VCS metadata, `.envrc`/`.flaskenv`, Composer/Bundler/Gradle/Bazel/Bun credentials, Terraform CLI/state, Databricks, dbt, Snowflake/SnowSQL, gsutil, deployment/ML CLI stores, Sentry/authinfo, browser/keychain/password databases, common database/client RC files, and bounded credential-shaped and nested Docker/AWS/Azure/OAuth/service-account JSON, exported token/kubeconfig/CSV files, and extensionless SSH keys), Git credentials/history (including incomplete/headless tracked nested repositories),
-and unrelated plugin-checkout files are excluded. Path scans also include
-applicable ancestor `SECURITY.md` files and exclude unrelated source files.
-Credential-directory roots/descendants, empty targets, Git-config includes, Git-shaped targets (including an ambiguous tracked-worktree root), and unversioned directories containing `.gitignore` files or nested Git worktrees fail closed; bundled content-addressable installs are supported. Use the Codex engine when
-a path contains only untracked or ignored files. Ambient OpenAI/Codex API keys
-and Docker-configured proxy credentials are not forwarded to the scan shell; host Git, staging, and Docker subprocesses receive a minimal credential-free environment, reject target-controlled Docker configuration, path-shaped Docker helper names, and Docker/PTY helpers resolving into the target, and suppress unsafe PTY loader overrides. Inputs and
-results are size/type bounded before handoff. The standard `security-scan`
-skill runs with one serialized delegated ranking worker and preserves the
-existing pool-plan, receipt, and canonical output contract. A stable one-way-hashed,
-credential-free remote and relative-scope identity is bound during validation
-when available, while SDK tracing and sensitive debug logging are suppressed.
-Repository instruction files such as `AGENTS.md` are treated as untrusted scan
-input.
+The Agents engine stages tracked, regular files and bundled scan helpers, then
+mounts them read-only in a network-disabled Docker workspace. Local edits to
+tracked files are included; untracked or ignored files, submodules, symlinks,
+Git history, and common credential stores are excluded. Path scans include
+applicable ancestor `SECURITY.md` files. Unsafe or ambiguous targets fail
+before a scan starts, and repository instructions such as `AGENTS.md` remain
+untrusted input.
 
-This intentionally keeps staging small: Git-backed targets are treated as
-directory snapshots, so history/advisory lookup is unavailable; staged
-directories omit common `.env` and key files but remain a trusted-local input.
-Docker-host resource limits apply. `--model`, `--reasoning-effort`,
-`--max-turns`, and `--worker-max-turns` control the Agents workflow.
+The scan shell does not receive ambient API keys or Docker proxy credentials.
+Host Git, staging, and Docker subprocesses use a minimal credential-free
+environment. Git-backed targets are directory snapshots, so history and
+advisory lookup are unavailable; staged content remains trusted local input.
+Use `--engine codex` when a path contains only untracked or ignored files, or
+when Docker is unavailable. `--model`,
+`--reasoning-effort`, `--max-turns`, and `--worker-max-turns` control the
+Agents workflow.
 
 The sandbox uses a writable temporary home/cache without exposing host home
 directories. Docker workspaces default to `~/.cache/codex-security/sandboxes`, which works with

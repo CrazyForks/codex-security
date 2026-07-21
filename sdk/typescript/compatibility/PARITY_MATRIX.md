@@ -41,31 +41,31 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 
 ## CLI flags and arguments
 
-| Surface                        | CLI behavior                                                                       |
-| ------------------------------ | ---------------------------------------------------------------------------------- |
-| no arguments                   | Print root help to stdout and exit 0                                               |
-| `-h`, `--help`                 | Print root help and exit 0                                                         |
-| `--version`                    | Print SDK version and bundled plugin version to stdout; exit 0 without Python      |
-| `login [OPTIONS]`              | Delegate ChatGPT, device, API-key, and access-token login to bundled Codex         |
-| `login status`                 | Show the stored sign-in available to Codex Security                                |
-| `logout`                       | Remove the stored sign-in available to Codex Security                              |
-| `scan [repository]`            | Repository defaults to the current directory                                       |
-| repeatable `--path PATH`       | Path-only scan; mutually exclusive with diff/working-tree                          |
-| `--diff BASE`                  | Ref diff using `--head` or `HEAD`                                                  |
-| `--working-tree`               | Staged and unstaged changes using `--base` or `HEAD`                               |
-| `--head REF`                   | Valid only with `--diff`                                                           |
-| `--base REF`                   | Valid only with `--working-tree`                                                   |
-| `--mode standard\|deep`        | Deep rejects diff targets                                                          |
-| `--engine agents\|codex`       | API-key repo/path scans default to Agents; stored sign-in/diff/deep defaults Codex |
-| `--model MODEL`                | Agents model, default `gpt-5.6`                                                    |
-| `--reasoning-effort EFFORT`    | Agents reasoning effort, default `high`                                            |
-| `--max-turns N`                | Agents coordinator turn limit, default `200`                                       |
-| `--worker-max-turns N`         | Agents per-worker turn limit, default `100`                                        |
-| `--output-dir DIR`             | Must be absent or empty and outside the repository; preserved on interruption      |
-| `--plugin-path PATH`           | Plugin directory or safe ZIP override                                              |
-| repeatable `--codex KEY=VALUE` | Parse TOML literals, reject duplicate/conflicting/owned keys                       |
-| `--json`                       | Machine JSON only on stdout; progress/errors on stderr                             |
-| `--python PATH`                | Intentional additive v0 option for the explicit plugin runtime boundary            |
+| Surface                        | CLI behavior                                                                  |
+| ------------------------------ | ----------------------------------------------------------------------------- |
+| no arguments                   | Print root help to stdout and exit 0                                          |
+| `-h`, `--help`                 | Print root help and exit 0                                                    |
+| `--version`                    | Print SDK version and bundled plugin version to stdout; exit 0 without Python |
+| `login [OPTIONS]`              | Delegate ChatGPT, device, API-key, and access-token login to bundled Codex    |
+| `login status`                 | Show the stored sign-in available to Codex Security                           |
+| `logout`                       | Remove the stored sign-in available to Codex Security                         |
+| `scan [repository]`            | Repository defaults to the current directory                                  |
+| repeatable `--path PATH`       | Path-only scan; mutually exclusive with diff/working-tree                     |
+| `--diff BASE`                  | Ref diff using `--head` or `HEAD`                                             |
+| `--working-tree`               | Staged and unstaged changes using `--base` or `HEAD`                          |
+| `--head REF`                   | Valid only with `--diff`                                                      |
+| `--base REF`                   | Valid only with `--working-tree`                                              |
+| `--mode standard\|deep`        | Deep rejects diff targets                                                     |
+| `--engine agents\|codex`       | Repo/path: Agents with key; sign-in/diff/working-tree/deep/Windows: Codex     |
+| `--model MODEL`                | Agents model, default `gpt-5.6`                                               |
+| `--reasoning-effort EFFORT`    | Agents reasoning effort, default `high`                                       |
+| `--max-turns N`                | Agents coordinator turn limit, default `200`                                  |
+| `--worker-max-turns N`         | Agents per-worker turn limit, default `100`                                   |
+| `--output-dir DIR`             | Must be absent or empty and outside the repository; preserved on interruption |
+| `--plugin-path PATH`           | Plugin directory or safe ZIP override                                         |
+| repeatable `--codex KEY=VALUE` | Parse TOML literals, reject duplicate/conflicting/owned keys                  |
+| `--json`                       | Machine JSON only on stdout; progress/errors on stderr                        |
+| `--python PATH`                | Intentional additive v0 option for the explicit plugin runtime boundary       |
 
 ## Output, exit, and signal contract
 

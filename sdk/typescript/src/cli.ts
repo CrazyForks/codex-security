@@ -216,9 +216,10 @@ export function scanHelp(): string {
     "                        of the bundled plugin.",
     "  --python PATH         Plugin Python interpreter (in-container for Docker).",
     "  --engine {agents,codex}",
-    "                        Execution engine. Repository/path standard scans",
-    "                        default to Agents SDK with an API key. Stored sign-in,",
-    "                        diff/deep, --codex, and native Windows scans use Codex.",
+    "                        Standard repository/path scans use Agents with an API",
+    "                        key on macOS/Linux and Codex with a stored sign-in. Diff,",
+    "                        working-tree, deep, --codex, and native Windows scans",
+    "                        use Codex.",
     "                        Agents stages tracked files only.",
     "  --model MODEL         Agents SDK model (default: gpt-5.6).",
     "  --reasoning-effort EFFORT",
@@ -263,6 +264,9 @@ export async function main(
   if (rootOption === "--version") {
     output.write(`${versionText()}\n`);
     return 0;
+  }
+  if (argv[0] === "login" && argv[1] === "help") {
+    return await dependencies.runCodex(argv);
   }
   if (argv[0] === "login" || argv[0] === "logout") {
     return await dependencies.runCodex([

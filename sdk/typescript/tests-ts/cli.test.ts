@@ -302,6 +302,8 @@ describe("CLI compatibility contract", () => {
       ["login", "--with-access-token"],
       ["login", "status"],
       ["login", "--help"],
+      ["login", "help"],
+      ["login", "help", "status"],
       ["logout"],
       ["logout", "--help"],
     ] as const;
@@ -318,12 +320,16 @@ describe("CLI compatibility contract", () => {
         return 17;
       };
       expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(17);
-      expect(forwarded).toEqual([
-        argv[0],
-        ...argv.slice(1),
-        "-c",
-        'cli_auth_credentials_store="file"',
-      ]);
+      expect(forwarded).toEqual(
+        argv[0] === "login" && argv[1] === "help"
+          ? argv
+          : [
+              argv[0],
+              ...argv.slice(1),
+              "-c",
+              'cli_auth_credentials_store="file"',
+            ],
+      );
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe("");
     }
@@ -345,8 +351,12 @@ describe("CLI compatibility contract", () => {
         [".codex-security-home", relativeHome, root],
         ["~/.codex-security-home", tildeHome, root],
         [mountedHome, mountedHome, join(root, "missing-home")],
-        ["", defaultHome, root],
-        ["   ", defaultHome, root],
+        ...(process.platform === "win32"
+          ? []
+          : ([
+              ["", defaultHome, root],
+              ["   ", defaultHome, root],
+            ] as const)),
       ] as const) {
         const environment = {
           ...process.env,
