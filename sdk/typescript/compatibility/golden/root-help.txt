@@ -1,8 +1,10 @@
-usage: codex-security [-h] [--version] {scan} ...
+usage: codex-security [-h] [--version] {scan,login,logout} ...
 
-positional arguments:
-  {scan}
+commands:
+  {scan,login,logout}
     scan      Run a Codex Security scan.
+    login     Sign in with ChatGPT or store credentials.
+    logout    Remove the stored sign-in.
 
 options:
   -h, --help  show this help message and exit

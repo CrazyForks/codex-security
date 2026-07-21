@@ -14,17 +14,22 @@ scans also require a host Python interpreter. Docker and Python are not needed
 to install the package or run
 `--help` and `--version`.
 
-Standard repository and path scans run through the OpenAI Agents SDK by
-default. Set `OPENAI_API_KEY` or `CODEX_API_KEY` before scanning. Diff and deep
-scans continue to use Codex and can also reuse an existing file-backed Codex
-sign-in.
+Standard repository and path scans run through the OpenAI Agents SDK with an
+API key, or Codex with a stored sign-in. Diff and deep scans continue to use
+Codex.
 
 ## Install and scan
 
 ```bash
 npm install @openai/codex-security@beta
+npx codex-security login
 npx codex-security scan /path/to/repo
 ```
+
+On a remote or headless machine, use `npx codex-security login --device-auth`.
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. See the
+[TypeScript SDK and CLI reference](sdk/typescript/README.md#authentication)
+for stored API keys, enterprise access tokens, and login status.
 
 Scan a subset of a repository or write machine-readable results:
 
@@ -57,7 +62,7 @@ stable across checkouts without colliding across monorepo services; bounded
 results are copied to the requested output directory. SDK tracing and sensitive
 debug logging are suppressed, and repository instruction files such as
 `AGENTS.md` are treated as untrusted scan input.
-Docker must be running for the default Agents engine. Use
+Docker must be running when the Agents engine is selected. Use
 `--engine codex` to run the existing Codex-backed standard scan when needed;
 diff, working-tree, deep, `--codex`, and native Windows scans select it
 automatically.

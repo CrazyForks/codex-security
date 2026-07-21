@@ -297,7 +297,7 @@ export class AgentsSecurity {
       const apiKey = environmentApiKey(this.#dependencies.environment);
       if (apiKey === null) {
         throw new AuthenticationRequiredError(
-          "Agents SDK scans require OPENAI_API_KEY or CODEX_API_KEY. File-backed Codex authentication is available only with the Codex engine.",
+          "The Agents engine requires an API key. Set OPENAI_API_KEY or CODEX_API_KEY, or use --engine codex to scan with your Codex sign-in.",
         );
       }
       const workspaceRoot = await dockerWorkspaceRoot(

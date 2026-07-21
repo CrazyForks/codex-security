@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
-import { realpathSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { realpathSync, statSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { cwd } from "node:process";
 import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
@@ -13,6 +16,7 @@ import { CodexSecurity, type ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 import { CodexSecurityError, ScanInterruptedError } from "./errors.js";
 import type { ScanResult } from "./result.js";
+import { expandHome, resolveCodexCommand } from "./runtime.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
 
@@ -82,6 +86,8 @@ interface CliDependencies {
   removeSignalListener(signal: SignalName, listener: () => void): void;
   writeSynchronously(stream: Writable, value: string): void;
   forceExit(signal: SignalName): void;
+  hasReusableCodexSignIn(): boolean;
+  runCodex(args: readonly string[]): number;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -105,15 +111,34 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     writeSync(stream.fd, value);
   },
   forceExit: (signal) => process.kill(process.pid, signal),
+  hasReusableCodexSignIn: () => hasReusableCodexSignIn(),
+  runCodex: (args) => {
+    const command = resolveCodexCommand();
+    const invocation = spawnSync(
+      command.command,
+      [...command.prefixArgs, ...args],
+      {
+        env: process.env,
+        stdio: "inherit",
+        windowsHide: true,
+      },
+    );
+    if (invocation.error !== undefined) throw invocation.error;
+    if (invocation.signal === "SIGINT") return 130;
+    if (invocation.signal === "SIGTERM") return 143;
+    return invocation.status ?? 1;
+  },
 };
 
 export function rootHelp(): string {
   return [
-    "usage: codex-security [-h] [--version] {scan} ...",
+    "usage: codex-security [-h] [--version] {scan,login,logout} ...",
     "",
-    "positional arguments:",
-    "  {scan}",
+    "commands:",
+    "  {scan,login,logout}",
     "    scan      Run a Codex Security scan.",
+    "    login     Sign in with ChatGPT or store credentials.",
+    "    logout    Remove the stored sign-in.",
     "",
     "options:",
     "  -h, --help  show this help message and exit",
@@ -156,8 +181,9 @@ export function scanHelp(): string {
     "  --python PATH         Plugin Python interpreter (in-container for Docker).",
     "  --engine {agents,codex}",
     "                        Execution engine. Repository/path standard scans",
-    "                        default to Agents SDK; diff/deep, --codex, and native",
-    "                        Windows scans default to Codex. Agents stages tracked files only.",
+    "                        default to Agents SDK with an API key. Stored sign-in,",
+    "                        diff/deep, --codex, and native Windows scans use Codex.",
+    "                        Agents stages tracked files only.",
     "  --model MODEL         Agents SDK model (default: gpt-5.6).",
     "  --reasoning-effort EFFORT",
     "                        Agents SDK reasoning effort: none, minimal, low,",
@@ -201,6 +227,14 @@ export async function main(
   if (rootOption === "--version") {
     output.write(`${versionText()}\n`);
     return 0;
+  }
+  if (argv[0] === "login" || argv[0] === "logout") {
+    return dependencies.runCodex([
+      argv[0],
+      "-c",
+      'cli_auth_credentials_store="file"',
+      ...argv.slice(1),
+    ]);
   }
   if (argv[0] !== "scan") {
     return usageError(`invalid choice: ${argv[0]}`, rootHelp(), errorOutput);
@@ -309,7 +343,11 @@ async function runScan(
   let failure: unknown;
   try {
     const target = targetFromArguments(arguments_);
-    const engine = scanEngineFor(arguments_, dependencies.platform());
+    const engine = scanEngineFor(
+      arguments_,
+      dependencies.platform(),
+      dependencies.hasReusableCodexSignIn,
+    );
     const config: CodexSecurityConfig | AgentsSecurityConfig =
       engine === "agents"
         ? {
@@ -564,6 +602,7 @@ export function targetFromArguments(
 function scanEngineFor(
   arguments_: ParsedScanArguments,
   platform: NodeJS.Platform,
+  hasReusableCodexSignIn: () => boolean,
 ): ScanEngine {
   const implicitCodex =
     arguments_.mode === "deep" ||
@@ -572,7 +611,9 @@ function scanEngineFor(
     arguments_.codex.length > 0;
   const engine =
     arguments_.engine ??
-    (implicitCodex || platform === "win32" ? "codex" : "agents");
+    (implicitCodex || platform === "win32" || hasReusableCodexSignIn()
+      ? "codex"
+      : "agents");
   if (engine === "agents" && platform === "win32") {
     throw new CodexSecurityError(
       "The Agents SDK sandbox does not support native Windows host paths; use --engine codex or run the Agents engine from WSL.",
@@ -595,6 +636,31 @@ function scanEngineFor(
     );
   }
   return engine;
+}
+
+export function hasReusableCodexSignIn(
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (
+    Object.entries(environment).some(
+      ([name, value]) =>
+        (name.toUpperCase() === "OPENAI_API_KEY" ||
+          name.toUpperCase() === "CODEX_API_KEY") &&
+        Boolean(value),
+    )
+  ) {
+    return false;
+  }
+  try {
+    return statSync(
+      join(
+        expandHome(environment["CODEX_HOME"] ?? join(homedir(), ".codex")),
+        "auth.json",
+      ),
+    ).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function positiveOptionValue(value: string, option: string): number {

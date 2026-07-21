@@ -46,6 +46,9 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | no arguments                   | Print root help to stdout and exit 0                                               |
 | `-h`, `--help`                 | Print root help and exit 0                                                         |
 | `--version`                    | Print SDK version and bundled plugin version to stdout; exit 0 without Python      |
+| `login [OPTIONS]`              | Delegate ChatGPT, device, API-key, and access-token login to bundled Codex         |
+| `login status`                 | Show the stored sign-in available to Codex Security                                |
+| `logout`                       | Remove the stored sign-in available to Codex Security                              |
 | `scan [repository]`            | Repository defaults to the current directory                                       |
 | repeatable `--path PATH`       | Path-only scan; mutually exclusive with diff/working-tree                          |
 | `--diff BASE`                  | Ref diff using `--head` or `HEAD`                                                  |
@@ -53,7 +56,7 @@ contracts. The SDK is asynchronous and uses camelCase option and result names.
 | `--head REF`                   | Valid only with `--diff`                                                           |
 | `--base REF`                   | Valid only with `--working-tree`                                                   |
 | `--mode standard\|deep`        | Deep rejects diff targets                                                          |
-| `--engine agents\|codex`       | Standard repo/path defaults to Agents; diff/deep/`--codex`/Win32 defaults to Codex |
+| `--engine agents\|codex`       | API-key repo/path scans default to Agents; stored sign-in/diff/deep defaults Codex |
 | `--model MODEL`                | Agents model, default `gpt-5.6`                                                    |
 | `--reasoning-effort EFFORT`    | Agents reasoning effort, default `high`                                            |
 | `--max-turns N`                | Agents coordinator turn limit, default `200`                                       |

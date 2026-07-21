@@ -2,9 +2,9 @@
 
 TypeScript SDK and CLI for running Codex Security scans. The package is
 ESM-only, includes TypeScript declarations, and installs the `codex-security`
-executable. Standard repository/path scans use OpenAI Agents SDK by default;
-the aligned `@openai/codex` runtime remains available for diff, deep, and
-explicit Codex-backed scans.
+executable. Standard repository/path scans use OpenAI Agents SDK with an API
+key or the aligned `@openai/codex` runtime with a stored sign-in. Codex also
+handles diff, deep, and explicit Codex-backed scans.
 
 > [!WARNING]
 > Codex Security is in beta. APIs, CLI options, and output formats may change.
@@ -22,9 +22,37 @@ sandbox image includes Python for the bundled scan helpers.
 `--python` and `pythonPath` select an in-container interpreter for Agents
 scans or a host interpreter for Codex scans.
 
-Before a standard repository/path scan, set `OPENAI_API_KEY` or
-`CODEX_API_KEY`. File-backed Codex sign-in remains available for
-`--engine codex`, diff, and deep scans.
+## Authentication
+
+For local use, sign in with ChatGPT:
+
+```bash
+npx codex-security login
+npx codex-security scan .
+```
+
+On a remote or headless machine, use device authentication:
+
+```bash
+npx codex-security login --device-auth
+```
+
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To store an API key or
+enterprise access token instead, pass it on stdin:
+
+```bash
+printenv OPENAI_API_KEY | npx codex-security login --with-api-key
+printenv CODEX_ACCESS_TOKEN | npx codex-security login --with-access-token
+```
+
+Check or remove the stored sign-in with `npx codex-security login status` and
+`npx codex-security logout`. Codex Security reuses an existing file-based Codex
+sign-in. If Codex stores credentials in the system keyring, run
+`npx codex-security login` once before scanning.
+
+An environment API key takes precedence over a stored sign-in. Standard
+repository/path scans use Agents with an API key and Codex with a stored
+sign-in. Unset the API key to use your ChatGPT sign-in.
 
 ## CLI
 
@@ -43,7 +71,7 @@ repository and path targets. The output directory must be outside the scanned
 repository. When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
-The default Agents engine stages the requested tracked, regular-file scope
+The Agents engine stages the requested tracked, regular-file scope
 and the plugin into the SDK Docker workspace using a credential-free staging
 subprocess, mounts them read-only, disables network access, and exposes the SDK
 shell tool with context compaction before

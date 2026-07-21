@@ -1424,7 +1424,7 @@ async function sameFile(left: string, right: string): Promise<boolean> {
   }
 }
 
-function expandHome(value: string): string {
+export function expandHome(value: string): string {
   if (value === "~") return homedir();
   if (value.startsWith("~/") || value.startsWith("~\\")) {
     return join(homedir(), value.slice(2));

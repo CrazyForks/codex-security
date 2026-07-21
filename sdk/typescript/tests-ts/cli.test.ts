@@ -6,6 +6,7 @@ import {
   readFile,
   rm,
   symlink,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,7 @@ import type {
 } from "../src/index.js";
 import {
   main,
+  hasReusableCodexSignIn,
   parseCodexOverrides,
   parseScanArguments,
   resultJson,
@@ -141,6 +143,7 @@ function dependencies(
     signals?: FakeSignals;
     result?: ScanResult;
     platform?: NodeJS.Platform;
+    storedSignIn?: boolean;
   } = {},
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
@@ -173,6 +176,8 @@ function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
+    hasReusableCodexSignIn: () => options.storedSignIn ?? false,
+    runCodex: () => 0,
   };
 }
 
@@ -286,6 +291,64 @@ describe("CLI compatibility contract", () => {
     ).toBe(0);
     expect(stdout.text()).toBe(`${versionText()}\n`);
     expect(stderr.text()).toBe("");
+  });
+
+  test("delegates login and logout to bundled Codex without starting a scan", async () => {
+    const cases = [
+      ["login"],
+      ["login", "--device-auth"],
+      ["login", "--with-api-key"],
+      ["login", "--with-access-token"],
+      ["login", "status"],
+      ["login", "--help"],
+      ["logout"],
+      ["logout", "--help"],
+    ] as const;
+    for (const argv of cases) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      let forwarded: readonly string[] | undefined;
+      deps.createSecurity = () => {
+        throw new Error("must not initialize Codex Security");
+      };
+      deps.runCodex = (args) => {
+        forwarded = args;
+        return 17;
+      };
+      expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(17);
+      expect(forwarded).toEqual([
+        argv[0],
+        "-c",
+        'cli_auth_credentials_store="file"',
+        ...argv.slice(1),
+      ]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe("");
+    }
+  });
+
+  test("recognizes a stored Codex sign-in only when no API key is set", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-home-"));
+    try {
+      expect(hasReusableCodexSignIn({ CODEX_HOME: home })).toBe(false);
+      await writeFile(join(home, "auth.json"), "{}\n");
+      expect(hasReusableCodexSignIn({ CODEX_HOME: home })).toBe(true);
+      expect(
+        hasReusableCodexSignIn({
+          CODEX_HOME: home,
+          OPENAI_API_KEY: "synthetic-key",
+        }),
+      ).toBe(false);
+      expect(
+        hasReusableCodexSignIn({
+          CODEX_HOME: home,
+          codex_api_key: "synthetic-key",
+        }),
+      ).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   test("accepts unambiguous root and scan help/version abbreviations", async () => {
@@ -937,7 +1000,7 @@ describe("CLI compatibility contract", () => {
     expect(repository).toBe("repo");
   });
 
-  test("uses Agents SDK by default for standard repository and path scans", async () => {
+  test("uses Agents SDK by default when no stored sign-in is available", async () => {
     for (const argv of [
       ["scan", "repo"],
       ["scan", "repo", "--path", "src", "--path", "tests"],
@@ -978,6 +1041,37 @@ describe("CLI compatibility contract", () => {
       expect(engine).toBe("agents");
       expect(config).not.toHaveProperty("codexOverrides");
     }
+  });
+
+  test("uses Codex by default when a stored sign-in is available", async () => {
+    let engine: "agents" | "codex" | undefined;
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "repo"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          storedSignIn: true,
+          onEngine: (value) => {
+            engine = value;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(engine).toBe("codex");
+    expect(stderr.text()).toContain("Scan complete");
+
+    const incompatible = capture();
+    expect(
+      await main(
+        ["scan", "repo", "--model", "gpt-test"],
+        capture().stream,
+        incompatible.stream,
+        dependencies({ storedSignIn: true }),
+      ),
+    ).toBe(1);
+    expect(incompatible.text()).toContain("require the Agents SDK engine");
   });
 
   test("keeps diff, working-tree, and deep scans on Codex and rejects incompatible engine options", async () => {

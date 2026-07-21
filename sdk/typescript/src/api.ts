@@ -304,8 +304,9 @@ export class CodexSecurity {
       }
       if (!runtime.credentialsAvailable) {
         throw new AuthenticationRequiredError(
-          "The isolated Codex home has no reusable authentication. Set OPENAI_API_KEY or " +
-            "CODEX_API_KEY, call a login method, or use file-backed Codex authentication.",
+          "No credentials were found. Run 'codex-security login', use " +
+            "'codex-security login --device-auth' on a remote or headless machine, or set " +
+            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
       const python = await (
