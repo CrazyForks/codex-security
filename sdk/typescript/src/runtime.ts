@@ -577,6 +577,18 @@ function withoutApiKeyCredentials(
   return sanitized;
 }
 
+export function environmentApiKey(
+  environment: ProcessEnvironment,
+): string | null {
+  for (const requested of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+    for (const [name, value] of Object.entries(environment)) {
+      if (name.toUpperCase() === requested && value?.trim())
+        return value.trim();
+    }
+  }
+  return null;
+}
+
 export async function pluginMetadata(
   root: string,
 ): Promise<{ name: typeof PLUGIN_NAME; version: string }> {

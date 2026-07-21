@@ -177,7 +177,7 @@ function dependencies(
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
     hasReusableCodexSignIn: () => options.storedSignIn ?? false,
-    runCodex: () => 0,
+    runCodex: async () => 0,
   };
 }
 
@@ -312,16 +312,16 @@ describe("CLI compatibility contract", () => {
       deps.createSecurity = () => {
         throw new Error("must not initialize Codex Security");
       };
-      deps.runCodex = (args) => {
+      deps.runCodex = async (args) => {
         forwarded = args;
         return 17;
       };
       expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(17);
       expect(forwarded).toEqual([
         argv[0],
+        ...argv.slice(1),
         "-c",
         'cli_auth_credentials_store="file"',
-        ...argv.slice(1),
       ]);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe("");
@@ -346,6 +346,12 @@ describe("CLI compatibility contract", () => {
           codex_api_key: "synthetic-key",
         }),
       ).toBe(false);
+      expect(
+        hasReusableCodexSignIn({
+          CODEX_HOME: home,
+          OPENAI_API_KEY: "   ",
+        }),
+      ).toBe(true);
     } finally {
       await rm(home, { recursive: true, force: true });
     }

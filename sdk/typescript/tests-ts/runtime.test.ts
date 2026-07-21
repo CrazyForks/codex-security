@@ -36,6 +36,7 @@ import {
 import {
   bundledPluginCandidates,
   codexPlatformPackage,
+  environmentApiKey,
   isPythonPathCandidate,
 } from "../src/runtime.js";
 
@@ -69,6 +70,19 @@ async function plugin(root: string, version = "1.2.3"): Promise<string> {
 }
 
 describe("plugin runtime preparation", () => {
+  test("resolves API keys consistently across scan engines", () => {
+    expect(
+      environmentApiKey({
+        codex_api_key: " codex-key ",
+        openai_api_key: " openai-key ",
+      }),
+    ).toBe("openai-key");
+    expect(environmentApiKey({ CoDeX_ApI_KeY: " codex-key " })).toBe(
+      "codex-key",
+    );
+    expect(environmentApiKey({ OPENAI_API_KEY: "   " })).toBeNull();
+  });
+
   test("keeps installed-package plugin lookup inside the package", async () => {
     const root = await temporaryDirectory();
     const packageRoot = join(root, "node_modules", "@openai", "codex-security");

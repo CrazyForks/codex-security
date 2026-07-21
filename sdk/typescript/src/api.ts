@@ -36,6 +36,7 @@ import {
   bootstrapPlugin,
   cleanupSdkDirectory,
   createIsolatedHome,
+  environmentApiKey,
   importAmbientAuth,
   pluginExecutionEnvironment,
   prepareOutputDir,
@@ -1102,15 +1103,6 @@ class EventLog<T> {
     for (const waiter of this.#waiters) waiter();
     this.#waiters.clear();
   }
-}
-
-function environmentApiKey(environment: ProcessEnvironment): string | null {
-  for (const requested of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
-    for (const [name, value] of Object.entries(environment)) {
-      if (name.toUpperCase() === requested && value) return value;
-    }
-  }
-  return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

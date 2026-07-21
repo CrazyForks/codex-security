@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { realpathSync, statSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,11 @@ import { CodexSecurity, type ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 import { CodexSecurityError, ScanInterruptedError } from "./errors.js";
 import type { ScanResult } from "./result.js";
-import { expandHome, resolveCodexCommand } from "./runtime.js";
+import {
+  environmentApiKey,
+  expandHome,
+  resolveCodexCommand,
+} from "./runtime.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
 
@@ -87,7 +91,7 @@ interface CliDependencies {
   writeSynchronously(stream: Writable, value: string): void;
   forceExit(signal: SignalName): void;
   hasReusableCodexSignIn(): boolean;
-  runCodex(args: readonly string[]): number;
+  runCodex(args: readonly string[]): Promise<number>;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -112,21 +116,46 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   },
   forceExit: (signal) => process.kill(process.pid, signal),
   hasReusableCodexSignIn: () => hasReusableCodexSignIn(),
-  runCodex: (args) => {
+  runCodex: async (args) => {
     const command = resolveCodexCommand();
-    const invocation = spawnSync(
+    const invocation = spawn(
       command.command,
       [...command.prefixArgs, ...args],
       {
         env: process.env,
+        cwd: homedir(),
         stdio: "inherit",
         windowsHide: true,
       },
     );
-    if (invocation.error !== undefined) throw invocation.error;
-    if (invocation.signal === "SIGINT") return 130;
-    if (invocation.signal === "SIGTERM") return 143;
-    return invocation.status ?? 1;
+    let requestedSignal: SignalName | null = null;
+    const onInterrupt = (): void => {
+      requestedSignal = "SIGINT";
+      invocation.kill("SIGINT");
+    };
+    const onTerminate = (): void => {
+      requestedSignal = "SIGTERM";
+      invocation.kill("SIGTERM");
+    };
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+    try {
+      return await new Promise<number>((resolve, reject) => {
+        invocation.once("error", reject);
+        invocation.once("exit", (status, signal) => {
+          resolve(
+            requestedSignal === "SIGINT" || signal === "SIGINT"
+              ? 130
+              : requestedSignal === "SIGTERM" || signal === "SIGTERM"
+                ? 143
+                : status ?? 1,
+          );
+        });
+      });
+    } finally {
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+    }
   },
 };
 
@@ -229,11 +258,11 @@ export async function main(
     return 0;
   }
   if (argv[0] === "login" || argv[0] === "logout") {
-    return dependencies.runCodex([
+    return await dependencies.runCodex([
       argv[0],
+      ...argv.slice(1),
       "-c",
       'cli_auth_credentials_store="file"',
-      ...argv.slice(1),
     ]);
   }
   if (argv[0] !== "scan") {
@@ -641,14 +670,7 @@ function scanEngineFor(
 export function hasReusableCodexSignIn(
   environment: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  if (
-    Object.entries(environment).some(
-      ([name, value]) =>
-        (name.toUpperCase() === "OPENAI_API_KEY" ||
-          name.toUpperCase() === "CODEX_API_KEY") &&
-        Boolean(value),
-    )
-  ) {
+  if (environmentApiKey(environment) !== null) {
     return false;
   }
   try {

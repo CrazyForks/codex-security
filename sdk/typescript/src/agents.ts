@@ -73,6 +73,7 @@ import {
 } from "./errors.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import {
+  environmentApiKey,
   pluginMetadata,
   prepareOutputDir,
   requireModelSafeOutputDir,
@@ -2226,14 +2227,6 @@ async function resolveCreatablePath(candidate: string): Promise<string> {
       current = parent;
     }
   }
-}
-
-function environmentApiKey(environment: ProcessEnvironment): string | null {
-  for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
-    const value = environmentValue(environment, name);
-    if (value !== undefined) return value;
-  }
-  return null;
 }
 
 function environmentValue(
