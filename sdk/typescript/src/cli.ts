@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync, statSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { cwd } from "node:process";
 import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
@@ -118,11 +118,18 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   hasReusableCodexSignIn: () => hasReusableCodexSignIn(),
   runCodex: async (args) => {
     const command = resolveCodexCommand();
+    const configuredHome = process.env["CODEX_HOME"];
     const invocation = spawn(
       command.command,
       [...command.prefixArgs, ...args],
       {
-        env: process.env,
+        env:
+          configuredHome === undefined
+            ? process.env
+            : {
+                ...process.env,
+                CODEX_HOME: resolve(expandHome(configuredHome)),
+              },
         cwd: homedir(),
         stdio: "inherit",
         windowsHide: true,

@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -327,6 +328,56 @@ describe("CLI compatibility contract", () => {
       expect(stderr.text()).toBe("");
     }
   });
+
+  test("keeps delegated credentials in the configured Codex home", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-login-home-"));
+    const repository = join(root, "repository");
+    const relativeHome = join(repository, ".codex-security-home");
+    const tildeHome = join(root, ".codex-security-home");
+    await mkdir(relativeHome, { recursive: true });
+    await mkdir(tildeHome, { recursive: true });
+    try {
+      for (const [configuredHome, expectedHome] of [
+        [".codex-security-home", relativeHome],
+        ["~/.codex-security-home", tildeHome],
+      ] as const) {
+        const environment = {
+          ...process.env,
+          HOME: root,
+          CODEX_HOME: configuredHome,
+          OPENAI_API_KEY: undefined,
+          CODEX_API_KEY: undefined,
+        };
+        const run = (args: string[], input?: string): number | null =>
+          spawnSync(
+            process.execPath,
+            [join(import.meta.dir, "../src/cli.ts"), ...args],
+            {
+              cwd: repository,
+              env: environment,
+              input,
+              encoding: "utf8",
+            },
+          ).status;
+        expect(
+          run(
+            [
+              "login",
+              "--with-api-key",
+              "-c",
+              'cli_auth_credentials_store="ephemeral"',
+            ],
+            "synthetic-key\n",
+          ),
+        ).toBe(0);
+        expect(await stat(join(expectedHome, "auth.json"))).toBeDefined();
+        expect(run(["login", "status"])).toBe(0);
+        expect(run(["logout"])).toBe(0);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("recognizes a stored Codex sign-in only when no API key is set", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-home-"));
