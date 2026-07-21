@@ -34,6 +34,7 @@ Scan a subset of a repository or write machine-readable results:
 
 ```bash
 npx codex-security scan /path/to/repo --path src --path tests
+# With OPENAI_API_KEY or CODEX_API_KEY set (Agents):
 npx codex-security scan /path/to/repo --path src --model gpt-5.6 --reasoning-effort high
 npx codex-security scan /path/to/repo --diff origin/main --json
 npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results

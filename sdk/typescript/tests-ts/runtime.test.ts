@@ -80,6 +80,18 @@ describe("plugin runtime preparation", () => {
     expect(environmentApiKey({ CoDeX_ApI_KeY: " codex-key " })).toBe(
       "codex-key",
     );
+    expect(
+      environmentApiKey({
+        openai_api_key: "stale-key",
+        OPENAI_API_KEY: " canonical-key ",
+      }),
+    ).toBe("canonical-key");
+    expect(
+      environmentApiKey({
+        codex_api_key: "stale-key",
+        CODEX_API_KEY: " canonical-key ",
+      }),
+    ).toBe("canonical-key");
     expect(environmentApiKey({ OPENAI_API_KEY: "   " })).toBeNull();
   });
 

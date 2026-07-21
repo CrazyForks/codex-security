@@ -61,6 +61,7 @@ ChatGPT sign-in.
 ```bash
 npx codex-security scan /path/to/repository
 npx codex-security scan /path/to/repository --path src --path tests
+# With OPENAI_API_KEY or CODEX_API_KEY set (Agents):
 npx codex-security scan /path/to/repository --path src --model gpt-5.6 --reasoning-effort high
 npx codex-security scan /path/to/repository --diff origin/main --json
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results

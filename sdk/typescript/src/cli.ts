@@ -120,10 +120,11 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     const command = resolveCodexCommand();
     const configuredHome = process.env["CODEX_HOME"];
     const environment = { ...process.env };
+    for (const name of Object.keys(environment)) {
+      if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
+    }
     if (configuredHome?.trim()) {
       environment["CODEX_HOME"] = resolve(expandHome(configuredHome));
-    } else {
-      delete environment["CODEX_HOME"];
     }
     const invocation = spawn(
       command.command,

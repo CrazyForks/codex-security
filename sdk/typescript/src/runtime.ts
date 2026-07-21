@@ -581,6 +581,8 @@ export function environmentApiKey(
   environment: ProcessEnvironment,
 ): string | null {
   for (const requested of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+    const canonical = environment[requested]?.trim();
+    if (canonical) return canonical;
     for (const [name, value] of Object.entries(environment)) {
       if (name.toUpperCase() === requested && value?.trim())
         return value.trim();

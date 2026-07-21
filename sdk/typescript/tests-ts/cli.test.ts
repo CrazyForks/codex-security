@@ -393,6 +393,21 @@ describe("CLI compatibility contract", () => {
         expect(run(["login", "status"])).toBe(0);
         expect(run(["logout"])).toBe(0);
       }
+      expect(
+        spawnSync(
+          process.execPath,
+          [join(import.meta.dir, "../src/cli.ts"), "login", "--help"],
+          {
+            cwd: repository,
+            env: {
+              ...process.env,
+              CODEX_HOME: undefined,
+              Codex_Home: "   ",
+            },
+            encoding: "utf8",
+          },
+        ).status,
+      ).toBe(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

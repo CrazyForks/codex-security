@@ -1254,7 +1254,9 @@ describe("CodexSecurity orchestration", () => {
 if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
   process.exitCode = 2;
 } else {
-  for await (const _chunk of process.stdin) {}
+  let apiKey = "";
+  for await (const chunk of process.stdin) apiKey += chunk;
+  if (apiKey.trim() !== "ambient-key") process.exitCode = 3;
 }
 `,
     );
@@ -1268,7 +1270,8 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
       {},
       {
         environment: {
-          openai_api_key: "ambient-key",
+          openai_api_key: "stale-key",
+          OPENAI_API_KEY: "ambient-key",
           Codex_Api_Key: "secondary-key",
         },
         prepareRuntime: async () => ({
