@@ -51,8 +51,10 @@ import {
   isPythonPathCandidate,
   planOutputArchive,
   preparePersistentScanRoot,
+  prepareScopeInventory,
   requirePrivateOutputDirectory,
   runWorkbench,
+  verifyScopeInventory,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -945,6 +947,110 @@ describe("runtime directories and plugin Python boundary", () => {
       ["test-command"],
     );
     expect(result).toEqual({ ok: true });
+  });
+
+  test("attests standard inventories without inheriting API keys or trusting umask", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(join(pluginRoot, "scripts"), { recursive: true }),
+      mkdir(repository),
+      mkdir(scanDir),
+    ]);
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export {};\n"),
+      writeFile(
+        join(pluginRoot, "scripts", "generate_rank_input.py"),
+        [
+          "import json, os, pathlib, sys",
+          "assert sys.flags.isolated",
+          "assert sys.dont_write_bytecode",
+          "assert sys.argv[1] == 'make-scope-inventory'",
+          "assert os.environ.get('OPENAI_API_KEY') is None",
+          "assert os.environ.get('CODEX_API_KEY') is None",
+          "output = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])",
+          "output.write_text(json.dumps({'path': 'safe.ts'}) + '\\n', encoding='utf-8')",
+        ].join("\n"),
+      ),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const previousUmask =
+      process.platform === "win32" ? null : process.umask(0o777);
+    let inventory: Awaited<ReturnType<typeof prepareScopeInventory>>;
+    try {
+      inventory = await prepareScopeInventory({
+        python: python!,
+        pluginRoot,
+        repository,
+        scanDir,
+        environment: {
+          PATH: process.env["PATH"],
+          OPENAI_API_KEY: "must-not-reach-python",
+          CODEX_API_KEY: "also-must-not-reach-python",
+        },
+      });
+    } finally {
+      if (previousUmask !== null) process.umask(previousUmask);
+    }
+
+    expect(inventory.path).toBe(
+      join(scanDir, "artifacts", "02_discovery", "scope_inventory.jsonl"),
+    );
+    expect(inventory.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(inventory.fileCount).toBe(1);
+    expect(inventory.byteLength).toBeGreaterThan(0);
+    expect(await readFile(inventory.path, "utf8")).toBe(
+      '{"path": "safe.ts"}\n',
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(inventory.path)).mode & 0o777).toBe(0o600);
+      expect((await stat(join(scanDir, "artifacts"))).mode & 0o777).toBe(0o700);
+      expect(
+        (await stat(join(scanDir, "artifacts", "02_discovery"))).mode & 0o777,
+      ).toBe(0o700);
+    }
+    await verifyScopeInventory(inventory);
+  });
+
+  test("rejects oversized or substituted standard inventories after attestation", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const outside = join(root, "outside-inventory.jsonl");
+    await Promise.all([mkdir(repository), mkdir(scanDir)]);
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export {};\n"),
+      writeFile(outside, '{"path":"outside.ts"}\n'),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: { PATH: process.env["PATH"] },
+    });
+    const original = await readFile(inventory.path);
+
+    await truncate(inventory.path, 64 * 1024 * 1024 + 1);
+    await expect(verifyScopeInventory(inventory)).rejects.toThrow(
+      "bounded, regular, non-symlink file",
+    );
+    await writeFile(inventory.path, original);
+    await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
+
+    if (process.platform !== "win32") {
+      await rm(inventory.path);
+      await symlink(outside, inventory.path);
+      await expect(verifyScopeInventory(inventory)).rejects.toThrow(
+        "bounded, regular, non-symlink file",
+      );
+      expect(await readFile(outside, "utf8")).toBe('{"path":"outside.ts"}\n');
+    }
   });
 
   test("preserves recorded artifact paths when archiving a completed scan", async () => {

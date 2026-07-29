@@ -1,6 +1,14 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -56,14 +64,17 @@ import {
   planOutputArchive,
   prepareOutputDir,
   preparePersistentScanRoot,
+  prepareScopeInventory,
   requireModelSafeOutputDir,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
   runWorkbench,
+  verifyScopeInventory,
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
+  type ScopeInventorySnapshot,
   type WorkbenchCommandOptions,
   validateOutputDir,
 } from "./runtime.js";
@@ -203,6 +214,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  prepareScopeInventory?: typeof prepareScopeInventory;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -301,6 +313,8 @@ export class CodexSecurity {
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
+    let scopeInventoryFile: string | null = null;
+    let standardScopeInventory: ScopeInventorySnapshot | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let activeScan: {
@@ -632,6 +646,56 @@ export class CodexSecurity {
               `codex-security-target-paths-${randomUUID()}.json`,
             )
           : null;
+      const serializedPaths =
+        normalized.kind === "paths"
+          ? JSON.stringify(normalized.paths)
+              .replaceAll("\u0085", "\\u0085")
+              .replaceAll("\u2028", "\\u2028")
+              .replaceAll("\u2029", "\\u2029")
+          : null;
+      checkOpen();
+      if (serializedPaths !== null && targetPathsFile !== null) {
+        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
+          flag: "wx",
+          mode: 0o400,
+          signal,
+        });
+        await chmod(targetPathsFile, 0o400);
+      }
+      if (
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        standardScopeInventory = await (
+          this.#dependencies.prepareScopeInventory ?? prepareScopeInventory
+        )({
+          python,
+          pluginRoot: runtime.plugin.pluginRoot,
+          repository: repo,
+          scanDir,
+          ...(targetPathsFile === null ? {} : { scopesFile: targetPathsFile }),
+          environment: selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+          ),
+          signal,
+        });
+        scopeInventoryFile = join(
+          dirname(runtime.codexHome),
+          `codex-security-scope-inventory-${randomUUID()}.jsonl`,
+        );
+        await writeFile(
+          scopeInventoryFile,
+          await readFile(standardScopeInventory.path, { signal }),
+          { flag: "wx", mode: 0o400, signal },
+        );
+        await chmod(scopeInventoryFile, 0o400);
+        await verifyScopeInventory(
+          { ...standardScopeInventory, path: scopeInventoryFile },
+          signal,
+        );
+      }
+      checkOpen();
       const runtimePaths = {
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
@@ -651,6 +715,9 @@ export class CodexSecurity {
         ...(targetPathsFile === null
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
+        ...(scopeInventoryFile === null
+          ? {}
+          : { CODEX_SECURITY_SCOPE_INVENTORY_FILE: scopeInventoryFile }),
       };
       const environment = {
         ...pluginExecutionEnvironment(
@@ -674,22 +741,6 @@ export class CodexSecurity {
         skipGitRepoCheck: true,
         approvalPolicy: "never",
       });
-      const serializedPaths =
-        normalized.kind === "paths"
-          ? JSON.stringify(normalized.paths)
-              .replaceAll("\u0085", "\\u0085")
-              .replaceAll("\u2028", "\\u2028")
-              .replaceAll("\u2029", "\\u2029")
-          : null;
-      checkOpen();
-      if (serializedPaths !== null && targetPathsFile !== null) {
-        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
-          flag: "wx",
-          mode: 0o400,
-          signal,
-        });
-        await chmod(targetPathsFile, 0o400);
-      }
       checkOpen();
       const { events } = await thread.runStreamed(prompt, {
         signal,
@@ -706,6 +757,9 @@ export class CodexSecurity {
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
         onFinalize: async (usage) => {
+          if (standardScopeInventory !== null) {
+            await verifyScopeInventory(standardScopeInventory, signal);
+          }
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
@@ -781,6 +835,7 @@ export class CodexSecurity {
       await Promise.all([
         knowledgeBase?.cleanup(),
         removeTargetPathsFile(targetPathsFile),
+        removeTargetPathsFile(scopeInventoryFile),
       ]);
     }
   }
@@ -1344,7 +1399,7 @@ async function scanPrompt(
         ]
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
-    targetInstruction(target),
+    targetInstruction(target, mode),
     "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
   ].join("\n");
 }
@@ -1355,11 +1410,16 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(target: NormalizedTarget): string {
+function targetInstruction(target: NormalizedTarget, mode: ScanMode): string {
   if (target.kind === "repository")
-    return "Scan target: the entire repository.";
-  if (target.kind === "paths")
+    return mode === "standard"
+      ? 'Scan target: the entire repository. The SDK has already written the exhaustive standard inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl". Review every JSONL path from the SDK-protected "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" without regenerating, ranking, filtering, or dropping files. Use "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/normalize_candidates.py" with --in-scope-inventory "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" when normalizing candidate findings; do not replace this inventory with an rg-generated file list.'
+      : "Scan target: the entire repository.";
+  if (target.kind === "paths") {
+    if (mode === "standard")
+      return 'Scan target paths: the SDK has already written the exhaustive combined inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl". Review every JSONL path from the SDK-protected "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" without regenerating, ranking, filtering, or dropping files. Use "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/normalize_candidates.py" with --in-scope-inventory "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" when normalizing candidate findings; do not replace this inventory with an rg-generated file list. Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
     return 'Scan target paths: generate the combined inventory once with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/rank_input.jsonl". Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
+  }
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }

@@ -1,4 +1,5 @@
 import {
+  chmod,
   copyFile,
   cp,
   mkdir,
@@ -12,10 +13,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -40,7 +42,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import { writeCodexConfig, type JsonObject } from "../src/config.js";
-import { runWorkbench } from "../src/runtime.js";
+import { prepareScopeInventory, runWorkbench } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -62,6 +64,26 @@ class TestClient extends TestClientBase {
     dependencies: Record<string, unknown>,
   ) {
     super(config, {
+      prepareScopeInventory: async ({ scanDir }: { scanDir: string }) => {
+        const path = join(
+          scanDir,
+          "artifacts",
+          "02_discovery",
+          "scope_inventory.jsonl",
+        );
+        for (const directory of [join(scanDir, "artifacts"), dirname(path)]) {
+          await mkdir(directory, { recursive: true, mode: 0o700 });
+          await chmod(directory, 0o700);
+        }
+        await writeFile(path, "", { flag: "w", mode: 0o600 });
+        await chmod(path, 0o600);
+        return {
+          path,
+          sha256: createHash("sha256").update("").digest("hex"),
+          fileCount: 0,
+          byteLength: 0,
+        };
+      },
       runWorkbench: async (_options: unknown, args: readonly string[]) => {
         if (args[0] === "register-cli-scan") {
           return {
@@ -2419,8 +2441,10 @@ describe("CodexSecurity orchestration", () => {
       'Use "$PYTHON" as <python_command> for every plugin helper',
     );
     expect(prompt).toContain(
-      'make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
+      'the SDK has already written the exhaustive combined inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl"',
     );
+    expect(prompt).toContain("--in-scope-inventory");
+    expect(prompt).not.toContain("make-repo-rank-input");
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
     );
@@ -2518,6 +2542,505 @@ describe("CodexSecurity orchestration", () => {
       paths,
     );
     await client.close();
+  });
+
+  test("preserves ignored first-party files in an exhaustive standard inventory", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const packageDirectory = join(repository, "package");
+    const inventory = join(root, "scope_inventory.jsonl");
+    const scopedInventory = join(root, "scoped_inventory.jsonl");
+    const targetPaths = join(root, "target-paths.json");
+    const candidates = join(root, "candidates.jsonl");
+    const ledger = join(root, "candidate_ledger.jsonl");
+    const outside = join(root, "outside.ts");
+    const unusualName =
+      process.platform === "win32"
+        ? "comma, scope.ts"
+        : "line\nbreak, scope.ts";
+    await Promise.all([
+      mkdir(join(repository, ".github", "workflows"), { recursive: true }),
+      mkdir(join(packageDirectory, "test"), { recursive: true }),
+      mkdir(join(packageDirectory, "node_modules", "dependency"), {
+        recursive: true,
+      }),
+    ]);
+    await Promise.all([
+      writeFile(join(repository, ".ignore"), "package/test/\n*.bin\n"),
+      writeFile(join(repository, ".gitignore"), "package/test/\n"),
+      writeFile(
+        join(repository, ".github", "workflows", "release.yml"),
+        "name: release\n",
+      ),
+      writeFile(join(repository, "Dockerfile"), "FROM scratch\n"),
+      writeFile(join(packageDirectory, "README.md"), "# Package\n"),
+      writeFile(join(packageDirectory, "asset.bin"), new Uint8Array([0, 1])),
+      writeFile(
+        join(packageDirectory, "index.ts"),
+        "export const value = 1;\n",
+      ),
+      writeFile(
+        join(packageDirectory, "test", "route.test.ts"),
+        "export const tested = true;\n",
+      ),
+      writeFile(join(packageDirectory, unusualName), "export {};\n"),
+      writeFile(
+        join(packageDirectory, "node_modules", "dependency", "index.js"),
+        "module.exports = {};\n",
+      ),
+      writeFile(outside, "export const mustNotBeRead = true;\n"),
+      writeFile(
+        targetPaths,
+        JSON.stringify(["package", "package/test/route.test.ts"]),
+      ),
+      writeFile(
+        candidates,
+        `${JSON.stringify({
+          cwe_ids: ["CWE-20"],
+          locations: [
+            {
+              path: "package/test/route.test.ts",
+              start_line: 1,
+              role: "evidence",
+            },
+          ],
+          summary: "Candidate from an ignored but tracked first-party route.",
+          evidence: "The requested first-party route is executable.",
+        })}\n`,
+      ),
+    ]);
+    execFileSync("git", ["init", "--quiet"], {
+      cwd: repository,
+      stdio: "pipe",
+    });
+    execFileSync("git", ["add", "-f", "--", "package/test/route.test.ts"], {
+      cwd: repository,
+      stdio: "pipe",
+    });
+    if (process.platform !== "win32") {
+      await symlink(outside, join(packageDirectory, "outside-symlink.ts"));
+    }
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        generator,
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--out",
+        inventory,
+      ],
+      { stdio: "pipe" },
+    );
+    const rows = (await readFile(inventory, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(rows).toEqual(
+      [
+        ".github/workflows/release.yml",
+        ".gitignore",
+        ".ignore",
+        "Dockerfile",
+        "package/README.md",
+        "package/asset.bin",
+        "package/index.ts",
+        `package/${unusualName}`,
+        "package/test/route.test.ts",
+      ]
+        .sort()
+        .map((path) => ({ path })),
+    );
+
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        generator,
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--scopes-file",
+        targetPaths,
+        "--out",
+        scopedInventory,
+      ],
+      { stdio: "pipe" },
+    );
+    expect(
+      (await readFile(scopedInventory, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toEqual(
+      [
+        "package/README.md",
+        "package/asset.bin",
+        "package/index.ts",
+        `package/${unusualName}`,
+        "package/test/route.test.ts",
+      ]
+        .sort()
+        .map((path) => ({ path })),
+    );
+
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        candidates,
+        "--out",
+        ledger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        scopedInventory,
+      ],
+      { stdio: "pipe" },
+    );
+    expect(JSON.parse(await readFile(ledger, "utf8"))).toMatchObject({
+      cwe_ids: ["CWE-20"],
+      locations: [{ path: "package/test/route.test.ts" }],
+    });
+  });
+
+  test("rejects malformed, duplicate, and escaping standard inventory paths", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const source = join(repository, "safe.ts");
+    const outside = join(root, "outside.ts");
+    const inventory = join(root, "scope_inventory.jsonl");
+    const candidates = join(root, "candidates.jsonl");
+    await mkdir(repository);
+    await Promise.all([
+      writeFile(source, "export const safe = true;\n"),
+      writeFile(outside, "export const outside = true;\n"),
+      writeFile(
+        candidates,
+        `${JSON.stringify({
+          cwe_ids: ["CWE-20"],
+          locations: [{ path: "safe.ts", start_line: 1, role: "evidence" }],
+          summary: "First-party finding.",
+          evidence: "The first-party source is in scope.",
+        })}\n`,
+      ),
+    ]);
+    const cases: Array<{ contents: string; message: string }> = [
+      {
+        contents: '{"path":"safe.ts"}\n{"path":"safe.ts"}\n',
+        message: "duplicate inventory path",
+      },
+      { contents: '{"path":"safe.ts"}\n\n', message: "blank rows" },
+      { contents: '{"path":\n', message: "in-scope inventory row 1" },
+      {
+        contents: '{"path":"safe.ts","extra":true}\n',
+        message: "only a path field",
+      },
+      {
+        contents: '{"path":"../outside.ts"}\n',
+        message: "repository-relative path without traversal",
+      },
+      {
+        contents: '{"path":"./safe.ts"}\n',
+        message: "canonical repository-relative path",
+      },
+    ];
+    if (process.platform !== "win32") {
+      await symlink(outside, join(repository, "outside-link.ts"));
+      cases.push({
+        contents: '{"path":"outside-link.ts"}\n',
+        message: "must resolve inside --repo-root",
+      });
+    }
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    for (const [index, invalid] of cases.entries()) {
+      const ledger = join(root, `candidate-ledger-${index}.jsonl`);
+      await writeFile(inventory, invalid.contents);
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+          "--input",
+          candidates,
+          "--out",
+          ledger,
+          "--repo-root",
+          repository,
+          "--in-scope-inventory",
+          inventory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(invalid.message);
+      expect(existsSync(ledger)).toBe(false);
+    }
+  });
+
+  test("fails closed when an inventory scope cannot be enumerated", async () => {
+    if (process.platform === "win32") return;
+
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const inaccessible = join(repository, "inaccessible");
+    const inventory = join(root, "scope_inventory.jsonl");
+    await mkdir(inaccessible, { recursive: true });
+    await writeFile(join(inaccessible, "first-party.ts"), "export {};\n");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    await chmod(inaccessible, 0o000);
+    try {
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-scope-inventory",
+          "--repo",
+          repository,
+          "--out",
+          inventory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Unable to safely inventory scope path");
+      expect(existsSync(inventory)).toBe(false);
+    } finally {
+      await chmod(inaccessible, 0o700);
+    }
+  });
+
+  test("materializes and consumes standard inventories before starting Codex", async () => {
+    for (const target of [undefined, ["package"]]) {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const inventory = join(
+        scanDir,
+        "artifacts",
+        "02_discovery",
+        "scope_inventory.jsonl",
+      );
+      await mkdir(join(repository, "package", "test"), { recursive: true });
+      await Promise.all([
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+        writeFile(join(repository, "package", "README.md"), "# Package\n"),
+        writeFile(
+          join(repository, "package", "test", "route.test.ts"),
+          "export const tested = true;\n",
+        ),
+      ]);
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      let started = false;
+      let prompt = "";
+      let protectedInventory: string | null = null;
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => python!,
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          prepareScopeInventory,
+          createCodex: (options: CodexOptions) => {
+            expect(existsSync(inventory)).toBe(true);
+            const immutable =
+              options.env?.["CODEX_SECURITY_SCOPE_INVENTORY_FILE"];
+            if (typeof immutable !== "string") {
+              throw new Error("missing protected standard inventory");
+            }
+            protectedInventory = immutable;
+            expect(
+              immutable.startsWith(
+                join(root, "codex-security-scope-inventory-"),
+              ),
+            ).toBe(true);
+            expect(immutable.startsWith(scanDir)).toBe(false);
+            expect(immutable.startsWith(repository)).toBe(false);
+            return {
+              startThread: () => {
+                started = true;
+                return {
+                  id: null,
+                  async runStreamed(input: string) {
+                    prompt = input;
+                    expect(await readFile(immutable, "utf8")).toBe(
+                      await readFile(inventory, "utf8"),
+                    );
+                    if (process.platform !== "win32") {
+                      expect((await stat(immutable)).mode & 0o777).toBe(0o400);
+                    }
+                    throw new Error("inventory captured");
+                  },
+                };
+              },
+            };
+          },
+        },
+      );
+
+      await expect(
+        client.run(repository, {
+          ...(target === undefined ? {} : { target }),
+          mode: "standard",
+        }),
+      ).rejects.toThrow("inventory captured");
+      expect(started).toBe(true);
+      expect(
+        (await readFile(inventory, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      ).toEqual([
+        { path: "package/README.md" },
+        { path: "package/test/route.test.ts" },
+      ]);
+      expect(prompt).toContain(
+        '"$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl"',
+      );
+      expect(prompt).toContain("--in-scope-inventory");
+      expect(prompt).toContain('"$CODEX_SECURITY_SCOPE_INVENTORY_FILE"');
+      expect(prompt).not.toContain("make-repo-rank-input");
+      expect(protectedInventory).not.toBeNull();
+      expect(existsSync(protectedInventory!)).toBe(false);
+      await client.close();
+    }
+  });
+
+  test("does not start Codex when the standard inventory cannot be prepared", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+    ]);
+    let codexStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        prepareScopeInventory: async () => {
+          throw new Error("standard inventory preparation failed");
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "standard inventory preparation failed",
+    );
+    expect(codexStarted).toBe(false);
+    await client.close();
+  });
+
+  test("rejects model-modified standard inventories before completing a scan", async () => {
+    const attacks =
+      process.platform === "win32" ? ["truncate"] : ["truncate", "symlink"];
+    for (const attack of attacks) {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const inventory = join(
+        scanDir,
+        "artifacts",
+        "02_discovery",
+        "scope_inventory.jsonl",
+      );
+      const outside = join(root, "outside-inventory.jsonl");
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+        writeFile(outside, '{"path":"forged.ts"}\n'),
+      ]);
+      await writeFile(join(repository, "safe.ts"), "export {};\n");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const commands: Array<readonly string[]> = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => python!,
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          prepareScopeInventory,
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            commands.push(args);
+            if (args[0] === "register-cli-scan") {
+              return {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                scanDir,
+              };
+            }
+            if (args[0] === "get-scan-feedback") {
+              return {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                falsePositives: [],
+              };
+            }
+            return {};
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                if (attack === "symlink") {
+                  await rm(inventory);
+                  await symlink(outside, inventory);
+                } else {
+                  await writeFile(inventory, "");
+                }
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(client.run(repository)).rejects.toThrow(
+        "standard scan scope inventory",
+      );
+      expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
+      expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe('{"path":"forged.ts"}\n');
+      await client.close();
+    }
   });
 
   test("removes scoped target files after a scan settles", async () => {

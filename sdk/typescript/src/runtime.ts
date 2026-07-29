@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, type Stats } from "node:fs";
 import {
   chmod,
@@ -56,6 +56,8 @@ const MAX_PLUGIN_MANIFEST_SIZE = 1024 * 1024;
 const MAX_PLUGIN_COPY_ENTRIES = 4_096;
 const MAX_PLUGIN_COPY_FILE_SIZE = 128 * 1024 * 1024;
 const MAX_PLUGIN_COPY_SIZE = 512 * 1024 * 1024;
+const MAX_SCOPE_INVENTORY_SIZE = 64 * 1024 * 1024;
+const MAX_SCOPE_INVENTORY_FILES = 250_000;
 const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 
 export interface PluginInstall {
@@ -89,6 +91,23 @@ export interface WorkbenchCommandOptions {
   environment: ProcessEnvironment;
   signal?: AbortSignal;
   failureMessage?: string;
+}
+
+export interface ScopeInventoryOptions {
+  python: string;
+  pluginRoot: string;
+  repository: string;
+  scanDir: string;
+  scopesFile?: string;
+  environment: ProcessEnvironment;
+  signal?: AbortSignal;
+}
+
+export interface ScopeInventorySnapshot {
+  path: string;
+  sha256: string;
+  fileCount: number;
+  byteLength: number;
 }
 
 export function codexSecurityStateDirectory(
@@ -180,6 +199,182 @@ export async function runWorkbench(
     );
   }
   return result as JsonObject;
+}
+
+export async function prepareScopeInventory(
+  options: ScopeInventoryOptions,
+): Promise<ScopeInventorySnapshot> {
+  const output = join(
+    options.scanDir,
+    "artifacts",
+    "02_discovery",
+    "scope_inventory.jsonl",
+  );
+  try {
+    for (const directory of [
+      join(options.scanDir, "artifacts"),
+      dirname(output),
+    ]) {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await chmod(directory, 0o700);
+    }
+    const existing = await lstat(output).catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (existing !== null) {
+      throw new Error("inventory output already exists");
+    }
+    await execFile(
+      options.python,
+      [
+        "-I",
+        "-B",
+        join(options.pluginRoot, "scripts", "generate_rank_input.py"),
+        "make-scope-inventory",
+        "--repo",
+        options.repository,
+        ...(options.scopesFile === undefined
+          ? []
+          : ["--scopes-file", options.scopesFile]),
+        "--out",
+        output,
+      ],
+      {
+        env: Object.fromEntries(
+          Object.entries(options.environment).filter(
+            ([name]) =>
+              name.toUpperCase() !== "OPENAI_API_KEY" &&
+              name.toUpperCase() !== "CODEX_API_KEY",
+          ),
+        ),
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true,
+        signal: options.signal,
+      },
+    );
+    await chmod(output, 0o600);
+    return await readScopeInventorySnapshot(output, options.signal);
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      `Could not prepare the standard scan scope inventory: ${processErrorDetail(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+export async function verifyScopeInventory(
+  expected: ScopeInventorySnapshot,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const actual = await readScopeInventorySnapshot(expected.path, signal);
+    if (
+      actual.sha256 !== expected.sha256 ||
+      actual.fileCount !== expected.fileCount ||
+      actual.byteLength !== expected.byteLength
+    ) {
+      throw new Error(
+        "inventory contents no longer match the host-owned snapshot",
+      );
+    }
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      `The standard scan scope inventory changed after preparation: ${processErrorDetail(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+async function readScopeInventorySnapshot(
+  path: string,
+  signal?: AbortSignal,
+): Promise<ScopeInventorySnapshot> {
+  throwIfSignalAborted(signal);
+  const expected = await lstat(path);
+  if (
+    expected.isSymbolicLink() ||
+    !expected.isFile() ||
+    expected.size > MAX_SCOPE_INVENTORY_SIZE
+  ) {
+    throw new Error("inventory must be a bounded, regular, non-symlink file");
+  }
+  const handle = await open(
+    path,
+    constants.O_RDONLY |
+      (process.platform === "win32"
+        ? 0
+        : constants.O_NOFOLLOW | constants.O_NONBLOCK),
+  );
+  let bytes: Buffer;
+  try {
+    if (!samePluginFile(expected, await handle.stat())) {
+      throw new Error("inventory changed before it could be read");
+    }
+    bytes = await readExactly(handle, expected.size, 0, signal);
+    if (!samePluginFile(expected, await handle.stat())) {
+      throw new Error("inventory changed while it was being read");
+    }
+  } finally {
+    await handle.close();
+  }
+
+  const contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  if (contents.length > 0 && !contents.endsWith("\n")) {
+    throw new Error("inventory must contain newline-terminated JSONL rows");
+  }
+  const paths = new Set<string>();
+  const lines = contents.length === 0 ? [] : contents.slice(0, -1).split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (!line.trim()) {
+      throw new Error(`inventory row ${index + 1} must not be blank`);
+    }
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`inventory row ${index + 1} contains invalid JSON`, {
+        cause: error,
+      });
+    }
+    if (
+      !isRecord(row) ||
+      Object.keys(row).length !== 1 ||
+      typeof row["path"] !== "string" ||
+      row["path"].length === 0
+    ) {
+      throw new Error(`inventory row ${index + 1} must contain only a path`);
+    }
+    const inventoryPath = row["path"];
+    if (
+      inventoryPath.includes("\0") ||
+      inventoryPath.startsWith("/") ||
+      /^[A-Za-z]:/.test(inventoryPath) ||
+      inventoryPath
+        .split("/")
+        .some((part) => part === "" || part === "." || part === "..") ||
+      (process.platform === "win32" && inventoryPath.includes("\\"))
+    ) {
+      throw new Error(`inventory row ${index + 1} contains an unsafe path`);
+    }
+    if (paths.has(inventoryPath)) {
+      throw new Error(`inventory row ${index + 1} repeats an inventory path`);
+    }
+    paths.add(inventoryPath);
+    if (paths.size > MAX_SCOPE_INVENTORY_FILES) {
+      throw new Error("inventory exceeds the maximum number of in-scope files");
+    }
+  }
+
+  return {
+    path,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    fileCount: paths.size,
+    byteLength: bytes.byteLength,
+  };
 }
 
 export function bundledPluginCandidates(moduleDirectory: string): string[] {
