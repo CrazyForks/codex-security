@@ -7,6 +7,8 @@ This script stays deliberately model-free:
   JSONL candidate worklist that ranking subagents consume.
 - `make-scope-inventory` creates the exhaustive JSONL file inventory that
   compact standard scans consume without ranking or preview-based filtering.
+- `verify-scope-coverage` binds compact standard-scan review and candidate
+  artifacts to the host-attested exhaustive file inventory.
 - `make-diff-rank-input` creates the deterministic diff-scoped JSONL candidate
   worklist from Git changed paths. It supports committed revision diffs and
   local working-tree patches.
@@ -38,6 +40,7 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from normalize_candidates import combine, normalize_candidate, read_scope_inventory
 from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
 
 EXCLUDED_DIRS = {
@@ -123,6 +126,7 @@ DIRECT_SCOPE_PREVIEW_READ_BYTES = 64 * 1024
 RANK_POOL_PLAN_SCHEMA_VERSION = 1
 RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
+MAX_SCOPE_COVERAGE_BYTES = 64 * 1024 * 1024
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
 RankWorkerAssignment = tuple[int, list[str], list[str]]
@@ -170,6 +174,14 @@ def parse_args() -> argparse.Namespace:
         help="JSON array of repository-relative files and directories to scan together.",
     )
     inventory.add_argument("--out", required=True, help="Output scope_inventory.jsonl path.")
+
+    verify_scope = subparsers.add_parser(
+        "verify-scope-coverage",
+        help="Verify standard review and candidates against the host-owned scope inventory.",
+    )
+    verify_scope.add_argument("--repo", required=True, help="Repository root.")
+    verify_scope.add_argument("--inventory", required=True, help="Protected scope inventory.")
+    verify_scope.add_argument("--scan-dir", required=True, help="Standard scan output directory.")
 
     bind = subparsers.add_parser(
         "bind-repo-scopes",
@@ -520,6 +532,152 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
     output = Path(args.out).expanduser()
     write_jsonl(output, [{"path": path} for path in sorted(paths)])
     print(f"Wrote {len(paths)} inventory rows to {output}")
+
+
+def require_standard_scope_artifact(scan_dir: Path, relative: str, label: str) -> Path:
+    path = scan_dir / relative
+    current = path
+    while current != scan_dir:
+        if current.is_symlink():
+            raise SystemExit(f"{label} must not contain a symbolic link: {relative}")
+        current = current.parent
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(scan_dir)
+        metadata = resolved.stat()
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"{label} is missing or outside the scan directory: {relative}") from error
+    if not resolved.is_file() or metadata.st_size > MAX_SCOPE_COVERAGE_BYTES:
+        raise SystemExit(f"{label} must be a bounded regular file: {relative}")
+    return resolved
+
+
+def verify_scope_coverage(args: argparse.Namespace) -> None:
+    try:
+        repository = Path(args.repo).expanduser().resolve(strict=True)
+        scan_dir = Path(args.scan_dir).expanduser().resolve(strict=True)
+        inventory = Path(args.inventory).expanduser().resolve(strict=True)
+        if not repository.is_dir() or not scan_dir.is_dir():
+            raise ValueError("repository and scan directory must be directories")
+        scope = read_scope_inventory(inventory, repository)
+    except (OSError, UnicodeError, ValueError) as error:
+        raise SystemExit(f"Unable to read the authoritative scope inventory: {error}") from error
+
+    review_relative = "artifacts/03_coverage/scope_review.jsonl"
+    review_path = require_standard_scope_artifact(scan_dir, review_relative, "Scope-review ledger")
+
+    def validate_scope_review(row: JsonRow, path: Path, number: int) -> None:
+        disposition = row.get("disposition")
+        if disposition not in {"reviewed", "deferred"}:
+            raise SystemExit(f"{path}:{number}: unsupported scope review disposition")
+        require_exact_fields(
+            row,
+            {"path", "disposition"} | ({"reason"} if disposition == "deferred" else set()),
+            path,
+            number,
+        )
+        require_string(row, "path", path, number, allow_empty=False)
+        if disposition == "deferred":
+            require_string(row, "reason", path, number, allow_empty=False)
+
+    reviews = load_jsonl(review_path, "Scope-review ledger", validate_scope_review)
+    require_unique_paths(reviews, "Scope-review ledger")
+    reviewed_paths = {str(row["path"]) for row in reviews}
+    missing = sorted(scope - reviewed_paths)
+    unexpected = sorted(reviewed_paths - scope)
+    if missing:
+        raise SystemExit(
+            "Scope-review ledger omits authoritative inventory paths: "
+            + ", ".join(repr(path) for path in missing[:10])
+        )
+    if unexpected:
+        raise SystemExit(
+            "Scope-review ledger contains paths outside the authoritative scope inventory: "
+            + ", ".join(repr(path) for path in unexpected[:10])
+        )
+
+    coverage_path = require_standard_scope_artifact(scan_dir, "coverage.json", "Scan coverage")
+    findings_path = require_standard_scope_artifact(scan_dir, "findings.json", "Scan findings")
+    try:
+        coverage: object = json.loads(coverage_path.read_text(encoding="utf-8"))
+        findings: object = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"Unable to verify standard scan scope coverage: {error}") from error
+    if not isinstance(coverage, dict) or not isinstance(findings, dict):
+        raise SystemExit("Standard scan coverage and findings must be JSON objects")
+    surfaces = coverage.get("surfaces")
+    if not isinstance(surfaces, list) or not any(
+        isinstance(surface, dict)
+        and isinstance(surface.get("receiptRefs"), list)
+        and review_relative in surface["receiptRefs"]
+        for surface in surfaces
+    ):
+        raise SystemExit("Standard scan coverage must reference the exhaustive scope-review ledger")
+    if coverage.get("completeness") == "complete" and any(
+        row["disposition"] == "deferred" for row in reviews
+    ):
+        raise SystemExit("Complete standard scan coverage cannot contain deferred inventory paths")
+
+    candidate_path = require_standard_scope_artifact(
+        scan_dir,
+        "artifacts/02_discovery/candidate_ledger.jsonl",
+        "Standard candidate ledger",
+    )
+    line_counts: dict[Path, int] = {}
+
+    def validate_standard_candidate(row: JsonRow, path: Path, number: int) -> None:
+        validation = row.get("validation")
+        if not isinstance(validation, dict):
+            raise SystemExit(f"{path}:{number}: standard candidate is missing validation")
+        disposition = validation.get("disposition")
+        if disposition not in {"reportable", "suppressed", "not_applicable", "deferred"}:
+            raise SystemExit(f"{path}:{number}: unsupported candidate validation disposition")
+        attack_path = row.get("attack_path")
+        if disposition in {"reportable", "deferred"}:
+            if not isinstance(attack_path, dict) or attack_path.get("decision") not in {
+                "reportable",
+                "ignore",
+                "deferred",
+            }:
+                raise SystemExit(f"{path}:{number}: standard candidate is missing attack-path closure")
+        elif attack_path is not None:
+            raise SystemExit(f"{path}:{number}: unexpected attack-path closure")
+        discovery = {
+            key: value for key, value in row.items() if key not in {"validation", "attack_path"}
+        }
+        try:
+            normalized = normalize_candidate(discovery, repository, scope, line_counts)
+            expected = combine([normalized])[0]
+        except (OSError, TypeError, ValueError) as error:
+            raise SystemExit(f"{path}:{number}: {error}") from error
+        if discovery != expected:
+            raise SystemExit(
+                f"{path}:{number}: candidate does not match authoritative inventory normalization"
+            )
+
+    candidates = load_jsonl(candidate_path, "Standard candidate ledger", validate_standard_candidate)
+    candidate_ids: set[str] = set()
+    for candidate in candidates:
+        candidate_id = str(candidate["candidate_id"])
+        if candidate_id in candidate_ids:
+            raise SystemExit(f"Standard candidate ledger repeats candidate id: {candidate_id}")
+        candidate_ids.add(candidate_id)
+
+    final_findings = findings.get("findings")
+    if not isinstance(final_findings, list):
+        raise SystemExit("Standard scan findings must contain an array of findings")
+    for index, finding in enumerate(final_findings):
+        if not isinstance(finding, dict) or not isinstance(finding.get("locations"), list):
+            raise SystemExit(f"Standard finding {index + 1} must contain its source locations")
+        if not any(
+            isinstance(location, dict) and location.get("path") in scope
+            for location in finding["locations"]
+        ):
+            raise SystemExit(
+                f"Standard finding {index + 1} has no location in the authoritative scope inventory"
+            )
+
+    print(f"Verified {len(scope)} reviewed inventory paths and {len(candidates)} candidates")
 
 
 def bind_repo_scopes(args: argparse.Namespace) -> None:
@@ -1050,6 +1208,8 @@ def main() -> None:
         make_repo_rank_input(args)
     elif args.command == "make-scope-inventory":
         make_scope_inventory(args)
+    elif args.command == "verify-scope-coverage":
+        verify_scope_coverage(args)
     elif args.command == "bind-repo-scopes":
         bind_repo_scopes(args)
     elif args.command == "make-diff-rank-input":

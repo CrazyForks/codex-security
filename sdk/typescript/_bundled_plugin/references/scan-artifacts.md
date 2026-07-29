@@ -45,6 +45,9 @@ End each repository-scoped threat model with these two lines:
   - Each JSONL row contains exactly one JSON-encoded repository-relative `path`.
   - For SDK scans, read and normalize against the host-attested `$CODEX_SECURITY_SCOPE_INVENTORY_FILE` snapshot of this artifact.
   - Review every row without ranking, scoring, sharding, or filtering.
+- Exhaustive scope-review receipt: `<coverage_dir>/scope_review.jsonl`
+  - Write exactly one JSONL row for every path in the authoritative inventory. A reviewed row has `path` and `disposition: "reviewed"`; a deferred row has `path`, `disposition: "deferred"`, and a nonempty `reason`.
+  - Reference `artifacts/03_coverage/scope_review.jsonl` in a coverage surface's `receiptRefs`. The host verifies every path and the compact candidate ledger against its protected inventory before completion; the finalizer includes the receipt in the sealed scan artifacts.
 - Compact combined candidate ledger: `<discovery_dir>/candidate_ledger.jsonl`
   - The combiner reads one or more temporary raw candidate sources, validates them against the authoritative scope inventory, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values. This is the sole durable standard candidate artifact.
   - After normalization, compact validation adds exactly one `validation` object to every row with `disposition` (`reportable`, `suppressed`, `not_applicable`, or `deferred`), `method`, `confidence` (`high`, `medium`, or `low`), `confidence_rationale`, concise `rubric` and `evidence`, `counterevidence_or_proof_gap`, `remaining_uncertainty`, and optional `artifact_paths`. Add `source`, `control`, `sink`, or `preconditions` only when they clarify or differ from the discovery fields.

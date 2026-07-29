@@ -55,6 +55,7 @@ import {
   prepareScopeInventory,
   requirePrivateOutputDirectory,
   runWorkbench,
+  verifyScopeCoverage,
   verifyScopeInventory,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -1085,6 +1086,245 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
       expect(await readFile(path, "utf8")).toBe(contents);
     }
+  });
+
+  test("binds complete standard coverage to every host-attested inventory path", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    const reviewLedger = join(coverageDirectory, "scope_review.jsonl");
+    const candidateLedger = join(
+      scanDir,
+      "artifacts",
+      "02_discovery",
+      "candidate_ledger.jsonl",
+    );
+    await Promise.all([
+      mkdir(repository),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export const safe = true;\n"),
+      writeFile(join(repository, "hidden.ts"), "export const hidden = true;\n"),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {
+        OPENAI_API_KEY: "must-not-reach-python",
+        CODEX_API_KEY: "also-must-not-reach-python",
+      },
+    };
+
+    const restore = async () => {
+      await Promise.all([
+        writeFile(
+          reviewLedger,
+          ["hidden.ts", "safe.ts"]
+            .map((path) => JSON.stringify({ path, disposition: "reviewed" }))
+            .join("\n") + "\n",
+        ),
+        writeFile(candidateLedger, ""),
+        writeFile(
+          join(scanDir, "coverage.json"),
+          `${JSON.stringify({
+            completeness: "complete",
+            surfaces: [
+              {
+                receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+              },
+            ],
+          })}\n`,
+        ),
+        writeFile(join(scanDir, "findings.json"), '{"findings":[]}\n'),
+      ]);
+    };
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const rawCandidates = join(root, "raw-candidates.jsonl");
+    await writeFile(
+      rawCandidates,
+      `${JSON.stringify({
+        cwe_ids: ["CWE-20"],
+        locations: [{ path: "safe.ts", start_line: 1, role: "evidence" }],
+        summary: "In-scope candidate",
+        evidence: "The reviewed source is within the authoritative scope.",
+      })}\n`,
+    );
+    const normalized = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        rawCandidates,
+        "--out",
+        candidateLedger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        inventory.path,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(normalized.status).toBe(0);
+    const candidate = JSON.parse(
+      await readFile(candidateLedger, "utf8"),
+    ) as Record<string, unknown>;
+    candidate["validation"] = { disposition: "reportable" };
+    candidate["attack_path"] = { decision: "reportable" };
+    await Promise.all([
+      writeFile(candidateLedger, `${JSON.stringify(candidate)}\n`),
+      writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({ findings: [{ locations: [{ path: "safe.ts" }] }] })}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    await restore();
+    await Promise.all([
+      writeFile(
+        reviewLedger,
+        [
+          {
+            path: "hidden.ts",
+            disposition: "deferred",
+            reason: "Needs follow-up",
+          },
+          { path: "safe.ts", disposition: "reviewed" },
+        ]
+          .map((row) => JSON.stringify(row))
+          .join("\n") + "\n",
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "partial",
+          surfaces: [
+            { receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"] },
+          ],
+        })}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const attacks: Array<{
+      mutate: () => Promise<unknown>;
+      message: RegExp;
+    }> = [
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            `${JSON.stringify({ path: "safe.ts", disposition: "reviewed" })}\n`,
+          ),
+        message: /omits authoritative inventory paths/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            ["safe.ts", "safe.ts"]
+              .map((path) => JSON.stringify({ path, disposition: "reviewed" }))
+              .join("\n") + "\n",
+          ),
+        message: /duplicate paths/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            ["hidden.ts", "safe.ts", "forged.ts"]
+              .map((path) => JSON.stringify({ path, disposition: "reviewed" }))
+              .join("\n") + "\n",
+          ),
+        message: /outside the authoritative scope inventory/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            [
+              {
+                path: "hidden.ts",
+                disposition: "deferred",
+                reason: "Unreadable",
+              },
+              { path: "safe.ts", disposition: "reviewed" },
+            ]
+              .map((row) => JSON.stringify(row))
+              .join("\n") + "\n",
+          ),
+        message: /cannot contain deferred inventory paths/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            join(scanDir, "coverage.json"),
+            `${JSON.stringify({
+              completeness: "complete",
+              surfaces: [{ receiptRefs: [] }],
+            })}\n`,
+          ),
+        message: /must reference the exhaustive scope-review ledger/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              candidate_id: "candidate-forged",
+              cwe_ids: ["CWE-20"],
+              locations: [
+                { path: "../outside.ts", start_line: 1, role: "evidence" },
+              ],
+              summary: "Forged candidate",
+              evidence: "Must not leave the repository",
+              validation: { disposition: "reportable" },
+              attack_path: { decision: "reportable" },
+            })}\n`,
+          ),
+        message: /repository-relative path without traversal/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            join(scanDir, "findings.json"),
+            `${JSON.stringify({
+              findings: [{ locations: [{ path: "forged.ts" }] }],
+            })}\n`,
+          ),
+        message: /no location in the authoritative scope inventory/u,
+      },
+    ];
+
+    for (const attack of attacks) {
+      await restore();
+      await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+      await attack.mutate();
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        attack.message,
+      );
+    }
+
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
   });
 
   test("rejects oversized or substituted standard inventories after attestation", async () => {

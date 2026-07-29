@@ -2819,14 +2819,17 @@ describe("CodexSecurity orchestration", () => {
 
     expect(skill).toContain("one JSONL scope inventory");
     expect(skill).toContain("scope_inventory.jsonl");
+    expect(skill).toContain("scope_review.jsonl");
     expect(skill).not.toContain("in_scope_files.txt");
     expect(workflow).toContain("CODEX_SECURITY_SCOPE_INVENTORY_FILE");
     expect(workflow).toContain("make-scope-inventory");
     expect(workflow).toContain("--in-scope-inventory");
+    expect(workflow).toContain("scope_review.jsonl");
     expect(workflow).not.toContain("rg --files");
     expect(workflow).not.toContain("--in-scope-files");
     expect(workflow).not.toContain("in_scope_files.txt");
     expect(artifacts).toContain("scope_inventory.jsonl");
+    expect(artifacts).toContain("scope_review.jsonl");
     expect(artifacts).toContain("CODEX_SECURITY_SCOPE_INVENTORY_FILE");
     expect(artifacts).not.toContain("in_scope_files.txt");
     expect(capabilities).toContain(
@@ -3109,6 +3112,7 @@ describe("CodexSecurity orchestration", () => {
       {},
       {
         environment: { CODEX_SECURITY_STATE_DIR: parse(root).root },
+        scopeInventoryRoots: [root],
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => python!,
         prepareOutputDir: async () => scanDir,
@@ -3126,6 +3130,138 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(codexStarted).toBe(false);
     await client.close();
+  });
+
+  test("rejects filtered standard coverage before completing a scan", async () => {
+    for (const attack of ["missing", "filtered", "out-of-scope-candidate"]) {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const reviewLedger = join(
+        scanDir,
+        "artifacts",
+        "03_coverage",
+        "scope_review.jsonl",
+      );
+      const candidateLedger = join(
+        scanDir,
+        "artifacts",
+        "02_discovery",
+        "candidate_ledger.jsonl",
+      );
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+      ]);
+      await Promise.all([
+        writeFile(join(repository, "safe.ts"), "export const safe = true;\n"),
+        writeFile(
+          join(repository, "hidden.ts"),
+          "export const hidden = true;\n",
+        ),
+      ]);
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const commands: Array<readonly string[]> = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: root },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => python!,
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          prepareScopeInventory,
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            commands.push(args);
+            if (args[0] === "register-cli-scan") {
+              return {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                scanDir,
+              };
+            }
+            if (args[0] === "get-scan-feedback") {
+              return {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                falsePositives: [],
+              };
+            }
+            return {};
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                await mkdir(dirname(reviewLedger), { recursive: true });
+                if (attack !== "missing") {
+                  const paths =
+                    attack === "filtered"
+                      ? ["safe.ts"]
+                      : ["hidden.ts", "safe.ts"];
+                  await writeFile(
+                    reviewLedger,
+                    paths
+                      .map((path) =>
+                        JSON.stringify({ path, disposition: "reviewed" }),
+                      )
+                      .join("\n") + "\n",
+                  );
+                }
+                await writeFile(
+                  candidateLedger,
+                  attack === "out-of-scope-candidate"
+                    ? `${JSON.stringify({
+                        candidate_id: "candidate-forged",
+                        cwe_ids: ["CWE-20"],
+                        locations: [
+                          {
+                            path: "../outside.ts",
+                            start_line: 1,
+                            role: "evidence",
+                          },
+                        ],
+                        summary: "Forged out-of-scope candidate.",
+                        evidence: "This candidate must not be trusted.",
+                        validation: {
+                          disposition: "reportable",
+                        },
+                        attack_path: {
+                          decision: "reportable",
+                        },
+                      })}\n`
+                    : "",
+                );
+                const coveragePath = join(scanDir, "coverage.json");
+                const coverage = JSON.parse(
+                  await readFile(coveragePath, "utf8"),
+                ) as { surfaces: Array<{ receiptRefs: string[] }> };
+                coverage.surfaces[0]!.receiptRefs = [
+                  "artifacts/03_coverage/scope_review.jsonl",
+                ];
+                await writeFile(coveragePath, `${JSON.stringify(coverage)}\n`);
+                await writeFile(
+                  join(scanDir, "findings.json"),
+                  `${JSON.stringify({ findings: [] })}\n`,
+                );
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(client.run(repository)).rejects.toThrow(
+        /standard scan scope coverage|authoritative scope inventory|in-scope/u,
+      );
+      expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
+      expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);
+      await client.close();
+    }
   });
 
   test("rejects model-modified standard inventories before completing a scan", async () => {

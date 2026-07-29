@@ -71,6 +71,7 @@ import {
   resolvePluginPath,
   resolvePluginPython,
   runWorkbench,
+  verifyScopeCoverage,
   verifyScopeInventory,
   type CodexCommand,
   type PluginInstall,
@@ -216,6 +217,7 @@ interface ClientDependencies {
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
   prepareScopeInventory?: typeof prepareScopeInventory;
+  scopeInventoryRoots?: readonly string[];
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -688,6 +690,7 @@ export class CodexSecurity {
           protectedRoot,
           scanDir,
           signal,
+          this.#dependencies.scopeInventoryRoots,
         );
         scopeInventoryFile = join(
           scopeInventoryDirectory,
@@ -777,6 +780,21 @@ export class CodexSecurity {
               { ...standardScopeInventory, path: scopeInventoryFile },
               signal,
             );
+            await verifyScopeCoverage({
+              python,
+              pluginRoot: runtime.plugin.pluginRoot,
+              repository: repo,
+              scanDir,
+              inventory: {
+                ...standardScopeInventory,
+                path: scopeInventoryFile,
+              },
+              environment: selectedScanEnvironment(
+                runtime.environment,
+                options.auth,
+              ),
+              signal,
+            });
           }
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
@@ -1226,6 +1244,7 @@ async function createProtectedScopeInventoryDirectory(
   protectedRoot: string,
   scanDir: string,
   signal: AbortSignal,
+  candidateRoots?: readonly string[],
 ): Promise<string> {
   let canonicalState = stateDirectory;
   try {
@@ -1241,12 +1260,14 @@ async function createProtectedScopeInventoryDirectory(
   }
 
   const failures: unknown[] = [];
-  for (const root of new Set([
-    dirname(codexHome),
-    dirname(stateDirectory),
-    homedir(),
-    tmpdir(),
-  ])) {
+  for (const root of new Set(
+    candidateRoots ?? [
+      dirname(codexHome),
+      dirname(stateDirectory),
+      homedir(),
+      tmpdir(),
+    ],
+  )) {
     throwIfAborted(signal, scanDir);
     let directory: string | null = null;
     try {

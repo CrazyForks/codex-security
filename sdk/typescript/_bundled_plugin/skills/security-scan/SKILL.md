@@ -5,7 +5,7 @@ description: "Use for a standard, single-pass security audit of an entire reposi
 
 # Security Scan
 
-Review every file in scope. Use one JSONL scope inventory and one candidate ledger. Standard scans use the existing validation and attack-path reasoning in compact mode, without the ranking, queues, fan-out, or per-candidate reports used by deep scans.
+Review every file in scope. Use one JSONL scope inventory, one exhaustive scope-review receipt, and one candidate ledger. Standard scans use the existing validation and attack-path reasoning in compact mode, without the ranking, queues, fan-out, or per-candidate reports used by deep scans.
 
 ## Setup And Preflight
 
@@ -22,10 +22,10 @@ Resolve the shared paths in `../../references/scan-artifacts.md`, apply relevant
 ## Standard Workflow
 
 1. Run `$threat-model` or use the supplied threat model. Keep a copy under `<context_dir>/threat_model.md`.
-2. Read `references/repository-wide-scan.md` and follow its standard procedure. It uses `<discovery_dir>/scope_inventory.jsonl`, reviews every file, and combines raw candidates into `<discovery_dir>/candidate_ledger.jsonl`. For SDK scans, use the existing host-attested `$CODEX_SECURITY_SCOPE_INVENTORY_FILE` snapshot.
+2. Read `references/repository-wide-scan.md` and follow its standard procedure. It uses `<discovery_dir>/scope_inventory.jsonl`, records exactly one review per inventoried file in `<coverage_dir>/scope_review.jsonl`, and combines raw candidates into `<discovery_dir>/candidate_ledger.jsonl`. For SDK scans, use the existing host-attested `$CODEX_SECURITY_SCOPE_INVENTORY_FILE` snapshot.
 3. Run `$validation` once over the combined ledger in compact standard-scan mode. Validate every candidate and add one concise `validation` record to each ledger row. Preserve the candidate id, locations, instance, and discovery evidence.
 4. Run `$attack-path-analysis` once in compact standard-scan mode over candidates whose validation disposition is `reportable` or `deferred`. Use the threat model to establish reachability and severity, and add one concise `attack_path` record to each candidate that enters the phase. Do not create ranking or phase queues, per-candidate subagent fan-out, receipts, or narrative phase reports.
-5. Write `scan-manifest.json`, `findings.json`, and `coverage.json` using `../../references/final-report.md`. Put candidates that survive both compact phases in `findings.json`. Map rejected, not-applicable, and deferred candidates to the corresponding coverage outcomes. Include the relevant code locations.
+5. Write `scan-manifest.json`, `findings.json`, and `coverage.json` using `../../references/final-report.md`. Put candidates that survive both compact phases in `findings.json`. Map rejected, not-applicable, and deferred candidates to the corresponding coverage outcomes. Include the relevant code locations and reference `artifacts/03_coverage/scope_review.jsonl` from a coverage surface's `receiptRefs` so finalization seals the exhaustive review receipt.
 6. Complete the scan once. When `complete_codex_security_scan` is available, use it. Otherwise run:
 
    ```text

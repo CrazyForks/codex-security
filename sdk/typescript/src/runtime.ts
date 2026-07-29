@@ -110,6 +110,10 @@ export interface ScopeInventorySnapshot {
   byteLength: number;
 }
 
+export interface ScopeCoverageOptions extends ScopeInventoryOptions {
+  inventory: ScopeInventorySnapshot;
+}
+
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
@@ -284,6 +288,49 @@ export async function verifyScopeInventory(
     if (signal?.aborted) throw error;
     throw new CodexSecurityError(
       `The standard scan scope inventory changed after preparation: ${processErrorDetail(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+export async function verifyScopeCoverage(
+  options: ScopeCoverageOptions,
+): Promise<void> {
+  if (options.inventory.fileCount === 0) return;
+  try {
+    await verifyScopeInventory(options.inventory, options.signal);
+    await execFile(
+      options.python,
+      [
+        "-I",
+        "-B",
+        join(options.pluginRoot, "scripts", "generate_rank_input.py"),
+        "verify-scope-coverage",
+        "--repo",
+        options.repository,
+        "--inventory",
+        options.inventory.path,
+        "--scan-dir",
+        options.scanDir,
+      ],
+      {
+        env: Object.fromEntries(
+          Object.entries(options.environment).filter(
+            ([name]) =>
+              name.toUpperCase() !== "OPENAI_API_KEY" &&
+              name.toUpperCase() !== "CODEX_API_KEY",
+          ),
+        ),
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true,
+        signal: options.signal,
+      },
+    );
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      `Could not verify the standard scan scope coverage: ${processErrorDetail(error)}`,
       { cause: error },
     );
   }
