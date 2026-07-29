@@ -703,6 +703,87 @@ def validate_standard_attack_path(
     return decision
 
 
+def validate_standard_finding_payload(
+    finding: dict[str, object], candidate: JsonRow, index: int
+) -> None:
+    validation = candidate.get("validation")
+    attack_path = candidate.get("attack_path")
+    if not isinstance(validation, dict) or not isinstance(attack_path, dict):
+        raise SystemExit(f"Standard finding {index} has no complete candidate payload")
+
+    taxonomy = finding.get("taxonomy")
+    severity = finding.get("severity")
+    confidence = finding.get("confidence")
+    finding_validation = finding.get("validation")
+    finding_attack_path = finding.get("attackPath")
+    if not all(
+        isinstance(section, dict)
+        for section in (taxonomy, severity, confidence, finding_validation, finding_attack_path)
+    ):
+        raise SystemExit(f"Standard finding {index} does not preserve its candidate payload")
+    assert isinstance(taxonomy, dict)
+    assert isinstance(severity, dict)
+    assert isinstance(confidence, dict)
+    assert isinstance(finding_validation, dict)
+    assert isinstance(finding_attack_path, dict)
+
+    fields = (
+        ("taxonomy", taxonomy.get("cwe"), candidate.get("cwe_ids")),
+        ("severity", severity.get("level"), attack_path.get("severity")),
+        (
+            "severity rationale",
+            severity.get("rationale"),
+            attack_path.get("severity_rationale"),
+        ),
+        (
+            "severity change conditions",
+            severity.get("changeConditions"),
+            attack_path.get("change_conditions"),
+        ),
+        ("confidence", confidence.get("level"), validation.get("confidence")),
+        (
+            "confidence rationale",
+            confidence.get("rationale"),
+            validation.get("confidence_rationale"),
+        ),
+        ("validation method", finding_validation.get("method"), validation.get("method")),
+        ("validation evidence", finding_validation.get("summary"), validation.get("evidence")),
+    ) + tuple(
+        ("attack-path " + field, finding_attack_path.get(field), attack_path.get(field))
+        for field in ("dataflow", "reachability", "counterevidence", "impact", "likelihood")
+    )
+    for field, actual, expected in fields:
+        if actual != expected:
+            raise SystemExit(
+                f"Standard finding {index} does not preserve its candidate payload: {field}"
+            )
+
+    expected_locations = {
+        (
+            location["path"],
+            location["start_line"],
+            location["end_line"],
+            location["role"],
+        )
+        for location in candidate["locations"]
+        if isinstance(location, dict)
+    }
+    actual_locations: set[tuple[object, object, object, object]] = set()
+    for location in finding["locations"]:
+        if not isinstance(location, dict):
+            raise SystemExit(f"Standard finding {index} does not preserve its candidate locations")
+        actual_locations.add(
+            (
+                location.get("path"),
+                location.get("startLine"),
+                location.get("endLine", location.get("startLine")),
+                location.get("role"),
+            )
+        )
+    if not expected_locations.issubset(actual_locations):
+        raise SystemExit(f"Standard finding {index} does not preserve its candidate locations")
+
+
 def verify_scope_coverage(args: argparse.Namespace) -> None:
     try:
         repository = Path(args.repo).expanduser().resolve(strict=True)
@@ -762,12 +843,54 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
     if not isinstance(coverage, dict) or not isinstance(findings, dict):
         raise SystemExit("Standard scan coverage and findings must be JSON objects")
     surfaces = coverage.get("surfaces")
-    if not isinstance(surfaces, list) or not any(
-        isinstance(surface, dict)
-        and isinstance(surface.get("receiptRefs"), list)
-        and review_relative in surface["receiptRefs"]
-        for surface in surfaces
-    ):
+    if not isinstance(surfaces, list):
+        raise SystemExit("Standard scan coverage must reference the exhaustive scope-review ledger")
+    surface_ids: set[str] = set()
+    has_review_receipt = False
+    for index, surface in enumerate(surfaces, start=1):
+        if not isinstance(surface, dict):
+            raise SystemExit(f"Standard scan coverage surface {index} must be an object")
+        surface_id = surface.get("id")
+        label = surface.get("label")
+        disposition = surface.get("disposition")
+        receipt_refs = surface.get("receiptRefs")
+        if not isinstance(surface_id, str) or not surface_id.strip():
+            raise SystemExit(f"Standard scan coverage surface {index} has no valid id")
+        if surface_id in surface_ids:
+            raise SystemExit(f"Standard scan coverage surface {index} repeats its id")
+        surface_ids.add(surface_id)
+        if not isinstance(label, str) or not label.strip():
+            raise SystemExit(f"Standard scan coverage surface {index} has no valid label")
+        if disposition not in {
+            "reported",
+            "no_issue_found",
+            "rejected",
+            "not_applicable",
+            "needs_follow_up",
+        }:
+            raise SystemExit(f"Standard scan coverage surface {index} has no valid disposition")
+        if not isinstance(receipt_refs, list):
+            raise SystemExit(f"Standard scan coverage surface {index} has no valid receipts")
+        for receipt in receipt_refs:
+            if (
+                not isinstance(receipt, str)
+                or not receipt.startswith("artifacts/")
+                or "\\" in receipt
+                or any(part in {"", ".", ".."} for part in receipt.split("/"))
+            ):
+                raise SystemExit(f"Standard scan coverage surface {index} has an unsafe receipt")
+            require_standard_scope_artifact(
+                scan_dir,
+                receipt,
+                "Scope-review ledger" if receipt == review_relative else "Coverage receipt",
+                max_bytes=(
+                    MAX_SCOPE_REVIEW_BYTES
+                    if receipt == review_relative
+                    else MAX_SCOPE_COVERAGE_BYTES
+                ),
+            )
+            has_review_receipt = has_review_receipt or receipt == review_relative
+    if not has_review_receipt:
         raise SystemExit("Standard scan coverage must reference the exhaustive scope-review ledger")
     if coverage.get("completeness") == "complete" and any(
         row["disposition"] == "deferred" for row in reviews
@@ -844,18 +967,8 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
             )
         if candidate_id in reported_ids:
             raise SystemExit(f"Standard finding repeats reportable candidate: {candidate_id}")
-        candidate_locations = {
-            location["path"]
-            for location in candidate["locations"]
-            if isinstance(location, dict)
-        }
-        if not any(
-            isinstance(location, dict) and location.get("path") in candidate_locations
-            for location in finding["locations"]
-        ):
-            raise SystemExit(
-                f"Standard finding {index + 1} does not preserve its candidate locations"
-            )
+        assert isinstance(candidate, dict)
+        validate_standard_finding_payload(finding, candidate, index + 1)
         reported_ids.add(candidate_id)
 
     deferred = coverage.get("deferred", [])

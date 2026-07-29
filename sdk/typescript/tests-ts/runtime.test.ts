@@ -1199,7 +1199,12 @@ describe("runtime directories and plugin Python boundary", () => {
         `${JSON.stringify({
           completeness: "partial",
           surfaces: [
-            { receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"] },
+            {
+              id: "scope-review",
+              label: "Exhaustive standard scope review",
+              disposition: "needs_follow_up",
+              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+            },
           ],
         })}\n`,
       ),
@@ -1237,6 +1242,217 @@ describe("runtime directories and plugin Python boundary", () => {
     const oversized = spawnSync(python!, args, { encoding: "utf8" });
     expect(oversized.status).not.toBe(0);
     expect(oversized.stderr).toContain("bounded regular file");
+  });
+
+  test("rejects forged finding payloads and unsealable review surfaces", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const discoveryDirectory = join(scanDir, "artifacts", "02_discovery");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(discoveryDirectory, { recursive: true }),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    await writeFile(
+      join(repository, "safe.ts"),
+      "export const safe = true;\nexport const decoy = true;\n",
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    const candidateLedger = join(discoveryDirectory, "candidate_ledger.jsonl");
+    const rawCandidates = join(root, "raw-candidates.jsonl");
+    await writeFile(
+      rawCandidates,
+      `${JSON.stringify({
+        cwe_ids: ["CWE-20"],
+        locations: [{ path: "safe.ts", start_line: 1, role: "evidence" }],
+        summary: "The reviewed candidate.",
+        evidence: "The first source line establishes the finding.",
+      })}\n`,
+    );
+    const normalized = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        rawCandidates,
+        "--out",
+        candidateLedger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        inventory.path,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(normalized.status).toBe(0);
+    const candidate = JSON.parse(
+      await readFile(candidateLedger, "utf8"),
+    ) as Record<string, unknown>;
+    const validation = {
+      disposition: "reportable",
+      method: "source trace",
+      confidence: "high",
+      confidence_rationale: "The exact reviewed source is present.",
+      rubric: ["The source reaches the identified behavior."],
+      evidence: "The first source line establishes the finding.",
+      counterevidence_or_proof_gap: "No blocking control was found.",
+      remaining_uncertainty: "None.",
+    };
+    const attackPath = {
+      decision: "reportable",
+      dataflow: "The first source line reaches the reviewed behavior.",
+      reachability: "The reviewed source is directly reachable.",
+      counterevidence: "No blocking control was found.",
+      impact: "high",
+      likelihood: "medium",
+      severity: "high",
+      severity_rationale: "The reviewed source crosses a trust boundary.",
+      change_conditions: "Input validation would block the behavior.",
+    };
+    const candidateId = candidate["candidate_id"] as string;
+    const canonicalFinding = {
+      taxonomy: { category: "input-validation", cwe: ["CWE-20"] },
+      severity: {
+        level: "high",
+        rationale: attackPath.severity_rationale,
+        changeConditions: attackPath.change_conditions,
+      },
+      confidence: {
+        level: validation.confidence,
+        rationale: validation.confidence_rationale,
+      },
+      locations: [
+        { path: "safe.ts", startLine: 1, endLine: 1, role: "evidence" },
+      ],
+      validation: {
+        method: validation.method,
+        summary: validation.evidence,
+      },
+      attackPath: {
+        dataflow: attackPath.dataflow,
+        reachability: attackPath.reachability,
+        counterevidence: attackPath.counterevidence,
+        impact: attackPath.impact,
+        likelihood: attackPath.likelihood,
+      },
+      extensions: { candidateId },
+    };
+    const scopeSurface = {
+      id: "scope-review",
+      label: "Exhaustive standard scope review",
+      disposition: "no_issue_found",
+      receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+    };
+    const candidateSurface = {
+      id: candidateId,
+      label: "Reviewed input-validation candidate",
+      disposition: "reported",
+      receiptRefs: [] as string[],
+    };
+    const restore = async () =>
+      Promise.all([
+        writeFile(
+          join(coverageDirectory, "scope_review.jsonl"),
+          `${JSON.stringify({ path: "safe.ts", disposition: "reviewed" })}\n`,
+        ),
+        writeFile(
+          candidateLedger,
+          `${JSON.stringify({ ...candidate, validation, attack_path: attackPath })}\n`,
+        ),
+        writeFile(
+          join(scanDir, "coverage.json"),
+          `${JSON.stringify({
+            completeness: "complete",
+            surfaces: [scopeSurface, candidateSurface],
+          })}\n`,
+        ),
+        writeFile(
+          join(scanDir, "findings.json"),
+          `${JSON.stringify({ findings: [canonicalFinding] })}\n`,
+        ),
+      ]);
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {},
+    };
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const forgedFindings = [
+      {
+        ...canonicalFinding,
+        taxonomy: { category: "forged", cwe: ["CWE-22"] },
+      },
+      {
+        ...canonicalFinding,
+        severity: { ...canonicalFinding.severity, level: "low" },
+      },
+      {
+        ...canonicalFinding,
+        confidence: { ...canonicalFinding.confidence, level: "low" },
+      },
+      {
+        ...canonicalFinding,
+        validation: {
+          ...canonicalFinding.validation,
+          summary: "Forged evidence.",
+        },
+      },
+      {
+        ...canonicalFinding,
+        attackPath: {
+          ...canonicalFinding.attackPath,
+          dataflow: "Forged dataflow.",
+        },
+      },
+      {
+        ...canonicalFinding,
+        locations: [
+          { path: "safe.ts", startLine: 2, endLine: 2, role: "evidence" },
+        ],
+      },
+    ];
+    for (const finding of forgedFindings) {
+      await restore();
+      await writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({ findings: [finding] })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /candidate (?:payload|locations)/u,
+      );
+    }
+
+    await restore();
+    const { label: _label, ...unsealableSurface } = scopeSurface;
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        completeness: "complete",
+        surfaces: [unsealableSurface, candidateSurface],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /scope-review surface|coverage surface/u,
+    );
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
   });
 
   test("binds complete standard coverage to every host-attested inventory path", async () => {
@@ -1295,6 +1511,9 @@ describe("runtime directories and plugin Python boundary", () => {
             completeness: "complete",
             surfaces: [
               {
+                id: "scope-review",
+                label: "Exhaustive standard scope review",
+                disposition: "no_issue_found",
                 receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
               },
             ],
@@ -1368,7 +1587,30 @@ describe("runtime directories and plugin Python boundary", () => {
         `${JSON.stringify({
           findings: [
             {
-              locations: [{ path: "safe.ts" }],
+              taxonomy: { category: "input-validation", cwe: ["CWE-20"] },
+              severity: {
+                level: completeAttackPath.severity,
+                rationale: completeAttackPath.severity_rationale,
+                changeConditions: completeAttackPath.change_conditions,
+              },
+              confidence: {
+                level: completeValidation.confidence,
+                rationale: completeValidation.confidence_rationale,
+              },
+              locations: [
+                { path: "safe.ts", startLine: 1, endLine: 1, role: "evidence" },
+              ],
+              validation: {
+                method: completeValidation.method,
+                summary: completeValidation.evidence,
+              },
+              attackPath: {
+                dataflow: completeAttackPath.dataflow,
+                reachability: completeAttackPath.reachability,
+                counterevidence: completeAttackPath.counterevidence,
+                impact: completeAttackPath.impact,
+                likelihood: completeAttackPath.likelihood,
+              },
               extensions: { candidateId },
             },
           ],
@@ -1381,10 +1623,16 @@ describe("runtime directories and plugin Python boundary", () => {
           surfaces: [
             {
               id: "scope-review",
+              label: "Exhaustive standard scope review",
               disposition: "no_issue_found",
               receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
             },
-            { id: candidateId, disposition: "reported", receiptRefs: [] },
+            {
+              id: candidateId,
+              label: "Reviewed input-validation candidate",
+              disposition: "reported",
+              receiptRefs: [],
+            },
           ],
         })}\n`,
       ),
@@ -1411,7 +1659,12 @@ describe("runtime directories and plugin Python boundary", () => {
         `${JSON.stringify({
           completeness: "partial",
           surfaces: [
-            { receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"] },
+            {
+              id: "scope-review",
+              label: "Exhaustive standard scope review",
+              disposition: "needs_follow_up",
+              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+            },
           ],
         })}\n`,
       ),
@@ -1473,7 +1726,14 @@ describe("runtime directories and plugin Python boundary", () => {
             join(scanDir, "coverage.json"),
             `${JSON.stringify({
               completeness: "complete",
-              surfaces: [{ receiptRefs: [] }],
+              surfaces: [
+                {
+                  id: "scope-review",
+                  label: "Exhaustive standard scope review",
+                  disposition: "no_issue_found",
+                  receiptRefs: [],
+                },
+              ],
             })}\n`,
           ),
         message: /must reference the exhaustive scope-review ledger/u,
@@ -1627,7 +1887,12 @@ describe("runtime directories and plugin Python boundary", () => {
         `${JSON.stringify({
           completeness: "complete",
           surfaces: [
-            { receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"] },
+            {
+              id: "scope-review",
+              label: "Exhaustive standard scope review",
+              disposition: "no_issue_found",
+              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+            },
           ],
         })}\n`,
       ),

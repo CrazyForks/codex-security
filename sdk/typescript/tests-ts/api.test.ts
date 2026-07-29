@@ -3445,18 +3445,21 @@ describe("CodexSecurity orchestration", () => {
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
     const mutablePlugin = join(root, "mutable-plugin");
+    const installedPlugin = join(root, "installed-plugin");
     await Promise.all([
       mkdir(repository),
       mkdir(codexHome),
       mkdir(scanDir, { mode: 0o700 }),
       cp(PLUGIN_ROOT, mutablePlugin, { recursive: true }),
+      cp(PLUGIN_ROOT, installedPlugin, { recursive: true }),
     ]);
     let verifierPlugin: string | null = null;
+    let verifierSource: string | null = null;
     const commands: Array<readonly string[]> = [];
     const client = new TestClient(
       {},
       {
-        environment: {},
+        environment: { CODEX_SECURITY_STATE_DIR: root },
         prepareRuntime: async () => {
           const runtime = preparedRuntime(codexHome);
           return {
@@ -3464,7 +3467,7 @@ describe("CodexSecurity orchestration", () => {
             plugin: {
               ...(runtime["plugin"] as Record<string, unknown>),
               pluginRoot: mutablePlugin,
-              installedRoot: PLUGIN_ROOT,
+              installedRoot: installedPlugin,
             },
           };
         },
@@ -3475,6 +3478,10 @@ describe("CodexSecurity orchestration", () => {
           options: Parameters<typeof verifyScopeCoverage>[0],
         ) => {
           verifierPlugin = options.pluginRoot;
+          verifierSource = await readFile(
+            join(options.pluginRoot, "scripts", "generate_rank_input.py"),
+            "utf8",
+          );
           throw new Error("immutable installed verifier captured");
         },
         runWorkbench: async (_options: unknown, args: readonly string[]) => {
@@ -3495,6 +3502,10 @@ describe("CodexSecurity orchestration", () => {
           startThread: () => ({
             id: null,
             async runStreamed() {
+              await writeFile(
+                join(installedPlugin, "scripts", "generate_rank_input.py"),
+                "raise SystemExit('model-modified installed verifier')\n",
+              );
               await copyCompletedScan(root);
               return { events: completedEvents() };
             },
@@ -3506,7 +3517,14 @@ describe("CodexSecurity orchestration", () => {
     await expect(client.run(repository)).rejects.toThrow(
       "immutable installed verifier captured",
     );
-    expect(verifierPlugin as string | null).toBe(PLUGIN_ROOT);
+    expect(verifierPlugin).not.toBeNull();
+    expect(relative(root, verifierPlugin!)).toMatch(/^\.\.(?:[\\/]|$)/u);
+    expect(verifierSource as string | null).toBe(
+      await readFile(
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "utf8",
+      ),
+    );
     expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
     expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);
     await client.close();

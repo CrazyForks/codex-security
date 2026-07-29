@@ -729,6 +729,11 @@ export class CodexSecurity {
           signal,
           this.#dependencies.scopeInventoryRoots,
         );
+        await stageProtectedScopeVerifier(
+          runtime.plugin.installedRoot,
+          scopeInventoryDirectory,
+          signal,
+        );
         scopeInventoryFile = join(
           scopeInventoryDirectory,
           "scope_inventory.jsonl",
@@ -816,7 +821,10 @@ export class CodexSecurity {
         onFinalize: async (usage) => {
           if (standardScopeInventory !== null) {
             await verifyScopeInventory(standardScopeInventory, signal);
-            if (scopeInventoryFile === null) {
+            if (
+              scopeInventoryFile === null ||
+              scopeInventoryDirectory === null
+            ) {
               throw new CodexSecurityError(
                 "The standard scan scope inventory is missing its protected snapshot.",
               );
@@ -829,7 +837,7 @@ export class CodexSecurity {
               this.#dependencies.verifyScopeCoverage ?? verifyScopeCoverage
             )({
               python,
-              pluginRoot: runtime.plugin.installedRoot,
+              pluginRoot: scopeInventoryDirectory,
               repository: repo,
               scanDir,
               inventory: {
@@ -1287,6 +1295,33 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
     await chmod(path, 0o600);
     await rm(path, { force: true });
   }
+}
+
+async function stageProtectedScopeVerifier(
+  installedPluginRoot: string,
+  protectedDirectory: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const scriptsDirectory = join(protectedDirectory, "scripts");
+  await mkdir(scriptsDirectory, { mode: 0o700 });
+  await chmod(scriptsDirectory, 0o700);
+  await Promise.all(
+    [
+      "generate_rank_input.py",
+      "normalize_candidates.py",
+      "rank_preview.py",
+    ].map(async (name) => {
+      const destination = join(scriptsDirectory, name);
+      await writeFile(
+        destination,
+        await readFile(join(installedPluginRoot, "scripts", name), {
+          signal,
+        }),
+        { flag: "wx", mode: 0o400, signal },
+      );
+      await chmod(destination, 0o400);
+    }),
+  );
 }
 
 async function createProtectedScopeInventoryDirectory(
