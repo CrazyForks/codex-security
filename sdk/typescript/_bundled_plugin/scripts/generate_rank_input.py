@@ -483,6 +483,7 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
         raise SystemExit(f"Repo path not found: {repo}")
 
     explicit_scopes = args.scopes_file is not None
+    scoped_exclusions = explicit_scopes or args.scope != "."
     scopes = (
         load_scopes_file(Path(args.scopes_file).expanduser())
         if explicit_scopes
@@ -504,7 +505,7 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                 relative = path.resolve(strict=True).relative_to(repo)
                 excluded_path = (
                     relative.relative_to(scope_root.relative_to(repo))
-                    if explicit_scopes
+                    if scoped_exclusions
                     else relative
                 )
                 if any(part in {".git", "node_modules"} for part in excluded_path.parts):

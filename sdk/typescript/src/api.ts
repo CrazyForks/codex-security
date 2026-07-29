@@ -4,6 +4,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -313,6 +314,7 @@ export class CodexSecurity {
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
+    let scopeInventoryDirectory: string | null = null;
     let scopeInventoryFile: string | null = null;
     let standardScopeInventory: ScopeInventorySnapshot | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
@@ -680,9 +682,16 @@ export class CodexSecurity {
           ),
           signal,
         });
+        scopeInventoryDirectory = await createProtectedScopeInventoryDirectory(
+          runtime.codexHome,
+          stateDirectory,
+          protectedRoot,
+          scanDir,
+          signal,
+        );
         scopeInventoryFile = join(
-          dirname(runtime.codexHome),
-          `codex-security-scope-inventory-${randomUUID()}.jsonl`,
+          scopeInventoryDirectory,
+          "scope_inventory.jsonl",
         );
         await writeFile(
           scopeInventoryFile,
@@ -844,7 +853,7 @@ export class CodexSecurity {
       await Promise.all([
         knowledgeBase?.cleanup(),
         removeTargetPathsFile(targetPathsFile),
-        removeTargetPathsFile(scopeInventoryFile),
+        removeScopeInventory(scopeInventoryFile, scopeInventoryDirectory),
       ]);
     }
   }
@@ -1208,6 +1217,79 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
     if (process.platform !== "win32") throw error;
     await chmod(path, 0o600);
     await rm(path, { force: true });
+  }
+}
+
+async function createProtectedScopeInventoryDirectory(
+  codexHome: string,
+  stateDirectory: string,
+  protectedRoot: string,
+  scanDir: string,
+  signal: AbortSignal,
+): Promise<string> {
+  let canonicalState = stateDirectory;
+  try {
+    canonicalState = await realpath(stateDirectory);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !("code" in error) ||
+      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
+    ) {
+      throw error;
+    }
+  }
+
+  const failures: unknown[] = [];
+  for (const root of new Set([
+    dirname(codexHome),
+    dirname(stateDirectory),
+    homedir(),
+    tmpdir(),
+  ])) {
+    throwIfAborted(signal, scanDir);
+    let directory: string | null = null;
+    try {
+      const canonicalRoot = await realpath(root);
+      requireOutputOutsideRepository(canonicalState, canonicalRoot, "runtime");
+      directory = await mkdtemp(
+        join(canonicalRoot, "codex-security-scope-inventory-"),
+      );
+      await chmod(directory, 0o700);
+      directory = await realpath(directory);
+      requireOutputOutsideRepository(canonicalState, directory, "runtime");
+      requireOutputOutsideRepository(protectedRoot, directory, "runtime");
+      requireOutputOutsideRepository(scanDir, directory, "runtime");
+      return directory;
+    } catch (error) {
+      if (directory !== null) {
+        try {
+          await cleanupSdkDirectory(directory);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Could not clean up an unsafe standard scan scope inventory.",
+          );
+        }
+      }
+      throwIfAborted(signal, scanDir);
+      failures.push(error);
+    }
+  }
+
+  throw new CodexSecurityError(
+    "Could not place the standard scan scope inventory outside model-writable roots.",
+    { cause: new AggregateError(failures) },
+  );
+}
+
+async function removeScopeInventory(
+  path: string | null,
+  directory: string | null,
+): Promise<void> {
+  await removeTargetPathsFile(path);
+  if (directory !== null) {
+    await cleanupSdkDirectory(directory);
   }
 }
 

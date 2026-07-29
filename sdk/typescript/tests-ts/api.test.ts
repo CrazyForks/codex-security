@@ -17,7 +17,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, parse, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -2551,6 +2551,10 @@ describe("CodexSecurity orchestration", () => {
     const inventory = join(root, "scope_inventory.jsonl");
     const scopedInventory = join(root, "scoped_inventory.jsonl");
     const dependencyInventory = join(root, "dependency_inventory.jsonl");
+    const manualDependencyInventory = join(
+      root,
+      "manual_dependency_inventory.jsonl",
+    );
     const targetPaths = join(root, "target-paths.json");
     const dependencyTargetPaths = join(root, "dependency-target-paths.json");
     const candidates = join(root, "candidates.jsonl");
@@ -2739,6 +2743,29 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(
       (await readFile(dependencyInventory, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toEqual([{ path: "package/node_modules/dependency/index.js" }]);
+
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        generator,
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--scope",
+        "package/node_modules/dependency",
+        "--out",
+        manualDependencyInventory,
+      ],
+      { stdio: "pipe" },
+    );
+    expect(
+      (await readFile(manualDependencyInventory, "utf8"))
         .trimEnd()
         .split("\n")
         .map((line) => JSON.parse(line)),
@@ -2946,6 +2973,7 @@ describe("CodexSecurity orchestration", () => {
       let started = false;
       let prompt = "";
       let protectedInventory: string | null = null;
+      let protectedInventoryDirectory: string | null = null;
       const client = new TestClient(
         {},
         {
@@ -2963,11 +2991,13 @@ describe("CodexSecurity orchestration", () => {
               throw new Error("missing protected standard inventory");
             }
             protectedInventory = immutable;
+            protectedInventoryDirectory = dirname(immutable);
             expect(
-              immutable.startsWith(
-                join(root, "codex-security-scope-inventory-"),
+              basename(protectedInventoryDirectory).startsWith(
+                "codex-security-scope-inventory-",
               ),
             ).toBe(true);
+            expect(relative(root, immutable).startsWith(`..${sep}`)).toBe(true);
             expect(immutable.startsWith(scanDir)).toBe(false);
             expect(immutable.startsWith(repository)).toBe(false);
             return {
@@ -2982,6 +3012,9 @@ describe("CodexSecurity orchestration", () => {
                     );
                     if (process.platform !== "win32") {
                       expect((await stat(immutable)).mode & 0o777).toBe(0o400);
+                      expect(
+                        (await stat(protectedInventoryDirectory!)).mode & 0o777,
+                      ).toBe(0o700);
                     }
                     throw new Error("inventory captured");
                   },
@@ -3015,7 +3048,9 @@ describe("CodexSecurity orchestration", () => {
       expect(prompt).toContain('"$CODEX_SECURITY_SCOPE_INVENTORY_FILE"');
       expect(prompt).not.toContain("make-repo-rank-input");
       expect(protectedInventory).not.toBeNull();
+      expect(protectedInventoryDirectory).not.toBeNull();
       expect(existsSync(protectedInventory!)).toBe(false);
+      expect(existsSync(protectedInventoryDirectory!)).toBe(false);
       await client.close();
     }
   });
@@ -3051,6 +3086,43 @@ describe("CodexSecurity orchestration", () => {
 
     await expect(client.run(repository)).rejects.toThrow(
       "standard inventory preparation failed",
+    );
+    expect(codexStarted).toBe(false);
+    await client.close();
+  });
+
+  test("does not start Codex when no inventory root can be protected", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+    ]);
+    await writeFile(join(repository, "safe.ts"), "export {};\n");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    let codexStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: parse(root).root },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => python!,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        prepareScopeInventory,
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "outside model-writable roots",
     );
     expect(codexStarted).toBe(false);
     await client.close();
