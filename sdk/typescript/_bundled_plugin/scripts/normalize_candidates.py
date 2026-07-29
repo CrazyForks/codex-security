@@ -102,8 +102,13 @@ def normalize_locations(
         relative, source = relative_file(item.get("path"), repo_root)
         if (
             not relative.strip()
-            or "\\" in relative
-            or any(":" in part for part in PurePosixPath(relative).parts)
+            or (
+                sys.platform == "win32"
+                and (
+                    "\\" in relative
+                    or any(":" in part for part in PurePosixPath(relative).parts)
+                )
+            )
         ):
             raise ValueError("path: expected a safe repository-relative POSIX path")
         start = positive_line(item.get("start_line"), "start_line")

@@ -317,10 +317,7 @@ describe("plugin runtime preparation", () => {
         cases.map((item) => ({
           ...item,
           inScope: true,
-          contractValid:
-            item.path.trim().length > 0 &&
-            !item.path.includes("\\") &&
-            !item.path.includes(":"),
+          contractValid: item.path.trim().length > 0,
         })),
       );
     },
@@ -1152,6 +1149,10 @@ describe("runtime directories and plugin Python boundary", () => {
       await Promise.all([
         writeFile(join(repository, "a:config"), "first-party configuration\n"),
         writeFile(join(repository, "C:candidate.py"), "print('in scope')\n"),
+        writeFile(
+          join(repository, "source\\candidate.py"),
+          "print('literal POSIX backslash')\n",
+        ),
       ]);
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
@@ -1164,14 +1165,62 @@ describe("runtime directories and plugin Python boundary", () => {
         environment: { PATH: process.env["PATH"] },
       });
 
-      expect(inventory.fileCount).toBe(2);
+      expect(inventory.fileCount).toBe(3);
       expect(
         (await readFile(inventory.path, "utf8"))
           .trimEnd()
           .split("\n")
           .map((line) => JSON.parse(line)),
-      ).toEqual([{ path: "C:candidate.py" }, { path: "a:config" }]);
+      ).toEqual([
+        { path: "C:candidate.py" },
+        { path: "a:config" },
+        { path: "source\\candidate.py" },
+      ]);
       await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
+
+      for (const path of [
+        "C:candidate.py",
+        "a:config",
+        "source\\candidate.py",
+      ]) {
+        const source = join(root, "native-posix-candidate.jsonl");
+        const output = join(root, "native-posix-candidate-ledger.jsonl");
+        await writeFile(
+          source,
+          `${JSON.stringify({
+            cwe_ids: ["CWE-20"],
+            locations: [{ path, start_line: 1, role: "evidence" }],
+            summary: "Native POSIX candidate filename.",
+            evidence:
+              "The authoritative inventory includes the exact filename.",
+          })}\n`,
+        );
+        const normalized = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+            "--input",
+            source,
+            "--out",
+            output,
+            "--repo-root",
+            repository,
+            "--in-scope-inventory",
+            inventory.path,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(normalized.status, normalized.stderr).toBe(0);
+        expect(
+          (
+            JSON.parse(await readFile(output, "utf8")) as {
+              locations: Array<{ path: string }>;
+            }
+          ).locations[0]?.path,
+        ).toBe(path);
+      }
     },
   );
 
@@ -1937,6 +1986,28 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ]);
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const reportableCoverage = JSON.parse(
+      await readFile(join(scanDir, "coverage.json"), "utf8"),
+    ) as Record<string, unknown>;
+    for (const deferredId of [candidateId, "candidate-not-in-ledger"]) {
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          ...reportableCoverage,
+          completeness: "partial",
+          deferred: [
+            {
+              id: deferredId,
+              reason: "This candidate was not actually deferred.",
+            },
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /deferred.*candidate|candidate.*deferred/iu,
+      );
+    }
 
     await restore();
     await Promise.all([

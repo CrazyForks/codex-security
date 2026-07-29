@@ -1039,6 +1039,31 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
         deferred_by_id[deferred_id] = entry
     if coverage.get("completeness") == "complete" and deferred_by_id:
         raise SystemExit("Complete standard scan coverage cannot contain deferred outcomes")
+    for deferred_id in deferred_by_id:
+        deferred_candidate = candidates_by_id.get(deferred_id)
+        deferred_validation = (
+            deferred_candidate.get("validation")
+            if isinstance(deferred_candidate, dict)
+            else None
+        )
+        deferred_attack_path = (
+            deferred_candidate.get("attack_path")
+            if isinstance(deferred_candidate, dict)
+            else None
+        )
+        if not (
+            isinstance(deferred_validation, dict)
+            and (
+                deferred_validation.get("disposition") == "deferred"
+                or (
+                    isinstance(deferred_attack_path, dict)
+                    and deferred_attack_path.get("decision") == "deferred"
+                )
+            )
+        ):
+            raise SystemExit(
+                "Deferred coverage does not match a deferred candidate: " + deferred_id
+            )
     for candidate_id, candidate in candidates_by_id.items():
         validation = candidate["validation"]
         attack_path = candidate.get("attack_path")
