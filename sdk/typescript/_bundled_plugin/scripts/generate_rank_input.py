@@ -36,12 +36,19 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from normalize_candidates import combine, normalize_candidate, read_scope_inventory
 from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
+
+STANDARD_SCOPE_EXCLUDED_DIRS = {
+    ".git": "Git administrative metadata is not repository source code.",
+    "node_modules": (
+        "Installed dependency trees are excluded unless directly requested as a scan scope."
+    ),
+}
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -205,6 +212,25 @@ def parse_args() -> argparse.Namespace:
     bind.add_argument("--manifest", required=True, help="Unsealed scan-manifest.json path.")
     bind.add_argument("--coverage", required=True, help="Unsealed coverage.json path.")
 
+    exclusions = subparsers.add_parser(
+        "bind-scope-exclusions",
+        help="Bind standard inventory exclusions into the unsealed scan contract.",
+    )
+    exclusions.add_argument("--repo", required=True, help="Repository root.")
+    exclusions.add_argument(
+        "--scope",
+        default=".",
+        help="Path within the repository to scan. Defaults to the repository root.",
+    )
+    exclusions.add_argument(
+        "--scopes-file",
+        help="JSON array of repository-relative files and directories to scan together.",
+    )
+    exclusions.add_argument(
+        "--manifest", required=True, help="Unsealed scan-manifest.json path."
+    )
+    exclusions.add_argument("--coverage", required=True, help="Unsealed coverage.json path.")
+
     diff = subparsers.add_parser(
         "make-diff-rank-input",
         help="Create rank_input.jsonl from Git changed source-like files.",
@@ -331,6 +357,25 @@ def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     if not scope_path.is_dir() and not scope_path.is_file():
         raise SystemExit(f"Scope path not found: {scope_path}")
     return scope_path
+
+
+def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, str]]:
+    """Declare the exact directory exclusions used for each inventoried scope."""
+
+    repository = repo.resolve()
+    exclusions: dict[str, dict[str, str]] = {}
+    for scope in scopes:
+        scope_path = resolve_scope(repository, scope, expand_user=False)
+        if not scope_path.is_dir():
+            continue
+        scope_prefix = PurePosixPath(scope_path.relative_to(repository).as_posix())
+        for directory, reason in STANDARD_SCOPE_EXCLUDED_DIRS.items():
+            for pattern in (
+                (scope_prefix / directory).as_posix(),
+                (scope_prefix / "**" / directory / "**").as_posix(),
+            ):
+                exclusions[pattern] = {"pattern": pattern, "reason": reason}
+    return [exclusions[pattern] for pattern in sorted(exclusions)]
 
 
 def write_jsonl(output: Path, rows: list[JsonRow]) -> None:
@@ -548,7 +593,7 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     if scoped_exclusions
                     else relative
                 )
-                if any(part in {".git", "node_modules"} for part in excluded_path.parts):
+                if any(part in STANDARD_SCOPE_EXCLUDED_DIRS for part in excluded_path.parts):
                     continue
                 if path.is_dir():
                     pending.append((path, path.iterdir()))
@@ -1158,6 +1203,44 @@ def bind_repo_scopes(args: argparse.Namespace) -> None:
     print(f"Bound {len(scopes)} requested scopes into the scan contract")
 
 
+def bind_scope_exclusions(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).expanduser().resolve()
+    if not repo.is_dir():
+        raise SystemExit(f"Repo path not found: {repo}")
+    scopes = (
+        load_scopes_file(Path(args.scopes_file).expanduser())
+        if args.scopes_file is not None
+        else [args.scope]
+    )
+    exclusions = standard_scope_exclusions(repo, scopes)
+    manifest_path = Path(args.manifest).expanduser()
+    coverage_path = Path(args.coverage).expanduser()
+    try:
+        manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
+        coverage: object = json.loads(coverage_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or not isinstance(coverage, dict):
+            raise ValueError("expected JSON objects")
+        scan = manifest.get("scan")
+        if not isinstance(scan, dict):
+            raise ValueError("manifest.scan must be an object")
+        scope = scan.get("scope")
+        if not isinstance(scope, dict):
+            raise ValueError("manifest.scan.scope must be an object")
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise SystemExit("Unable to bind standard scope exclusions into the scan contract") from exc
+    excluded_paths = [exclusion["pattern"] for exclusion in exclusions]
+    scope["excludePaths"] = excluded_paths
+    coverage["excludePaths"] = excluded_paths
+    coverage["explicitExclusions"] = exclusions
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
+    )
+    coverage_path.write_text(
+        json.dumps(coverage, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"Bound {len(exclusions)} standard scope exclusions into the scan contract")
+
+
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
     result = subprocess.run(
         [
@@ -1662,6 +1745,8 @@ def main() -> None:
         verify_scope_coverage(args)
     elif args.command == "bind-repo-scopes":
         bind_repo_scopes(args)
+    elif args.command == "bind-scope-exclusions":
+        bind_scope_exclusions(args)
     elif args.command == "make-diff-rank-input":
         make_diff_rank_input(args)
     elif args.command == "make-rank-shards":

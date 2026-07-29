@@ -1146,6 +1146,10 @@ def _populate_unsealed_artifact_envelope(
         coverage["includePaths"] = copy.deepcopy(scope["includePaths"])
     if "excludePaths" in scope:
         coverage["excludePaths"] = copy.deepcopy(scope["excludePaths"])
+    if "explicitExclusions" in completion_binding:
+        coverage["explicitExclusions"] = copy.deepcopy(
+            completion_binding["explicitExclusions"]
+        )
 
 
 def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:

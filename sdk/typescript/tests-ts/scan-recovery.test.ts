@@ -246,6 +246,48 @@ describe("malformed scan artifact recovery", () => {
     });
   });
 
+  test("binds standard inventory exclusions into the sealed scan contract", async () => {
+    const fixture = await startDraftScan();
+    const expectedPaths = [
+      "**/.git/**",
+      "**/node_modules/**",
+      ".git",
+      "node_modules",
+    ];
+    const contract = fixture.registration["contract"] as {
+      scope: {
+        requiredExcludePaths: string[];
+        requiredExplicitExclusions: Array<{ pattern: string; reason: string }>;
+      };
+    };
+
+    expect(contract.scope.requiredExcludePaths).toEqual(expectedPaths);
+    expect(
+      contract.scope.requiredExplicitExclusions.map((item) => item.pattern),
+    ).toEqual(expectedPaths);
+    expect(
+      contract.scope.requiredExplicitExclusions.every(
+        (item) => item.reason.trim().length > 0,
+      ),
+    ).toBe(true);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+
+    const manifest = await readJson<{
+      scan: { scope: { excludePaths: string[] } };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    const coverage = await readJson<{
+      excludePaths: string[];
+      explicitExclusions: Array<{ pattern: string; reason: string }>;
+    }>(join(fixture.scanDir, "coverage.json"));
+
+    expect(manifest.scan.scope.excludePaths).toEqual(expectedPaths);
+    expect(coverage.excludePaths).toEqual(expectedPaths);
+    expect(coverage.explicitExclusions).toEqual(
+      contract.scope.requiredExplicitExclusions,
+    );
+  });
+
   test("returns authoritative clean and dirty Git target contracts", async () => {
     for (const kind of ["clean", "dirty"] as const) {
       const fixture = await startDraftScan(kind);
@@ -701,12 +743,22 @@ describe("malformed scan artifact recovery", () => {
     const completed = await completeScan(fixture);
 
     expect(completed.progress.status).toBe("complete");
-    expect(completed.warnings).toHaveLength(4);
+    expect(completed.warnings).toHaveLength(3);
+    const expectedExclusions = (
+      fixture.registration["contract"] as {
+        scope: {
+          requiredExplicitExclusions: Array<{
+            pattern: string;
+            reason: string;
+          }>;
+        };
+      }
+    ).scope.requiredExplicitExclusions;
     const recovered = await readJson<CoverageDocument>(path);
     expect(recovered).toMatchObject({
       completeness: "partial",
       surfaces: [],
-      explicitExclusions: [],
+      explicitExclusions: expectedExclusions,
       deferred: [],
     });
   });

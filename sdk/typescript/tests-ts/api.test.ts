@@ -3048,6 +3048,128 @@ describe("CodexSecurity orchestration", () => {
     });
   });
 
+  test("binds standard exclusions without hiding explicitly scoped dependencies", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const dependency = join(
+      repository,
+      "package",
+      "node_modules",
+      "dependency",
+    );
+    const manifest = join(root, "scan-manifest.json");
+    const coverage = join(root, "coverage.json");
+    const scopes = join(root, "target-paths.json");
+    await mkdir(join(dependency, "node_modules", "transitive"), {
+      recursive: true,
+    });
+    await Promise.all([
+      writeFile(join(dependency, "index.js"), "module.exports = {};\n"),
+      writeFile(
+        join(dependency, "node_modules", "transitive", "index.js"),
+        "module.exports = { transitive: true };\n",
+      ),
+      writeFile(
+        scopes,
+        JSON.stringify([
+          "package/node_modules/dependency",
+          "package/node_modules/dependency/index.js",
+        ]),
+      ),
+    ]);
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    for (const scenario of [
+      {
+        args: ["--scope", "."],
+        includePaths: ["."],
+        excludePaths: [
+          "**/.git/**",
+          "**/node_modules/**",
+          ".git",
+          "node_modules",
+        ],
+      },
+      {
+        args: ["--scopes-file", scopes],
+        includePaths: [
+          "package/node_modules/dependency",
+          "package/node_modules/dependency/index.js",
+        ],
+        excludePaths: [
+          "package/node_modules/dependency/**/.git/**",
+          "package/node_modules/dependency/**/node_modules/**",
+          "package/node_modules/dependency/.git",
+          "package/node_modules/dependency/node_modules",
+        ],
+      },
+    ]) {
+      await Promise.all([
+        writeFile(
+          manifest,
+          JSON.stringify({
+            scan: {
+              scope: { includePaths: scenario.includePaths, excludePaths: [] },
+            },
+          }),
+        ),
+        writeFile(
+          coverage,
+          JSON.stringify({
+            includePaths: scenario.includePaths,
+            excludePaths: [],
+            explicitExclusions: [],
+          }),
+        ),
+      ]);
+
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "bind-scope-exclusions",
+          "--repo",
+          repository,
+          ...scenario.args,
+          "--manifest",
+          manifest,
+          "--coverage",
+          coverage,
+        ],
+        { stdio: "pipe" },
+      );
+
+      const boundManifest = JSON.parse(await readFile(manifest, "utf8")) as {
+        scan: { scope: { includePaths: string[]; excludePaths: string[] } };
+      };
+      const boundCoverage = JSON.parse(await readFile(coverage, "utf8")) as {
+        includePaths: string[];
+        excludePaths: string[];
+        explicitExclusions: Array<{ pattern: string; reason: string }>;
+      };
+      expect(boundManifest.scan.scope.includePaths).toEqual(
+        scenario.includePaths,
+      );
+      expect(boundManifest.scan.scope.excludePaths).toEqual(
+        scenario.excludePaths,
+      );
+      expect(boundCoverage.includePaths).toEqual(scenario.includePaths);
+      expect(boundCoverage.excludePaths).toEqual(scenario.excludePaths);
+      expect(
+        boundCoverage.explicitExclusions.map((item) => item.pattern),
+      ).toEqual(scenario.excludePaths);
+      expect(
+        boundCoverage.explicitExclusions.every(
+          (item) => item.reason.trim().length > 0,
+        ),
+      ).toBe(true);
+    }
+  });
+
   test("aligns the bundled standard workflow with the authoritative inventory", async () => {
     const [skill, workflow, artifacts, capabilities] = await Promise.all([
       readFile(
@@ -3083,6 +3205,7 @@ describe("CodexSecurity orchestration", () => {
     expect(skill).not.toContain("in_scope_files.txt");
     expect(workflow).toContain("CODEX_SECURITY_SCOPE_INVENTORY_FILE");
     expect(workflow).toContain("make-scope-inventory");
+    expect(workflow).toContain("bind-scope-exclusions");
     expect(workflow).toContain("--in-scope-inventory");
     expect(workflow).toContain("scope_review.jsonl");
     expect(workflow).not.toContain("rg --files");

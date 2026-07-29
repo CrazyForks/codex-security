@@ -43,6 +43,7 @@ from filesystem_identity import serialize_filesystem_identity as serialize_files
 from filesystem_identity import (
     stored_filesystem_identity_matches as stored_filesystem_identity_matches,
 )
+from generate_rank_input import standard_scope_exclusions
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -516,6 +517,11 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
+    explicit_exclusions = (
+        standard_scope_exclusions(target, requested_scan_paths(scan))
+        if scan["mode"] == "standard"
+        else []
+    )
     target_contract = {
         "allowedKinds": expected_target_kinds(scan),
         "displayName": target.name,
@@ -533,7 +539,10 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     return {
         "diffTarget": stored_diff_target(scan),
         "scope": {
-            "requiredExcludePaths": [],
+            "requiredExcludePaths": [
+                exclusion["pattern"] for exclusion in explicit_exclusions
+            ],
+            "requiredExplicitExclusions": explicit_exclusions,
             "requestedPath": scan["scope"],
             **(
                 {"requiredIncludePaths": requested_scan_paths(scan)}
@@ -595,7 +604,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
 
-    return {
+    binding = {
         "scanId": scan["id"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
@@ -605,6 +614,11 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
+    if scan["mode"] == "standard":
+        binding["explicitExclusions"] = contract["scope"].get(
+            "requiredExplicitExclusions", []
+        )
+    return binding
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
@@ -664,7 +678,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
     include_paths = scope.get("includePaths")
     if not isinstance(include_paths, list):
         raise SystemExit("scan-manifest.json scope includePaths must be an array.")
-    if scope.get("excludePaths") != []:
+    if scope.get("excludePaths") != expected_contract["scope"]["requiredExcludePaths"]:
         raise SystemExit(
             "scan-manifest.json scope excludePaths must match the workbench scan scope."
         )
