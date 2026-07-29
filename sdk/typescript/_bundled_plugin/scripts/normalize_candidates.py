@@ -204,7 +204,7 @@ def read_scope_inventory(path: Path, repo_root: Path) -> set[str]:
                 lexical_path = PurePosixPath(value)
                 if (
                     lexical_path.is_absolute()
-                    or any(part in {"", ".", ".."} for part in value.split("/"))
+                    or ".." in lexical_path.parts
                     or (
                         sys.platform == "win32"
                         and ("\\" in value or re.match(r"^[A-Za-z]:", value))
@@ -212,8 +212,19 @@ def read_scope_inventory(path: Path, repo_root: Path) -> set[str]:
                 ):
                     raise ValueError("path: expected a repository-relative path without traversal")
                 relative = lexical_path.as_posix()
-                if relative != value:
+                if relative != value or any(
+                    part in {"", "."} for part in value.split("/")
+                ):
                     raise ValueError("path: expected a canonical repository-relative path")
+                current = repo_root
+                for part in lexical_path.parts:
+                    current = current / part
+                    if current.is_symlink():
+                        try:
+                            current.resolve(strict=True).relative_to(repo_root)
+                        except (OSError, ValueError) as error:
+                            raise ValueError("path: must resolve inside --repo-root") from error
+                        raise ValueError("path: expected a regular non-symlink file")
                 if relative in scope:
                     raise ValueError("path: duplicate inventory path")
             except (OSError, TypeError, ValueError) as error:

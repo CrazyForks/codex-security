@@ -62,6 +62,11 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
+const STANDARD_SCOPE_RECEIPTS = [
+  "artifacts/03_coverage/scope_review.jsonl",
+  "artifacts/02_discovery/scope_inventory.jsonl",
+  "artifacts/02_discovery/candidate_ledger.jsonl",
+];
 
 afterEach(async () => {
   await Promise.all(
@@ -1203,7 +1208,7 @@ describe("runtime directories and plugin Python boundary", () => {
               id: "scope-review",
               label: "Exhaustive standard scope review",
               disposition: "needs_follow_up",
-              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
             },
           ],
         })}\n`,
@@ -1269,7 +1274,7 @@ describe("runtime directories and plugin Python boundary", () => {
       id: "scope-review",
       label: "Exhaustive standard scope review",
       disposition: "needs_follow_up",
-      receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+      receiptRefs: STANDARD_SCOPE_RECEIPTS,
     };
     await Promise.all([
       writeFile(
@@ -1342,7 +1347,10 @@ describe("runtime directories and plugin Python boundary", () => {
       rawCandidates,
       `${JSON.stringify({
         cwe_ids: ["CWE-20"],
-        locations: [{ path: "safe.ts", start_line: 1, role: "evidence" }],
+        locations: [
+          { path: "safe.ts", start_line: 1, role: "evidence" },
+          { path: "safe.ts", start_line: 2, role: "evidence" },
+        ],
         summary: "The reviewed candidate.",
         evidence: "The first source line establishes the finding.",
       })}\n`,
@@ -1403,6 +1411,7 @@ describe("runtime directories and plugin Python boundary", () => {
       },
       locations: [
         { path: "safe.ts", startLine: 1, endLine: 1, role: "evidence" },
+        { path: "safe.ts", startLine: 2, endLine: 2, role: "evidence" },
       ],
       validation: {
         method: validation.method,
@@ -1421,7 +1430,7 @@ describe("runtime directories and plugin Python boundary", () => {
       id: "scope-review",
       label: "Exhaustive standard scope review",
       disposition: "no_issue_found",
-      receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+      receiptRefs: STANDARD_SCOPE_RECEIPTS,
     };
     const candidateSurface = {
       id: candidateId,
@@ -1462,6 +1471,43 @@ describe("runtime directories and plugin Python boundary", () => {
     await restore();
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
 
+    const childFindings = canonicalFinding.locations.map((location, index) => ({
+      ...canonicalFinding,
+      identity: {
+        anchor: "reviewed-candidate",
+        instance: `source-${index + 1}`,
+      },
+      locations: [location],
+    }));
+    await writeFile(
+      join(scanDir, "findings.json"),
+      `${JSON.stringify({ findings: childFindings })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    for (const receipt of STANDARD_SCOPE_RECEIPTS.slice(1)) {
+      await restore();
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            {
+              ...scopeSurface,
+              receiptRefs: STANDARD_SCOPE_RECEIPTS.filter(
+                (required) => required !== receipt,
+              ),
+            },
+            candidateSurface,
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /seal.*(?:inventory|candidate)|authoritative.*(?:inventory|candidate)/iu,
+      );
+    }
+
+    await restore();
     const changeConditions = [
       "Input validation would block the behavior.",
       "A guarded source would prevent the transition.",
@@ -1491,6 +1537,22 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ]);
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    await restore();
+    await writeFile(
+      candidateLedger,
+      `${JSON.stringify({
+        ...candidate,
+        validation,
+        attack_path: {
+          ...attackPath,
+          severity_rationale: { summary: "This must remain canonical text." },
+        },
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /incomplete attack.path closure: severity_rationale/u,
+    );
 
     const forgedFindings = [
       {
@@ -1522,7 +1584,7 @@ describe("runtime directories and plugin Python boundary", () => {
       {
         ...canonicalFinding,
         locations: [
-          { path: "safe.ts", startLine: 2, endLine: 2, role: "evidence" },
+          { path: "safe.ts", startLine: 2, endLine: 2, role: "forged" },
         ],
       },
     ];
@@ -1612,7 +1674,7 @@ describe("runtime directories and plugin Python boundary", () => {
                 id: "scope-review",
                 label: "Exhaustive standard scope review",
                 disposition: "no_issue_found",
-                receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+                receiptRefs: STANDARD_SCOPE_RECEIPTS,
               },
             ],
           })}\n`,
@@ -1723,7 +1785,7 @@ describe("runtime directories and plugin Python boundary", () => {
               id: "scope-review",
               label: "Exhaustive standard scope review",
               disposition: "no_issue_found",
-              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
             },
             {
               id: candidateId,
@@ -1761,7 +1823,7 @@ describe("runtime directories and plugin Python boundary", () => {
               id: "scope-review",
               label: "Exhaustive standard scope review",
               disposition: "needs_follow_up",
-              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
             },
           ],
         })}\n`,
@@ -1989,7 +2051,7 @@ describe("runtime directories and plugin Python boundary", () => {
               id: "scope-review",
               label: "Exhaustive standard scope review",
               disposition: "no_issue_found",
-              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
             },
           ],
         })}\n`,

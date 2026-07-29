@@ -661,13 +661,16 @@ def validate_standard_attack_path(
     decision = record.get("decision")
     if not isinstance(decision, str) or decision not in {"reportable", "ignore", "deferred"}:
         raise SystemExit(f"{path}:{number}: incomplete attack-path closure: decision")
-    for field in ("dataflow", "reachability", "severity_rationale"):
+    for field in ("dataflow", "reachability"):
         value = record.get(field)
         if isinstance(value, dict):
             if not value:
                 raise SystemExit(f"{path}:{number}: incomplete attack-path closure: {field}")
         else:
             require_standard_closure_text(record, field, path, number, "attack-path")
+    require_standard_closure_text(
+        record, "severity_rationale", path, number, "attack-path"
+    )
     require_standard_closure_text(
         record, "counterevidence", path, number, "attack-path", allow_empty=True
     )
@@ -705,7 +708,7 @@ def validate_standard_attack_path(
 
 def validate_standard_finding_payload(
     finding: dict[str, object], candidate: JsonRow, index: int
-) -> None:
+) -> set[tuple[object, object, object, object]]:
     validation = candidate.get("validation")
     attack_path = candidate.get("attack_path")
     if not isinstance(validation, dict) or not isinstance(attack_path, dict):
@@ -782,8 +785,9 @@ def validate_standard_finding_payload(
                 location.get("role"),
             )
         )
-    if not expected_locations.issubset(actual_locations):
+    if not actual_locations or not actual_locations.issubset(expected_locations):
         raise SystemExit(f"Standard finding {index} does not preserve its candidate locations")
+    return actual_locations
 
 
 def verify_scope_coverage(args: argparse.Namespace) -> None:
@@ -798,6 +802,20 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
         raise SystemExit(f"Unable to read the authoritative scope inventory: {error}") from error
 
     review_relative = "artifacts/03_coverage/scope_review.jsonl"
+    inventory_relative = "artifacts/02_discovery/scope_inventory.jsonl"
+    candidate_relative = "artifacts/02_discovery/candidate_ledger.jsonl"
+    durable_inventory = require_standard_scope_artifact(
+        scan_dir,
+        inventory_relative,
+        "Durable standard scope inventory",
+    )
+    try:
+        if durable_inventory.read_bytes() != inventory.read_bytes():
+            raise SystemExit(
+                "Durable standard scope inventory does not match the authoritative inventory"
+            )
+    except OSError as error:
+        raise SystemExit(f"Unable to attest the durable standard scope inventory: {error}") from error
     review_path = require_standard_scope_artifact(
         scan_dir,
         review_relative,
@@ -851,6 +869,7 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
     if coverage.get("completeness") == "complete" and has_deferred_reviews:
         raise SystemExit("Complete standard scan coverage cannot contain deferred inventory paths")
     surface_ids: set[str] = set()
+    sealed_receipts: set[str] = set()
     has_review_receipt = False
     for index, surface in enumerate(surfaces, start=1):
         if not isinstance(surface, dict):
@@ -902,13 +921,18 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
                 raise SystemExit(
                     "Deferred scope-review paths require a needs_follow_up receipt surface"
                 )
+            sealed_receipts.add(receipt)
             has_review_receipt = has_review_receipt or receipt == review_relative
     if not has_review_receipt:
         raise SystemExit("Standard scan coverage must reference the exhaustive scope-review ledger")
+    if inventory_relative not in sealed_receipts:
+        raise SystemExit("Standard scan coverage must seal the authoritative scope inventory")
+    if candidate_relative not in sealed_receipts:
+        raise SystemExit("Standard scan coverage must seal the authoritative candidate ledger")
 
     candidate_path = require_standard_scope_artifact(
         scan_dir,
-        "artifacts/02_discovery/candidate_ledger.jsonl",
+        candidate_relative,
         "Standard candidate ledger",
     )
     line_counts: dict[Path, int] = {}
@@ -950,6 +974,7 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
     if not isinstance(final_findings, list):
         raise SystemExit("Standard scan findings must contain an array of findings")
     reported_ids: set[str] = set()
+    reported_locations: dict[str, set[tuple[object, object, object, object]]] = {}
     for index, finding in enumerate(final_findings):
         if not isinstance(finding, dict) or not isinstance(finding.get("locations"), list):
             raise SystemExit(f"Standard finding {index + 1} must contain its source locations")
@@ -974,10 +999,15 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
             raise SystemExit(
                 f"Standard finding {index + 1} does not match a reportable candidate"
             )
-        if candidate_id in reported_ids:
-            raise SystemExit(f"Standard finding repeats reportable candidate: {candidate_id}")
         assert isinstance(candidate, dict)
-        validate_standard_finding_payload(finding, candidate, index + 1)
+        candidate_locations = validate_standard_finding_payload(finding, candidate, index + 1)
+        previous_locations = reported_locations.get(candidate_id, set())
+        if candidate_locations.issubset(previous_locations):
+            raise SystemExit(
+                f"Standard finding repeats an already reported candidate instance: {candidate_id}"
+            )
+        assert isinstance(candidate_id, str)
+        reported_locations[candidate_id] = previous_locations | candidate_locations
         reported_ids.add(candidate_id)
 
     deferred = coverage.get("deferred", [])
@@ -994,6 +1024,20 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
             expected_disposition = "reported"
             if candidate_id not in reported_ids:
                 raise SystemExit(f"Reportable candidate has no matching final finding: {candidate_id}")
+            expected_locations = {
+                (
+                    location["path"],
+                    location["start_line"],
+                    location["end_line"],
+                    location["role"],
+                )
+                for location in candidate["locations"]
+                if isinstance(location, dict) and location.get("path") in scope
+            }
+            if not expected_locations.issubset(reported_locations[candidate_id]):
+                raise SystemExit(
+                    f"Reportable candidate has unreported source locations: {candidate_id}"
+                )
         elif disposition == "deferred" or decision == "deferred":
             expected_disposition = "needs_follow_up"
             if not any(

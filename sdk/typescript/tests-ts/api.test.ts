@@ -3493,6 +3493,8 @@ describe("CodexSecurity orchestration", () => {
                 ) as { surfaces: Array<{ receiptRefs: string[] }> };
                 coverage.surfaces[0]!.receiptRefs = [
                   "artifacts/03_coverage/scope_review.jsonl",
+                  "artifacts/02_discovery/scope_inventory.jsonl",
+                  "artifacts/02_discovery/candidate_ledger.jsonl",
                 ];
                 await writeFile(coveragePath, `${JSON.stringify(coverage)}\n`);
                 await writeFile(
