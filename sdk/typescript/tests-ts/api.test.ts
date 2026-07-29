@@ -3517,6 +3517,43 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("rejects verifier interpreters inside model-writable state", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const stateDirectory = join(root, "state");
+    const mutablePython = join(stateDirectory, "python");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(stateDirectory, { mode: 0o700 }),
+    ]);
+    await writeFile(mutablePython, "model-writable interpreter\n");
+    let codexStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => mutablePython,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start with a writable verifier");
+        },
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      /runtime directory must be outside the protected scan root/u,
+    );
+    expect(codexStarted).toBe(false);
+    await client.close();
+  });
+
   test("verifies scope coverage from the immutable installed plugin", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

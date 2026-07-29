@@ -1040,10 +1040,34 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
                 )
         elif disposition == "deferred" or decision == "deferred":
             expected_disposition = "needs_follow_up"
-            if not any(
-                isinstance(item, dict) and item.get("id") == candidate_id for item in deferred
-            ):
+            matching_deferred = next(
+                (
+                    item
+                    for item in deferred
+                    if isinstance(item, dict) and item.get("id") == candidate_id
+                ),
+                None,
+            )
+            if matching_deferred is None:
                 raise SystemExit(f"Deferred candidate has no matching coverage entry: {candidate_id}")
+            proof_gaps = (
+                [attack_path.get("proof_gap")]
+                if isinstance(attack_path, dict) and decision == "deferred"
+                else [
+                    validation.get("counterevidence_or_proof_gap"),
+                    validation.get("remaining_uncertainty"),
+                ]
+            )
+            if not any(
+                isinstance(proof_gap, str)
+                and proof_gap.strip()
+                and matching_deferred.get("reason") == proof_gap
+                for proof_gap in proof_gaps
+            ):
+                raise SystemExit(
+                    f"Deferred candidate coverage contradicts its recorded proof gap: "
+                    f"{candidate_id}"
+                )
         elif disposition == "not_applicable":
             expected_disposition = "not_applicable"
         else:

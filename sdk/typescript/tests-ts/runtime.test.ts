@@ -1831,6 +1831,64 @@ describe("runtime directories and plugin Python boundary", () => {
     ]);
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
 
+    await restore();
+    const proofGap =
+      "A deployed caller must be reproduced before exploitability is known.";
+    const deferredValidation = {
+      ...completeValidation,
+      disposition: "deferred",
+      counterevidence_or_proof_gap: proofGap,
+      remaining_uncertainty: "The production caller has not been exercised.",
+    };
+    const deferredAttackPath = {
+      ...completeAttackPath,
+      decision: "deferred",
+      proof_gap: proofGap,
+    };
+    const deferredCoverage = {
+      completeness: "partial",
+      surfaces: [
+        {
+          id: "scope-review",
+          label: "Exhaustive standard scope review",
+          disposition: "no_issue_found",
+          receiptRefs: STANDARD_SCOPE_RECEIPTS,
+        },
+        {
+          id: candidateId,
+          label: "Deferred input-validation candidate",
+          disposition: "needs_follow_up",
+          receiptRefs: [],
+        },
+      ],
+      deferred: [{ id: candidateId, reason: proofGap }],
+    };
+    await Promise.all([
+      writeFile(
+        candidateLedger,
+        `${JSON.stringify({
+          ...candidate,
+          validation: deferredValidation,
+          attack_path: deferredAttackPath,
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify(deferredCoverage)}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        ...deferredCoverage,
+        deferred: [{ id: candidateId, reason: "Fabricated proof gap." }],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /deferred.*proof gap|proof gap.*deferred/iu,
+    );
+
     const attacks: Array<{
       mutate: () => Promise<unknown>;
       message: RegExp;

@@ -453,6 +453,16 @@ export class CodexSecurity {
         protectedRoot,
         signal,
       });
+      if (
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        await requireHostControlledVerifierPython(
+          python,
+          stateDirectory,
+          signal,
+        );
+      }
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
@@ -1321,6 +1331,40 @@ async function stageProtectedScopeVerifier(
       await chmod(destination, 0o400);
     }),
   );
+}
+
+async function requireHostControlledVerifierPython(
+  python: string,
+  stateDirectory: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!isAbsolute(python)) return;
+  throwIfAborted(signal);
+  let canonicalPython = python;
+  let canonicalState = stateDirectory;
+  try {
+    canonicalPython = await realpath(python);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !("code" in error) ||
+      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
+    ) {
+      throw error;
+    }
+  }
+  try {
+    canonicalState = await realpath(stateDirectory);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !("code" in error) ||
+      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
+    ) {
+      throw error;
+    }
+  }
+  requireOutputOutsideRepository(canonicalState, canonicalPython, "runtime");
 }
 
 async function createProtectedScopeInventoryDirectory(
