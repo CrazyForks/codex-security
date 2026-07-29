@@ -871,6 +871,7 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
     surface_ids: set[str] = set()
     sealed_receipts: set[str] = set()
     has_review_receipt = False
+    has_complete_scope_receipt = False
     for index, surface in enumerate(surfaces, start=1):
         if not isinstance(surface, dict):
             raise SystemExit(f"Standard scan coverage surface {index} must be an object")
@@ -923,12 +924,22 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
                 )
             sealed_receipts.add(receipt)
             has_review_receipt = has_review_receipt or receipt == review_relative
+        has_complete_scope_receipt = has_complete_scope_receipt or (
+            review_relative in receipt_refs
+            and inventory_relative in receipt_refs
+            and candidate_relative in receipt_refs
+        )
     if not has_review_receipt:
         raise SystemExit("Standard scan coverage must reference the exhaustive scope-review ledger")
     if inventory_relative not in sealed_receipts:
         raise SystemExit("Standard scan coverage must seal the authoritative scope inventory")
     if candidate_relative not in sealed_receipts:
         raise SystemExit("Standard scan coverage must seal the authoritative candidate ledger")
+    if not has_complete_scope_receipt:
+        raise SystemExit(
+            "Standard scan coverage must seal all authoritative receipts together "
+            "on the same coverage surface"
+        )
 
     candidate_path = require_standard_scope_artifact(
         scan_dir,
@@ -1013,6 +1024,21 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
     deferred = coverage.get("deferred", [])
     if not isinstance(deferred, list):
         raise SystemExit("Standard scan coverage deferred outcomes must be an array")
+    deferred_by_id: dict[str, JsonRow] = {}
+    for index, entry in enumerate(deferred, start=1):
+        if not isinstance(entry, dict):
+            raise SystemExit(f"Standard scan deferred outcome {index} must be an object")
+        deferred_id = entry.get("id")
+        reason = entry.get("reason")
+        if not isinstance(deferred_id, str) or not deferred_id.strip():
+            raise SystemExit(f"Standard scan deferred outcome {index} has no valid id")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SystemExit(f"Standard scan deferred outcome {index} has no valid reason")
+        if deferred_id in deferred_by_id:
+            raise SystemExit(f"Standard scan coverage repeats deferred candidate id: {deferred_id}")
+        deferred_by_id[deferred_id] = entry
+    if coverage.get("completeness") == "complete" and deferred_by_id:
+        raise SystemExit("Complete standard scan coverage cannot contain deferred outcomes")
     for candidate_id, candidate in candidates_by_id.items():
         validation = candidate["validation"]
         attack_path = candidate.get("attack_path")
@@ -1040,14 +1066,7 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
                 )
         elif disposition == "deferred" or decision == "deferred":
             expected_disposition = "needs_follow_up"
-            matching_deferred = next(
-                (
-                    item
-                    for item in deferred
-                    if isinstance(item, dict) and item.get("id") == candidate_id
-                ),
-                None,
-            )
+            matching_deferred = deferred_by_id.get(candidate_id)
             if matching_deferred is None:
                 raise SystemExit(f"Deferred candidate has no matching coverage entry: {candidate_id}")
             proof_gaps = (

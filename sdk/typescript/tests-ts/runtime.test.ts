@@ -1626,6 +1626,27 @@ describe("runtime directories and plugin Python boundary", () => {
     }
 
     await restore();
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        completeness: "complete",
+        surfaces: [
+          {
+            ...scopeSurface,
+            receiptRefs: [STANDARD_SCOPE_RECEIPTS[0]],
+          },
+          {
+            ...candidateSurface,
+            receiptRefs: STANDARD_SCOPE_RECEIPTS.slice(1),
+          },
+        ],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /same coverage surface|single coverage surface|receipts together/iu,
+    );
+
+    await restore();
     const changeConditions = [
       "Input validation would block the behavior.",
       "A guarded source would prevent the transition.",
@@ -1996,6 +2017,59 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ]);
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    for (const duplicateReason of [proofGap, "Fabricated proof gap."]) {
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          ...deferredCoverage,
+          deferred: [
+            { id: candidateId, reason: proofGap },
+            { id: candidateId, reason: duplicateReason },
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /duplicate deferred|repeats.*deferred|deferred.*repeats/iu,
+      );
+    }
+
+    for (const invalidDeferred of [
+      {
+        entry: { id: " ", reason: proofGap },
+        message: /deferred outcome.*valid id/iu,
+      },
+      {
+        entry: { id: "additional-follow-up", reason: " " },
+        message: /deferred outcome.*valid reason/iu,
+      },
+    ]) {
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          ...deferredCoverage,
+          deferred: [
+            { id: candidateId, reason: proofGap },
+            invalidDeferred.entry,
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        invalidDeferred.message,
+      );
+    }
+
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        ...deferredCoverage,
+        completeness: "complete",
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /complete.*deferred/iu,
+    );
+
     await writeFile(
       join(scanDir, "coverage.json"),
       `${JSON.stringify({
