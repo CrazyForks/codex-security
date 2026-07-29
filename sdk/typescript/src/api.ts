@@ -1340,10 +1340,9 @@ async function requireHostControlledVerifierPython(
 ): Promise<void> {
   if (!isAbsolute(python)) return;
   throwIfAborted(signal);
-  let canonicalPython = python;
   let canonicalState = stateDirectory;
   try {
-    canonicalPython = await realpath(python);
+    canonicalState = await realpath(stateDirectory);
   } catch (error) {
     if (
       !(error instanceof Error) ||
@@ -1353,8 +1352,30 @@ async function requireHostControlledVerifierPython(
       throw error;
     }
   }
+  requireOutputOutsideRepository(stateDirectory, python, "runtime");
+  requireOutputOutsideRepository(canonicalState, python, "runtime");
+
+  let canonicalPythonParent = dirname(python);
   try {
-    canonicalState = await realpath(stateDirectory);
+    canonicalPythonParent = await realpath(canonicalPythonParent);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !("code" in error) ||
+      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
+    ) {
+      throw error;
+    }
+  }
+  requireOutputOutsideRepository(
+    canonicalState,
+    canonicalPythonParent,
+    "runtime",
+  );
+
+  let canonicalPython = python;
+  try {
+    canonicalPython = await realpath(python);
   } catch (error) {
     if (
       !(error instanceof Error) ||

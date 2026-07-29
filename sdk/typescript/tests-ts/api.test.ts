@@ -3560,6 +3560,56 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects writable interpreter symlinks to trusted Python", async () => {
+    if (process.platform === "win32") return;
+
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const stateDirectory = join(root, "state");
+    const trustedPython = Bun.which("python3") ?? Bun.which("python");
+    expect(trustedPython).not.toBeNull();
+    const mutablePython = join(stateDirectory, "python");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(stateDirectory, { mode: 0o700 }),
+    ]);
+    await symlink(trustedPython!, mutablePython);
+    expect(await realpath(mutablePython)).toBe(await realpath(trustedPython!));
+    const linkedState = join(root, "linked-state");
+    await symlink(stateDirectory, linkedState);
+
+    for (const interpreter of [mutablePython, join(linkedState, "python")]) {
+      await mkdir(codexHome, { recursive: true });
+      let codexStarted = false;
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => interpreter,
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => {
+            codexStarted = true;
+            throw new Error(
+              "Codex must not start with a replaceable interpreter",
+            );
+          },
+        },
+      );
+
+      await expect(client.run(repository)).rejects.toThrow(
+        /runtime directory must be outside the protected scan root/u,
+      );
+      expect(codexStarted).toBe(false);
+      await client.close();
+    }
+  });
+
   test("verifies scope coverage from the immutable installed plugin", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
