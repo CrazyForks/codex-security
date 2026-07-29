@@ -43,6 +43,7 @@ TARGET_REQUIRED_COORDINATE_FIELDS = {
     "directory_snapshot": {"snapshotDigest"},
 }
 DISPOSITIONS = {"reported", "no_issue_found", "rejected", "not_applicable", "needs_follow_up"}
+REVIEWED_DISPOSITIONS = {"reported", "no_issue_found", "rejected"}
 SARIF_LEVELS = {
     "critical": "error",
     "high": "error",
@@ -1027,7 +1028,12 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         raise ContractError(f"{context}.extensions: expected an object")
 
 
-def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_dir: Path) -> None:
+def _validate_coverage(
+    manifest: dict[str, Any],
+    coverage: dict[str, Any],
+    scan_dir: Path,
+    findings: dict[str, Any] | None = None,
+) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
     if coverage.get("scanId") != scan_id:
@@ -1040,9 +1046,16 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         raise ContractError("coverage.includePaths: must match manifest scope")
     if coverage.get("excludePaths") != scope.get("excludePaths"):
         raise ContractError("coverage.excludePaths: must match manifest scope")
+    surfaces = _require_list(coverage, "surfaces", "coverage")
+    if completeness == "complete" and not surfaces:
+        raise ContractError(
+            "coverage.surfaces: complete coverage requires at least one reviewed surface"
+        )
     surface_ids: set[str] = set()
     has_needs_follow_up = False
-    for index, surface in enumerate(_require_list(coverage, "surfaces", "coverage")):
+    has_reviewed_surface = False
+    has_reported_surface = False
+    for index, surface in enumerate(surfaces):
         context = f"coverage.surfaces[{index}]"
         if not isinstance(surface, dict):
             raise ContractError(f"{context}: expected an object")
@@ -1055,6 +1068,8 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         if disposition not in DISPOSITIONS:
             raise ContractError(f"{context}.disposition: unsupported disposition: {disposition}")
         has_needs_follow_up = has_needs_follow_up or disposition == "needs_follow_up"
+        has_reviewed_surface = has_reviewed_surface or disposition in REVIEWED_DISPOSITIONS
+        has_reported_surface = has_reported_surface or disposition == "reported"
         receipt_refs = surface.get("receiptRefs", [])
         if not isinstance(receipt_refs, list):
             raise ContractError(f"{context}.receiptRefs: expected an array")
@@ -1073,6 +1088,16 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    if completeness == "complete" and not has_reviewed_surface:
+        raise ContractError(
+            "coverage.surfaces: complete coverage requires at least one applicable reviewed surface"
+        )
+    if completeness == "complete" and findings is not None:
+        has_findings = bool(_require_list(findings, "findings", "findings"))
+        if has_reported_surface != has_findings:
+            raise ContractError(
+                "coverage.surfaces: reported surfaces must match completed findings"
+            )
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
     _require_safe_json_value(coverage, "coverage.json")
@@ -1772,7 +1797,7 @@ def _read_sealed_scan(
     )
     _validate_manifest(manifest)
     _validate_findings(manifest, findings)
-    _validate_coverage(manifest, coverage, scan_dir)
+    _validate_coverage(manifest, coverage, scan_dir, findings)
     _validate_sealed_coverage_receipts(scan, coverage)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
@@ -2066,7 +2091,7 @@ def _prepare_scan_finalization(
     else:
         _populate_unsealed_finding_identities(manifest, findings)
     _validate_findings(manifest, findings)
-    _validate_coverage(manifest, coverage, scan_dir)
+    _validate_coverage(manifest, coverage, scan_dir, findings)
     _validate_canonical_schemas_before_projection(manifest, findings, coverage, schema_dir)
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)

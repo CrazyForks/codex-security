@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   cp,
   mkdir,
@@ -57,6 +59,31 @@ async function reseal(scanDir: string): Promise<void> {
   await writeJson(manifestPath, manifest);
 }
 
+function runPythonContractTool(
+  scanDir: string,
+  script:
+    | "finalize_scan_contract.py"
+    | "validate_scan_contract.py" = "finalize_scan_contract.py",
+) {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) {
+    throw new Error(
+      "A Python interpreter is required to validate scan coverage.",
+    );
+  }
+  return spawnSync(
+    python,
+    [
+      "-I",
+      "-B",
+      join(PLUGIN_ROOT, "scripts", script),
+      "--scan-dir",
+      realpathSync(scanDir),
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+}
+
 function setFindingIdentity(
   manifest: Record<string, any>,
   finding: Record<string, any>,
@@ -110,6 +137,244 @@ describe("canonical scan contract", () => {
     expect(contract.findings.findings[0]?.severity.level).toBe("high");
     expect(contract.coverage.mode).toBe("repository");
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
+  });
+
+  test("rejects complete scan contracts without reviewed surfaces", async () => {
+    const scanDir = await copyExample();
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = await readJson(coveragePath);
+    coverage["surfaces"] = [];
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(/coverage.*surface/i);
+  });
+
+  test("rejects empty complete coverage under a permissive coverage schema", async () => {
+    const scanDir = await copyExample();
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = await readJson(coveragePath);
+    coverage["surfaces"] = [];
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    const pluginRoot = await mkdtemp(
+      join(tmpdir(), "codex-security-coverage-schema-"),
+    );
+    temporaryDirectories.push(pluginRoot);
+    const schemaRoot = join(pluginRoot, "schemas");
+    await cp(join(PLUGIN_ROOT, "schemas"), schemaRoot, { recursive: true });
+    const schemaPath = join(schemaRoot, "coverage.schema.json");
+    const schema = await readJson(schemaPath);
+    delete schema["allOf"];
+    await writeJson(schemaPath, schema);
+
+    await expect(loadContract(scanDir, { pluginRoot })).rejects.toThrow(
+      "coverage.surfaces: complete coverage requires at least one reviewed surface",
+    );
+  });
+
+  test("refuses to finalize complete scans without reviewed surfaces", async () => {
+    const scanDir = await copyExample();
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = await readJson(coveragePath);
+    coverage["surfaces"] = [];
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifestBefore = await readFile(manifestPath);
+    const coverageBefore = await readFile(coveragePath);
+
+    const result = runPythonContractTool(scanDir);
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      "coverage.surfaces: complete coverage requires at least one reviewed surface",
+    );
+    expect(await readFile(manifestPath)).toEqual(manifestBefore);
+    expect(await readFile(coveragePath)).toEqual(coverageBefore);
+    await expect(readFile(join(scanDir, "report.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+
+    const validation = runPythonContractTool(
+      scanDir,
+      "validate_scan_contract.py",
+    );
+    expect(validation.error).toBeUndefined();
+    expect(validation.status).toBe(2);
+    expect(validation.stderr).toContain(
+      "coverage.surfaces: complete coverage requires at least one reviewed surface",
+    );
+  });
+
+  test("preserves empty surfaces for partial and unknown coverage", async () => {
+    for (const completeness of ["partial", "unknown"] as const) {
+      const scanDir = await copyExample();
+      const coveragePath = join(scanDir, "coverage.json");
+      const coverage = await readJson(coveragePath);
+      coverage["completeness"] = completeness;
+      coverage["surfaces"] = [];
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).resolves.toMatchObject({
+        coverage: { completeness, surfaces: [] },
+      });
+
+      const result = runPythonContractTool(scanDir);
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+    }
+  });
+
+  test("rejects complete scans with only unverified not-applicable surfaces", async () => {
+    for (const label of ["Not applicable", "No files in the requested scope"]) {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      findings["findings"] = [];
+      coverage["surfaces"] = [
+        {
+          id: "surface_no_applicable_files",
+          label,
+          disposition: "not_applicable",
+          receiptRefs: [],
+        },
+      ];
+      await writeJson(findingsPath, findings);
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(/coverage.*(?:surface|contains)/i);
+
+      const result = runPythonContractTool(scanDir);
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(
+        "coverage.surfaces: complete coverage requires at least one applicable reviewed surface",
+      );
+    }
+  });
+
+  test("preserves not-applicable surfaces alongside reviewed coverage", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const findings = await readJson(findingsPath);
+    const coverage = await readJson(coveragePath);
+    findings["findings"] = [];
+    coverage["surfaces"] = [
+      {
+        id: "surface_reviewed",
+        label: "Reviewed source",
+        disposition: "no_issue_found",
+        receiptRefs: [],
+      },
+      {
+        id: "surface_not_applicable",
+        label: "Not applicable",
+        disposition: "not_applicable",
+        receiptRefs: [],
+      },
+    ];
+    await writeJson(findingsPath, findings);
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toMatchObject({
+      coverage: {
+        completeness: "complete",
+        surfaces: [
+          { disposition: "no_issue_found", receiptRefs: [] },
+          { disposition: "not_applicable", receiptRefs: [] },
+        ],
+      },
+      findings: { findings: [] },
+    });
+
+    const result = runPythonContractTool(scanDir);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+  });
+
+  test("rejects reported coverage inconsistent with completed findings", async () => {
+    for (const reportedWithoutFindings of [true, false]) {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      if (reportedWithoutFindings) {
+        findings["findings"] = [];
+      } else {
+        coverage["surfaces"][0]["disposition"] = "no_issue_found";
+      }
+      await writeJson(findingsPath, findings);
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(
+        "coverage.surfaces: reported surfaces must match completed findings",
+      );
+
+      const result = runPythonContractTool(scanDir);
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(
+        "coverage.surfaces: reported surfaces must match completed findings",
+      );
+
+      const validation = runPythonContractTool(
+        scanDir,
+        "validate_scan_contract.py",
+      );
+      expect(validation.error).toBeUndefined();
+      expect(validation.status).toBe(2);
+      expect(validation.stderr).toContain(
+        "coverage.surfaces: reported surfaces must match completed findings",
+      );
+    }
+  });
+
+  test("preserves receiptless reviewed compact scans with no findings", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const findings = await readJson(findingsPath);
+    const coverage = await readJson(coveragePath);
+    findings["findings"] = [];
+    coverage["surfaces"][0]["disposition"] = "no_issue_found";
+    await writeJson(findingsPath, findings);
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toMatchObject({
+      coverage: {
+        completeness: "complete",
+        surfaces: [{ disposition: "no_issue_found", receiptRefs: [] }],
+      },
+      findings: { findings: [] },
+    });
+
+    const result = runPythonContractTool(scanDir);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
   });
 
   test("honors cancellation during contract validation", async () => {
