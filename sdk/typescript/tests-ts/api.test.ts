@@ -17,7 +17,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, parse, relative, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -3284,8 +3284,8 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: { CODEX_SECURITY_STATE_DIR: parse(root).root },
-        scopeInventoryRoots: [root],
+        environment: { CODEX_SECURITY_STATE_DIR: root },
+        scopeInventoryRoots: [],
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => python!,
         prepareOutputDir: async () => scanDir,
@@ -3350,11 +3350,7 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (_options: unknown, args: readonly string[]) => {
             commands.push(args);
             if (args[0] === "register-cli-scan") {
-              return {
-                scanId: "scan_example_001",
-                targetId: "target_sha256_example",
-                scanDir,
-              };
+              return mockScanRegistration(args);
             }
             if (args[0] === "get-scan-feedback") {
               return {
@@ -3476,11 +3472,7 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (_options: unknown, args: readonly string[]) => {
             commands.push(args);
             if (args[0] === "register-cli-scan") {
-              return {
-                scanId: "scan_example_001",
-                targetId: "target_sha256_example",
-                scanDir,
-              };
+              return mockScanRegistration(args);
             }
             if (args[0] === "get-scan-feedback") {
               return {
