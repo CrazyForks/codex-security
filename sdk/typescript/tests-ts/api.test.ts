@@ -42,7 +42,11 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import { writeCodexConfig, type JsonObject } from "../src/config.js";
-import { prepareScopeInventory, runWorkbench } from "../src/runtime.js";
+import {
+  prepareScopeInventory,
+  runWorkbench,
+  verifyScopeCoverage,
+} from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -93,6 +97,7 @@ class TestClient extends TestClientBase {
     dependencies: Record<string, unknown>,
   ) {
     super(config, {
+      verifyScopeCoverage: async () => {},
       prepareScopeInventory: async ({ scanDir }: { scanDir: string }) => {
         const path = join(
           scanDir,
@@ -3347,6 +3352,7 @@ describe("CodexSecurity orchestration", () => {
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
           prepareScopeInventory,
+          verifyScopeCoverage,
           runWorkbench: async (_options: unknown, args: readonly string[]) => {
             commands.push(args);
             if (args[0] === "register-cli-scan") {
@@ -3431,6 +3437,79 @@ describe("CodexSecurity orchestration", () => {
       expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);
       await client.close();
     }
+  });
+
+  test("verifies scope coverage from the immutable installed plugin", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const mutablePlugin = join(root, "mutable-plugin");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+      cp(PLUGIN_ROOT, mutablePlugin, { recursive: true }),
+    ]);
+    let verifierPlugin: string | null = null;
+    const commands: Array<readonly string[]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(codexHome);
+          return {
+            ...runtime,
+            plugin: {
+              ...(runtime["plugin"] as Record<string, unknown>),
+              pluginRoot: mutablePlugin,
+              installedRoot: PLUGIN_ROOT,
+            },
+          };
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        verifyScopeCoverage: async (
+          options: Parameters<typeof verifyScopeCoverage>[0],
+        ) => {
+          verifierPlugin = options.pluginRoot;
+          throw new Error("immutable installed verifier captured");
+        },
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "immutable installed verifier captured",
+    );
+    expect(verifierPlugin as string | null).toBe(PLUGIN_ROOT);
+    expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
+    expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);
+    await client.close();
   });
 
   test("rejects model-modified standard inventories before completing a scan", async () => {

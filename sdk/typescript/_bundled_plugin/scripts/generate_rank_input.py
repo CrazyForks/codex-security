@@ -35,7 +35,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
@@ -126,6 +126,7 @@ DIRECT_SCOPE_PREVIEW_READ_BYTES = 64 * 1024
 RANK_POOL_PLAN_SCHEMA_VERSION = 1
 RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
+MAX_SCOPE_INVENTORY_FILES = 250_000
 MAX_SCOPE_COVERAGE_BYTES = 64 * 1024 * 1024
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
@@ -172,6 +173,18 @@ def parse_args() -> argparse.Namespace:
     inventory.add_argument(
         "--scopes-file",
         help="JSON array of repository-relative files and directories to scan together.",
+    )
+    inventory.add_argument(
+        "--max-files",
+        type=int,
+        default=MAX_SCOPE_INVENTORY_FILES,
+        help="Maximum inventoried files, capped at the supported SDK limit.",
+    )
+    inventory.add_argument(
+        "--max-bytes",
+        type=int,
+        default=MAX_SCOPE_COVERAGE_BYTES,
+        help="Maximum inventory bytes, capped at the supported SDK limit.",
     )
     inventory.add_argument("--out", required=True, help="Output scope_inventory.jsonl path.")
 
@@ -493,6 +506,10 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
+    if not 1 <= args.max_files <= MAX_SCOPE_INVENTORY_FILES:
+        raise SystemExit("Invalid standard scan scope inventory limit: --max-files")
+    if not 1 <= args.max_bytes <= MAX_SCOPE_COVERAGE_BYTES:
+        raise SystemExit("Invalid standard scan scope inventory limit: --max-bytes")
 
     explicit_scopes = args.scopes_file is not None
     scoped_exclusions = explicit_scopes or args.scope != "."
@@ -506,11 +523,21 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
     ]
 
     paths: set[str] = set()
+    inventory_bytes = 0
     for scope_abs in resolved_scopes:
         scope_root = scope_abs if scope_abs.is_dir() else scope_abs.parent
-        pending = [scope_abs]
+        pending: list[tuple[Path, Iterator[Path]]] = [
+            (scope_abs.parent, iter((scope_abs,)))
+        ]
         while pending:
-            path = pending.pop()
+            directory, entries = pending[-1]
+            try:
+                path = next(entries)
+            except StopIteration:
+                pending.pop()
+                continue
+            except OSError as exc:
+                raise SystemExit(f"Unable to safely inventory scope path: {directory}") from exc
             try:
                 if path.is_symlink():
                     continue
@@ -523,9 +550,25 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                 if any(part in {".git", "node_modules"} for part in excluded_path.parts):
                     continue
                 if path.is_dir():
-                    pending.extend(path.iterdir())
+                    pending.append((path, path.iterdir()))
                 elif path.is_file():
-                    paths.add(relative.as_posix())
+                    relative_path = relative.as_posix()
+                    if relative_path in paths:
+                        continue
+                    row_bytes = len(
+                        (
+                            json.dumps(
+                                {"path": relative_path},
+                                ensure_ascii=True,
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        ).encode("utf-8")
+                    )
+                    if len(paths) >= args.max_files or inventory_bytes + row_bytes > args.max_bytes:
+                        raise SystemExit("Exceeded the standard scan scope inventory limit")
+                    paths.add(relative_path)
+                    inventory_bytes += row_bytes
             except (OSError, ValueError) as exc:
                 raise SystemExit(f"Unable to safely inventory scope path: {path}") from exc
 
@@ -550,6 +593,107 @@ def require_standard_scope_artifact(scan_dir: Path, relative: str, label: str) -
     if not resolved.is_file() or metadata.st_size > MAX_SCOPE_COVERAGE_BYTES:
         raise SystemExit(f"{label} must be a bounded regular file: {relative}")
     return resolved
+
+
+def require_standard_closure_text(
+    record: dict[str, object],
+    field: str,
+    path: Path,
+    number: int,
+    closure: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    value = record.get(field)
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        raise SystemExit(f"{path}:{number}: incomplete {closure} closure: {field}")
+    return value
+
+
+def validate_standard_validation(
+    record: dict[str, object], path: Path, number: int
+) -> str:
+    disposition = record.get("disposition")
+    if not isinstance(disposition, str) or disposition not in {
+        "reportable",
+        "suppressed",
+        "not_applicable",
+        "deferred",
+    }:
+        raise SystemExit(f"{path}:{number}: unsupported candidate validation disposition")
+    for field in ("method", "confidence_rationale", "evidence"):
+        require_standard_closure_text(record, field, path, number, "validation")
+    for field in ("counterevidence_or_proof_gap", "remaining_uncertainty"):
+        require_standard_closure_text(
+            record, field, path, number, "validation", allow_empty=True
+        )
+    confidence = record.get("confidence")
+    if not isinstance(confidence, str) or confidence not in {"high", "medium", "low"}:
+        raise SystemExit(f"{path}:{number}: incomplete validation closure: confidence")
+    rubric = record.get("rubric")
+    valid_rubric = (
+        isinstance(rubric, str)
+        and bool(rubric.strip())
+        or isinstance(rubric, list)
+        and 1 <= len(rubric) <= 5
+        and all(isinstance(criterion, str) and criterion.strip() for criterion in rubric)
+    )
+    if not valid_rubric:
+        raise SystemExit(f"{path}:{number}: incomplete validation closure: rubric")
+    if disposition == "deferred" and not (
+        str(record["counterevidence_or_proof_gap"]).strip()
+        or str(record["remaining_uncertainty"]).strip()
+    ):
+        raise SystemExit(f"{path}:{number}: deferred validation requires an explicit proof gap")
+    return disposition
+
+
+def validate_standard_attack_path(
+    record: dict[str, object], path: Path, number: int
+) -> str:
+    decision = record.get("decision")
+    if not isinstance(decision, str) or decision not in {"reportable", "ignore", "deferred"}:
+        raise SystemExit(f"{path}:{number}: incomplete attack-path closure: decision")
+    for field in ("dataflow", "reachability", "severity_rationale"):
+        value = record.get(field)
+        if isinstance(value, dict):
+            if not value:
+                raise SystemExit(f"{path}:{number}: incomplete attack-path closure: {field}")
+        else:
+            require_standard_closure_text(record, field, path, number, "attack-path")
+    require_standard_closure_text(
+        record, "counterevidence", path, number, "attack-path", allow_empty=True
+    )
+    for field in ("impact", "likelihood"):
+        value = record.get(field)
+        if not isinstance(value, str) or value not in {
+            "high",
+            "medium",
+            "low",
+            "ignore",
+            "unknown",
+        }:
+            raise SystemExit(f"{path}:{number}: incomplete attack-path closure: {field}")
+    conditions = record.get("change_conditions")
+    if not (
+        isinstance(conditions, str)
+        and bool(conditions.strip())
+        or isinstance(conditions, list)
+        and bool(conditions)
+        and all(isinstance(condition, str) and condition.strip() for condition in conditions)
+    ):
+        raise SystemExit(f"{path}:{number}: incomplete attack-path closure: change_conditions")
+    severity = record.get("severity")
+    reportable_severity = {"critical", "high", "medium", "low"}
+    if decision == "reportable" and severity not in reportable_severity:
+        raise SystemExit(f"{path}:{number}: reportable attack path requires reportable severity")
+    if decision == "ignore" and severity != "ignore":
+        raise SystemExit(f"{path}:{number}: ignored attack path requires ignore severity")
+    if decision == "deferred":
+        if severity not in reportable_severity | {"unknown"}:
+            raise SystemExit(f"{path}:{number}: deferred attack path requires provisional severity")
+        require_standard_closure_text(record, "proof_gap", path, number, "attack-path")
+    return decision
 
 
 def verify_scope_coverage(args: argparse.Namespace) -> None:
@@ -628,18 +772,13 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
     def validate_standard_candidate(row: JsonRow, path: Path, number: int) -> None:
         validation = row.get("validation")
         if not isinstance(validation, dict):
-            raise SystemExit(f"{path}:{number}: standard candidate is missing validation")
-        disposition = validation.get("disposition")
-        if disposition not in {"reportable", "suppressed", "not_applicable", "deferred"}:
-            raise SystemExit(f"{path}:{number}: unsupported candidate validation disposition")
+            raise SystemExit(f"{path}:{number}: incomplete validation closure")
+        disposition = validate_standard_validation(validation, path, number)
         attack_path = row.get("attack_path")
         if disposition in {"reportable", "deferred"}:
-            if not isinstance(attack_path, dict) or attack_path.get("decision") not in {
-                "reportable",
-                "ignore",
-                "deferred",
-            }:
-                raise SystemExit(f"{path}:{number}: standard candidate is missing attack-path closure")
+            if not isinstance(attack_path, dict):
+                raise SystemExit(f"{path}:{number}: incomplete attack-path closure")
+            validate_standard_attack_path(attack_path, path, number)
         elif attack_path is not None:
             raise SystemExit(f"{path}:{number}: unexpected attack-path closure")
         discovery = {
@@ -656,16 +795,17 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
             )
 
     candidates = load_jsonl(candidate_path, "Standard candidate ledger", validate_standard_candidate)
-    candidate_ids: set[str] = set()
+    candidates_by_id: dict[str, JsonRow] = {}
     for candidate in candidates:
         candidate_id = str(candidate["candidate_id"])
-        if candidate_id in candidate_ids:
+        if candidate_id in candidates_by_id:
             raise SystemExit(f"Standard candidate ledger repeats candidate id: {candidate_id}")
-        candidate_ids.add(candidate_id)
+        candidates_by_id[candidate_id] = candidate
 
     final_findings = findings.get("findings")
     if not isinstance(final_findings, list):
         raise SystemExit("Standard scan findings must contain an array of findings")
+    reported_ids: set[str] = set()
     for index, finding in enumerate(final_findings):
         if not isinstance(finding, dict) or not isinstance(finding.get("locations"), list):
             raise SystemExit(f"Standard finding {index + 1} must contain its source locations")
@@ -675,6 +815,70 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
         ):
             raise SystemExit(
                 f"Standard finding {index + 1} has no location in the authoritative scope inventory"
+            )
+        extensions = finding.get("extensions")
+        candidate_id = extensions.get("candidateId") if isinstance(extensions, dict) else None
+        candidate = candidates_by_id.get(candidate_id) if isinstance(candidate_id, str) else None
+        validation = candidate.get("validation") if isinstance(candidate, dict) else None
+        attack_path = candidate.get("attack_path") if isinstance(candidate, dict) else None
+        if not (
+            isinstance(validation, dict)
+            and validation.get("disposition") == "reportable"
+            and isinstance(attack_path, dict)
+            and attack_path.get("decision") == "reportable"
+        ):
+            raise SystemExit(
+                f"Standard finding {index + 1} does not match a reportable candidate"
+            )
+        if candidate_id in reported_ids:
+            raise SystemExit(f"Standard finding repeats reportable candidate: {candidate_id}")
+        candidate_locations = {
+            location["path"]
+            for location in candidate["locations"]
+            if isinstance(location, dict)
+        }
+        if not any(
+            isinstance(location, dict) and location.get("path") in candidate_locations
+            for location in finding["locations"]
+        ):
+            raise SystemExit(
+                f"Standard finding {index + 1} does not preserve its candidate locations"
+            )
+        reported_ids.add(candidate_id)
+
+    deferred = coverage.get("deferred", [])
+    if not isinstance(deferred, list):
+        raise SystemExit("Standard scan coverage deferred outcomes must be an array")
+    for candidate_id, candidate in candidates_by_id.items():
+        validation = candidate["validation"]
+        attack_path = candidate.get("attack_path")
+        if not isinstance(validation, dict):
+            raise SystemExit(f"Standard candidate has no validated outcome: {candidate_id}")
+        disposition = validation["disposition"]
+        decision = attack_path.get("decision") if isinstance(attack_path, dict) else None
+        if disposition == "reportable" and decision == "reportable":
+            expected_disposition = "reported"
+            if candidate_id not in reported_ids:
+                raise SystemExit(f"Reportable candidate has no matching final finding: {candidate_id}")
+        elif disposition == "deferred" or decision == "deferred":
+            expected_disposition = "needs_follow_up"
+            if not any(
+                isinstance(item, dict) and item.get("id") == candidate_id for item in deferred
+            ):
+                raise SystemExit(f"Deferred candidate has no matching coverage entry: {candidate_id}")
+        elif disposition == "not_applicable":
+            expected_disposition = "not_applicable"
+        else:
+            expected_disposition = "rejected"
+        if not any(
+            isinstance(surface, dict)
+            and surface.get("id") == candidate_id
+            and surface.get("disposition") == expected_disposition
+            for surface in surfaces
+        ):
+            raise SystemExit(
+                f"Standard candidate has no matching {expected_disposition} coverage: "
+                f"{candidate_id}"
             )
 
     print(f"Verified {len(scope)} reviewed inventory paths and {len(candidates)} candidates")

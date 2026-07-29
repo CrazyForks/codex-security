@@ -296,7 +296,6 @@ export async function verifyScopeInventory(
 export async function verifyScopeCoverage(
   options: ScopeCoverageOptions,
 ): Promise<void> {
-  if (options.inventory.fileCount === 0) return;
   try {
     await verifyScopeInventory(options.inventory, options.signal);
     await execFile(

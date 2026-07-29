@@ -1186,13 +1186,56 @@ describe("runtime directories and plugin Python boundary", () => {
     const candidate = JSON.parse(
       await readFile(candidateLedger, "utf8"),
     ) as Record<string, unknown>;
-    candidate["validation"] = { disposition: "reportable" };
-    candidate["attack_path"] = { decision: "reportable" };
+    const completeValidation = {
+      disposition: "reportable",
+      method: "source trace",
+      confidence: "high",
+      confidence_rationale: "The exact source and sink are present.",
+      rubric: ["The source reaches the sink."],
+      evidence: "The candidate location contains the source.",
+      counterevidence_or_proof_gap: "No counterevidence was found.",
+      remaining_uncertainty: "None.",
+    };
+    const completeAttackPath = {
+      decision: "reportable",
+      dataflow: "The in-scope source reaches the sink.",
+      reachability: "The source is reachable.",
+      counterevidence: "No blocking control is present.",
+      impact: "high",
+      likelihood: "medium",
+      severity: "high",
+      severity_rationale: "The candidate crosses a trust boundary.",
+      change_conditions: "A validated boundary would block the path.",
+    };
+    candidate["validation"] = completeValidation;
+    candidate["attack_path"] = completeAttackPath;
+    const candidateId = candidate["candidate_id"] as string;
     await Promise.all([
       writeFile(candidateLedger, `${JSON.stringify(candidate)}\n`),
       writeFile(
         join(scanDir, "findings.json"),
-        `${JSON.stringify({ findings: [{ locations: [{ path: "safe.ts" }] }] })}\n`,
+        `${JSON.stringify({
+          findings: [
+            {
+              locations: [{ path: "safe.ts" }],
+              extensions: { candidateId },
+            },
+          ],
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            {
+              id: "scope-review",
+              disposition: "no_issue_found",
+              receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+            },
+            { id: candidateId, disposition: "reported", receiptRefs: [] },
+          ],
+        })}\n`,
       ),
     ]);
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
@@ -1296,8 +1339,8 @@ describe("runtime directories and plugin Python boundary", () => {
               ],
               summary: "Forged candidate",
               evidence: "Must not leave the repository",
-              validation: { disposition: "reportable" },
-              attack_path: { decision: "reportable" },
+              validation: completeValidation,
+              attack_path: completeAttackPath,
             })}\n`,
           ),
         message: /repository-relative path without traversal/u,
@@ -1312,6 +1355,76 @@ describe("runtime directories and plugin Python boundary", () => {
           ),
         message: /no location in the authoritative scope inventory/u,
       },
+      {
+        mutate: () =>
+          writeFile(candidateLedger, `${JSON.stringify(candidate)}\n`),
+        message: /reportable candidate has no matching final finding/iu,
+      },
+      {
+        mutate: async () => {
+          await Promise.all([
+            writeFile(
+              candidateLedger,
+              `${JSON.stringify({
+                ...candidate,
+                validation: {
+                  ...completeValidation,
+                  disposition: "suppressed",
+                },
+                attack_path: undefined,
+              })}\n`,
+            ),
+            writeFile(
+              join(scanDir, "findings.json"),
+              `${JSON.stringify({
+                findings: [
+                  {
+                    locations: [{ path: "safe.ts" }],
+                    extensions: { candidateId },
+                  },
+                ],
+              })}\n`,
+            ),
+          ]);
+        },
+        message: /does not match a reportable candidate/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              ...candidate,
+              validation: { disposition: "reportable" },
+            })}\n`,
+          ),
+        message: /incomplete validation closure/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              ...candidate,
+              attack_path: { decision: "reportable" },
+            })}\n`,
+          ),
+        message: /incomplete attack-path closure/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              ...candidate,
+              attack_path: {
+                ...completeAttackPath,
+                severity: "ignore",
+              },
+            })}\n`,
+          ),
+        message: /reportable attack path requires reportable severity/u,
+      },
     ];
 
     for (const attack of attacks) {
@@ -1325,6 +1438,107 @@ describe("runtime directories and plugin Python boundary", () => {
 
     await restore();
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+  });
+
+  test("verifies empty scope ledgers and rejects out-of-scope findings", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    expect(inventory.fileCount).toBe(0);
+    const review = join(coverageDirectory, "scope_review.jsonl");
+    const ledger = join(
+      scanDir,
+      "artifacts",
+      "02_discovery",
+      "candidate_ledger.jsonl",
+    );
+    const findings = join(scanDir, "findings.json");
+    await Promise.all([
+      writeFile(review, ""),
+      writeFile(ledger, ""),
+      writeFile(findings, '{"findings":[]}\n'),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            { receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"] },
+          ],
+        })}\n`,
+      ),
+    ]);
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {},
+    };
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+    await writeFile(
+      findings,
+      `${JSON.stringify({ findings: [{ locations: [{ path: "outside.ts" }] }] })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /no location in the authoritative scope inventory/u,
+    );
+    await writeFile(findings, '{"findings":[]}\n');
+    await rm(review);
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /Scope-review ledger is missing/u,
+    );
+  });
+
+  test("enforces inventory file and byte limits during traversal", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await Promise.all([
+      writeFile(join(repository, "first.ts"), "export const first = true;\n"),
+      writeFile(join(repository, "second.ts"), "export const second = true;\n"),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    for (const [label, flag, limit] of [
+      ["files", "--max-files", "1"],
+      ["bytes", "--max-bytes", "8"],
+    ] as const) {
+      const output = join(root, `${label}-inventory.jsonl`);
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-scope-inventory",
+          "--repo",
+          repository,
+          flag,
+          limit,
+          "--out",
+          output,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("standard scan scope inventory limit");
+      expect(existsSync(output)).toBe(false);
+    }
   });
 
   test("rejects oversized or substituted standard inventories after attestation", async () => {

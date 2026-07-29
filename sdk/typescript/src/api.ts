@@ -217,6 +217,7 @@ interface ClientDependencies {
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
   prepareScopeInventory?: typeof prepareScopeInventory;
+  verifyScopeCoverage?: typeof verifyScopeCoverage;
   scopeInventoryRoots?: readonly string[];
 }
 
@@ -824,9 +825,11 @@ export class CodexSecurity {
               { ...standardScopeInventory, path: scopeInventoryFile },
               signal,
             );
-            await verifyScopeCoverage({
+            await (
+              this.#dependencies.verifyScopeCoverage ?? verifyScopeCoverage
+            )({
               python,
-              pluginRoot: runtime.plugin.pluginRoot,
+              pluginRoot: runtime.plugin.installedRoot,
               repository: repo,
               scanDir,
               inventory: {
