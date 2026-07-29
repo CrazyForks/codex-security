@@ -343,6 +343,53 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("binds a sole authoritative workbench target kind without retaining draft coordinates", async () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    const bundledPlugin = await bundledPluginRoot();
+    const result = Bun.spawnSync([
+      python!,
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, runpy, sys",
+        "module = runpy.run_path(sys.argv[1])",
+        "def bind(draft_kind, allowed, target):",
+        "    manifest = {'scan': {'target': {'kind': draft_kind, 'targetId': 'draft', 'snapshotDigest': 'draft-snapshot', 'revision': 'draft-revision'}, 'scope': {}}}",
+        "    binding = {'scanId': 'scan_123', 'startedAt': '2026-01-01T00:00:00Z', 'completedAt': '2026-01-01T00:01:00Z', 'producer': {'name': 'test'}, 'allowedTargetKinds': allowed, 'target': target, 'scope': {}}",
+        "    module['_populate_unsealed_manifest_envelope'](manifest, manifest['scan'], binding)",
+        "    return manifest['scan']['target']",
+        "print(json.dumps({",
+        "    'singleRevision': bind('git_worktree', ['git_revision'], {'targetId': 'target_123', 'revision': 'deadbeef'}),",
+        "    'singleDiff': bind('git_revision', ['git_diff'], {'targetId': 'target_123', 'snapshotDigest': 'actual-snapshot'}),",
+        "    'multipleAllowed': bind('git_worktree', ['git_revision', 'git_worktree'], {'targetId': 'target_123', 'snapshotDigest': 'actual-snapshot'}),",
+        "}))",
+      ].join("\n"),
+      join(bundledPlugin, "scripts", "finalize_scan_contract.py"),
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      singleRevision: {
+        kind: "git_revision",
+        revision: "deadbeef",
+        targetId: "target_123",
+      },
+      singleDiff: {
+        kind: "git_diff",
+        snapshotDigest: "actual-snapshot",
+        targetId: "target_123",
+      },
+      multipleAllowed: {
+        kind: "git_worktree",
+        snapshotDigest: "actual-snapshot",
+        targetId: "target_123",
+      },
+    });
+  });
+
   test("honors cancellation while staging a configured plugin directory", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "bootstrap");

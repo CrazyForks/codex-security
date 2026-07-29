@@ -494,6 +494,7 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
 
     paths: set[str] = set()
     for scope_abs in resolved_scopes:
+        scope_root = scope_abs if scope_abs.is_dir() else scope_abs.parent
         pending = [scope_abs]
         while pending:
             path = pending.pop()
@@ -501,7 +502,12 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                 if path.is_symlink():
                     continue
                 relative = path.resolve(strict=True).relative_to(repo)
-                if any(part in {".git", "node_modules"} for part in relative.parts):
+                excluded_path = (
+                    relative.relative_to(scope_root.relative_to(repo))
+                    if explicit_scopes
+                    else relative
+                )
+                if any(part in {".git", "node_modules"} for part in excluded_path.parts):
                     continue
                 if path.is_dir():
                     pending.extend(path.iterdir())

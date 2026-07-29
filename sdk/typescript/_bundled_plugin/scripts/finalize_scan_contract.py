@@ -1076,7 +1076,11 @@ def _populate_unsealed_manifest_envelope(
 
     target = scan.get("target")
     if isinstance(target, dict):
-        _populate_unsealed_target_binding(target, completion_binding["target"])
+        target_binding = copy.deepcopy(completion_binding["target"])
+        allowed_target_kinds = completion_binding["allowedTargetKinds"]
+        if len(allowed_target_kinds) == 1:
+            target_binding["kind"] = allowed_target_kinds[0]
+        _populate_unsealed_target_binding(target, target_binding)
 
     scope = scan.get("scope")
     if isinstance(scope, dict):
@@ -1089,7 +1093,7 @@ def _populate_unsealed_target_binding(
 ) -> None:
     """Replace workbench-owned target coordinates without retaining incompatible drafts."""
 
-    target_kind = target.get("kind")
+    target_kind = target_binding.get("kind", target.get("kind"))
     required_coordinates = (
         TARGET_REQUIRED_COORDINATE_FIELDS.get(target_kind, set())
         if isinstance(target_kind, str)

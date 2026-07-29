@@ -2550,7 +2550,9 @@ describe("CodexSecurity orchestration", () => {
     const packageDirectory = join(repository, "package");
     const inventory = join(root, "scope_inventory.jsonl");
     const scopedInventory = join(root, "scoped_inventory.jsonl");
+    const dependencyInventory = join(root, "dependency_inventory.jsonl");
     const targetPaths = join(root, "target-paths.json");
+    const dependencyTargetPaths = join(root, "dependency-target-paths.json");
     const candidates = join(root, "candidates.jsonl");
     const ledger = join(root, "candidate_ledger.jsonl");
     const outside = join(root, "outside.ts");
@@ -2564,6 +2566,16 @@ describe("CodexSecurity orchestration", () => {
       mkdir(join(packageDirectory, "node_modules", "dependency"), {
         recursive: true,
       }),
+      mkdir(
+        join(
+          packageDirectory,
+          "node_modules",
+          "dependency",
+          "node_modules",
+          "transitive",
+        ),
+        { recursive: true },
+      ),
     ]);
     await Promise.all([
       writeFile(join(repository, ".ignore"), "package/test/\n*.bin\n"),
@@ -2588,10 +2600,28 @@ describe("CodexSecurity orchestration", () => {
         join(packageDirectory, "node_modules", "dependency", "index.js"),
         "module.exports = {};\n",
       ),
+      writeFile(
+        join(
+          packageDirectory,
+          "node_modules",
+          "dependency",
+          "node_modules",
+          "transitive",
+          "index.js",
+        ),
+        "module.exports = { transitive: true };\n",
+      ),
       writeFile(outside, "export const mustNotBeRead = true;\n"),
       writeFile(
         targetPaths,
         JSON.stringify(["package", "package/test/route.test.ts"]),
+      ),
+      writeFile(
+        dependencyTargetPaths,
+        JSON.stringify([
+          "package/node_modules/dependency",
+          "package/node_modules/dependency/index.js",
+        ]),
       ),
       writeFile(
         candidates,
@@ -2696,6 +2726,29 @@ describe("CodexSecurity orchestration", () => {
       [
         "-I",
         "-B",
+        generator,
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--scopes-file",
+        dependencyTargetPaths,
+        "--out",
+        dependencyInventory,
+      ],
+      { stdio: "pipe" },
+    );
+    expect(
+      (await readFile(dependencyInventory, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toEqual([{ path: "package/node_modules/dependency/index.js" }]);
+
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
         join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
         "--input",
         candidates,
@@ -2712,6 +2765,46 @@ describe("CodexSecurity orchestration", () => {
       cwe_ids: ["CWE-20"],
       locations: [{ path: "package/test/route.test.ts" }],
     });
+  });
+
+  test("aligns the bundled standard workflow with the authoritative inventory", async () => {
+    const [skill, workflow, artifacts, capabilities] = await Promise.all([
+      readFile(
+        join(PLUGIN_ROOT, "skills", "security-scan", "SKILL.md"),
+        "utf8",
+      ),
+      readFile(
+        join(
+          PLUGIN_ROOT,
+          "skills",
+          "security-scan",
+          "references",
+          "repository-wide-scan.md",
+        ),
+        "utf8",
+      ),
+      readFile(join(PLUGIN_ROOT, "references", "scan-artifacts.md"), "utf8"),
+      readFile(
+        join(PLUGIN_ROOT, "preflight", "capability-profiles.toml"),
+        "utf8",
+      ),
+    ]);
+
+    expect(skill).toContain("one JSONL scope inventory");
+    expect(skill).toContain("scope_inventory.jsonl");
+    expect(skill).not.toContain("in_scope_files.txt");
+    expect(workflow).toContain("CODEX_SECURITY_SCOPE_INVENTORY_FILE");
+    expect(workflow).toContain("make-scope-inventory");
+    expect(workflow).toContain("--in-scope-inventory");
+    expect(workflow).not.toContain("rg --files");
+    expect(workflow).not.toContain("--in-scope-files");
+    expect(workflow).not.toContain("in_scope_files.txt");
+    expect(artifacts).toContain("scope_inventory.jsonl");
+    expect(artifacts).toContain("CODEX_SECURITY_SCOPE_INVENTORY_FILE");
+    expect(artifacts).not.toContain("in_scope_files.txt");
+    expect(capabilities).toContain(
+      'reason = "Exhaustive repository-wide and scoped-path scans use delegated workers for file review, validation, and attack-path work when available."',
+    );
   });
 
   test("rejects malformed, duplicate, and escaping standard inventory paths", async () => {
@@ -2856,7 +2949,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
+          environment: { CODEX_SECURITY_STATE_DIR: root },
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => python!,
           prepareOutputDir: async () => scanDir,
@@ -2965,7 +3058,9 @@ describe("CodexSecurity orchestration", () => {
 
   test("rejects model-modified standard inventories before completing a scan", async () => {
     const attacks =
-      process.platform === "win32" ? ["truncate"] : ["truncate", "symlink"];
+      process.platform === "win32"
+        ? ["truncate", "protected-truncate"]
+        : ["truncate", "symlink", "protected-truncate", "protected-symlink"];
     for (const attack of attacks) {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -2991,7 +3086,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
+          environment: { CODEX_SECURITY_STATE_DIR: root },
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => python!,
           prepareOutputDir: async () => scanDir,
@@ -3015,16 +3110,23 @@ describe("CodexSecurity orchestration", () => {
             }
             return {};
           },
-          createCodex: () => ({
+          createCodex: (options: CodexOptions) => ({
             startThread: () => ({
               id: null,
               async runStreamed() {
                 await copyCompletedScan(root);
-                if (attack === "symlink") {
-                  await rm(inventory);
-                  await symlink(outside, inventory);
+                const attackedInventory = attack.startsWith("protected-")
+                  ? options.env?.["CODEX_SECURITY_SCOPE_INVENTORY_FILE"]
+                  : inventory;
+                if (typeof attackedInventory !== "string") {
+                  throw new Error("missing protected standard inventory");
+                }
+                if (attack.endsWith("symlink")) {
+                  await rm(attackedInventory);
+                  await symlink(outside, attackedInventory);
                 } else {
-                  await writeFile(inventory, "");
+                  await chmod(attackedInventory, 0o600);
+                  await writeFile(attackedInventory, "");
                 }
                 return { events: completedEvents() };
               },

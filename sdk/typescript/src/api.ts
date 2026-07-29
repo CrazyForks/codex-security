@@ -759,6 +759,15 @@ export class CodexSecurity {
         onFinalize: async (usage) => {
           if (standardScopeInventory !== null) {
             await verifyScopeInventory(standardScopeInventory, signal);
+            if (scopeInventoryFile === null) {
+              throw new CodexSecurityError(
+                "The standard scan scope inventory is missing its protected snapshot.",
+              );
+            }
+            await verifyScopeInventory(
+              { ...standardScopeInventory, path: scopeInventoryFile },
+              signal,
+            );
           }
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
