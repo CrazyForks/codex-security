@@ -391,6 +391,55 @@ describe("plugin runtime preparation", () => {
     });
   });
 
+  test("binds the authoritative snapshot digest for every committed diff", async () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    const bundledPlugin = await bundledPluginRoot();
+    const snapshotDigest = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
+    const result = Bun.spawnSync([
+      python!,
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, runpy, sys",
+        "module = runpy.run_path(sys.argv[1])",
+        "binding = module['workbench_completion_binding']",
+        "globals = binding.__globals__",
+        "globals['scan_contract'] = lambda scan: {'target': {'targetId': 'target_123', 'displayName': 'repo', 'allowedKinds': ['git_diff']}, 'scope': {'requiredExcludePaths': []}}",
+        "globals['read_json_object'] = lambda path: {'version': '0.1.3'}",
+        "globals['requested_scan_paths'] = lambda scan: ['.']",
+        "globals['expected_coverage_mode'] = lambda scan: 'repository'",
+        "finalizer = sys.modules['finalize_scan_contract']",
+        "def bind(kind):",
+        "    scan = {'id': 'scan_123', 'started_at': '2026-01-01T00:00:00Z', 'mode': 'diff', 'diff_target_kind': kind, 'diff_base_revision': 'base', 'diff_head_revision': 'head', 'diff_content_digest': sys.argv[2]}",
+        "    completion = binding(scan, '2026-01-01T00:01:00Z')",
+        "    manifest = {'scan': {'target': {'kind': 'git_revision', 'targetId': 'draft', 'revision': 'draft-revision'}, 'scope': {}}}",
+        "    finalizer._populate_unsealed_manifest_envelope(manifest, manifest['scan'], completion)",
+        "    return manifest['scan']['target']",
+        "print(json.dumps({kind: bind(kind) for kind in ('commit', 'range', 'working_tree')}))",
+      ].join("\n"),
+      join(bundledPlugin, "scripts", "workbench_db.py"),
+      snapshotDigest,
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    const expected = {
+      kind: "git_diff",
+      targetId: "target_123",
+      displayName: "repo",
+      baseRevision: "base",
+      headRevision: "head",
+      snapshotDigest,
+    };
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      commit: expected,
+      range: expected,
+      working_tree: expected,
+    });
+  });
+
   test("honors cancellation while staging a configured plugin directory", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "bootstrap");
@@ -1086,6 +1135,108 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
       expect(await readFile(path, "utf8")).toBe(contents);
     }
+  });
+
+  testPosix(
+    "preserves drive-like colon filenames in authoritative POSIX inventories",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await Promise.all([mkdir(repository), mkdir(scanDir)]);
+      await Promise.all([
+        writeFile(join(repository, "a:config"), "first-party configuration\n"),
+        writeFile(join(repository, "C:candidate.py"), "print('in scope')\n"),
+      ]);
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const inventory = await prepareScopeInventory({
+        python: python!,
+        pluginRoot: PLUGIN_ROOT,
+        repository,
+        scanDir,
+        environment: { PATH: process.env["PATH"] },
+      });
+
+      expect(inventory.fileCount).toBe(2);
+      expect(
+        (await readFile(inventory.path, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      ).toEqual([{ path: "C:candidate.py" }, { path: "a:config" }]);
+      await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
+    },
+  );
+
+  test("bounds exhaustive review receipts separately from inventory bytes", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const discoveryDirectory = join(scanDir, "artifacts", "02_discovery");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(discoveryDirectory, { recursive: true }),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    const inventory = join(discoveryDirectory, "scope_inventory.jsonl");
+    const review = join(coverageDirectory, "scope_review.jsonl");
+    const writeReceipt = async (reason: string) =>
+      writeFile(
+        review,
+        `${JSON.stringify({ path: "safe.ts", disposition: "deferred", reason })}\n`,
+      );
+
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export {};\n"),
+      writeFile(inventory, `${JSON.stringify({ path: "safe.ts" })}\n`),
+      writeFile(join(discoveryDirectory, "candidate_ledger.jsonl"), ""),
+      writeFile(join(scanDir, "findings.json"), '{"findings":[]}\n'),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "partial",
+          surfaces: [
+            { receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"] },
+          ],
+        })}\n`,
+      ),
+      writeReceipt("bounded review evidence ".repeat(14)),
+    ]);
+    expect((await stat(review)).size).toBeGreaterThan(256);
+    expect((await stat(review)).size).toBeLessThanOrEqual(512);
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const args = [
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import runpy, sys",
+        "from types import SimpleNamespace",
+        "module = runpy.run_path(sys.argv[1])",
+        "verify = module['verify_scope_coverage']",
+        "verify.__globals__['MAX_SCOPE_COVERAGE_BYTES'] = 256",
+        "verify.__globals__['MAX_SCOPE_REVIEW_BYTES'] = 512",
+        "verify(SimpleNamespace(repo=sys.argv[2], scan_dir=sys.argv[3], inventory=sys.argv[4]))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+      repository,
+      scanDir,
+      inventory,
+    ];
+    const accepted = spawnSync(python!, args, { encoding: "utf8" });
+    expect(accepted.status).toBe(0);
+    expect(accepted.stderr).toBe("");
+
+    await writeReceipt("oversized review evidence ".repeat(24));
+    expect((await stat(review)).size).toBeGreaterThan(512);
+    const oversized = spawnSync(python!, args, { encoding: "utf8" });
+    expect(oversized.status).not.toBe(0);
+    expect(oversized.stderr).toContain("bounded regular file");
   });
 
   test("binds complete standard coverage to every host-attested inventory path", async () => {

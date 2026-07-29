@@ -582,7 +582,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
+        if scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":

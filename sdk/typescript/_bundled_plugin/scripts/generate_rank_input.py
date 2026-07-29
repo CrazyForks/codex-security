@@ -128,6 +128,7 @@ RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
 MAX_SCOPE_INVENTORY_FILES = 250_000
 MAX_SCOPE_COVERAGE_BYTES = 64 * 1024 * 1024
+MAX_SCOPE_REVIEW_BYTES = MAX_SCOPE_COVERAGE_BYTES + MAX_SCOPE_INVENTORY_FILES * 128
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
 RankWorkerAssignment = tuple[int, list[str], list[str]]
@@ -577,7 +578,13 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
     print(f"Wrote {len(paths)} inventory rows to {output}")
 
 
-def require_standard_scope_artifact(scan_dir: Path, relative: str, label: str) -> Path:
+def require_standard_scope_artifact(
+    scan_dir: Path,
+    relative: str,
+    label: str,
+    *,
+    max_bytes: int = MAX_SCOPE_COVERAGE_BYTES,
+) -> Path:
     path = scan_dir / relative
     current = path
     while current != scan_dir:
@@ -590,7 +597,7 @@ def require_standard_scope_artifact(scan_dir: Path, relative: str, label: str) -
         metadata = resolved.stat()
     except (OSError, ValueError) as error:
         raise SystemExit(f"{label} is missing or outside the scan directory: {relative}") from error
-    if not resolved.is_file() or metadata.st_size > MAX_SCOPE_COVERAGE_BYTES:
+    if not resolved.is_file() or metadata.st_size > max_bytes:
         raise SystemExit(f"{label} must be a bounded regular file: {relative}")
     return resolved
 
@@ -708,7 +715,12 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
         raise SystemExit(f"Unable to read the authoritative scope inventory: {error}") from error
 
     review_relative = "artifacts/03_coverage/scope_review.jsonl"
-    review_path = require_standard_scope_artifact(scan_dir, review_relative, "Scope-review ledger")
+    review_path = require_standard_scope_artifact(
+        scan_dir,
+        review_relative,
+        "Scope-review ledger",
+        max_bytes=MAX_SCOPE_REVIEW_BYTES,
+    )
 
     def validate_scope_review(row: JsonRow, path: Path, number: int) -> None:
         disposition = row.get("disposition")

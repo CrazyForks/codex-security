@@ -398,11 +398,11 @@ async function readScopeInventorySnapshot(
     if (
       inventoryPath.includes("\0") ||
       inventoryPath.startsWith("/") ||
-      /^[A-Za-z]:/.test(inventoryPath) ||
       inventoryPath
         .split("/")
         .some((part) => part === "" || part === "." || part === "..") ||
-      (process.platform === "win32" && inventoryPath.includes("\\"))
+      (process.platform === "win32" &&
+        (/^[A-Za-z]:/.test(inventoryPath) || inventoryPath.includes("\\")))
     ) {
       throw new Error(`inventory row ${index + 1} contains an unsafe path`);
     }
