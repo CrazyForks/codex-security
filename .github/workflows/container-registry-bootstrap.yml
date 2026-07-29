@@ -1,0 +1,200 @@
+name: bootstrap-container-package
+
+on:
+  push:
+    branches:
+      - mdangelo/codex/bootstrap-ghcr-8d9eb30
+    paths:
+      - .github/workflows/container-registry-bootstrap.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-security-container-registry-bootstrap
+  queue: max
+
+env:
+  IMAGE: ghcr.io/openai/codex-security
+  SOURCE_SHA: 8d9eb30dcf71853d9e55da517404d4aef6c74f64
+  BOOTSTRAP_TAG: bootstrap-8d9eb30
+
+jobs:
+  publish-platform:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      github.ref == 'refs/heads/mdangelo/codex/bootstrap-ghcr-8d9eb30'
+    name: bootstrap-linux-${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout the exact audited main commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 8d9eb30dcf71853d9e55da517404d4aef6c74f64
+          persist-credentials: false
+
+      - name: Build and verify the native bootstrap image
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ]]; then
+            echo 'The bootstrap must build the exact audited main commit.' >&2
+            exit 1
+          fi
+
+          package_version="$(node -p 'require("./sdk/typescript/package.json").version')"
+          if [[ "$package_version" != 0.1.3 ]]; then
+            echo "Expected audited Codex Security 0.1.3; found $package_version." >&2
+            exit 1
+          fi
+
+          image="$IMAGE:$BOOTSTRAP_TAG-$ARCHITECTURE"
+          docker build --progress=plain \
+            --label "org.opencontainers.image.source=https://github.com/openai/codex-security" \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.version=$package_version" \
+            --tag "$image" \
+            .
+
+          actual_architecture="$(docker image inspect --format '{{.Architecture}}' "$image")"
+          if [[ "$actual_architecture" != "$ARCHITECTURE" ]]; then
+            echo "Expected native $ARCHITECTURE; found $actual_architecture." >&2
+            exit 1
+          fi
+          if [[ "$(docker run --rm "$image" --version)" != "$package_version" ]]; then
+            echo 'The bootstrap image reports the wrong CLI version.' >&2
+            exit 1
+          fi
+          if [[ "$(docker run --rm --entrypoint id "$image" -u)" != 10001 ]]; then
+            echo 'The bootstrap image must preserve its nonroot runtime.' >&2
+            exit 1
+          fi
+          docker run --rm "$image" bulk-scan --help > /dev/null
+          docker run --rm "$image" info --json |
+            jq --exit-status '.sdkVersion == "0.1.3" and .cliVersion == "0.1.3"' > /dev/null
+
+      - name: Publish only the architecture-specific bootstrap tag
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$BOOTSTRAP_TAG-$ARCHITECTURE"
+
+  verify-public-package:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      github.ref == 'refs/heads/mdangelo/codex/bootstrap-ghcr-8d9eb30'
+    name: verify public multi-architecture bootstrap
+    needs: publish-platform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      manifest-digest: ${{ steps.manifest.outputs.digest }}
+
+    steps:
+      - name: Log in only to assemble the bootstrap manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create and verify the native multi-architecture manifest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference="$IMAGE:$BOOTSTRAP_TAG"
+          docker buildx imagetools create \
+            --tag "$reference" \
+            "$IMAGE:$BOOTSTRAP_TAG-amd64" \
+            "$IMAGE:$BOOTSTRAP_TAG-arm64"
+
+          manifest="$(docker buildx imagetools inspect "$reference" --format '{{json .Manifest}}')"
+          if ! jq --exit-status '
+            (.digest | type == "string" and startswith("sha256:")) and
+            ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort) ==
+              ["amd64", "arm64"]
+          ' <<< "$manifest" > /dev/null; then
+            echo 'The bootstrap manifest must contain verified native amd64 and arm64 images.' >&2
+            exit 1
+          fi
+          printf 'digest=%s\n' "$(jq --raw-output '.digest' <<< "$manifest")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify public visibility and repository association
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          metadata="$(gh api orgs/openai/packages/container/codex-security)"
+          visibility="$(jq --exit-status --raw-output '.visibility' <<< "$metadata")"
+          if [[ "$visibility" != public ]]; then
+            echo "::error::GitHub created the package as $visibility. A package administrator must make it public before protected releases can proceed." >&2
+            exit 1
+          fi
+
+          repository="$(jq --raw-output '.repository.full_name // empty' <<< "$metadata")"
+          if [[ -n "$repository" && "$repository" != openai/codex-security ]]; then
+            echo "::error::The container package is linked to $repository instead of openai/codex-security." >&2
+            exit 1
+          fi
+
+          docker logout ghcr.io
+          manifest="$(docker buildx imagetools inspect "$IMAGE:$BOOTSTRAP_TAG" --format '{{json .Manifest}}')"
+          jq --exit-status '
+            ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort) ==
+              ["amd64", "arm64"]
+          ' <<< "$manifest" > /dev/null
+          docker pull --platform linux/amd64 "$IMAGE:$BOOTSTRAP_TAG"
+          if [[ "$(docker run --rm "$IMAGE:$BOOTSTRAP_TAG" --version)" != 0.1.3 ]]; then
+            echo 'Anonymous GHCR pulls must expose the verified Codex Security CLI.' >&2
+            exit 1
+          fi
+
+  attest:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      github.ref == 'refs/heads/mdangelo/codex/bootstrap-ghcr-8d9eb30'
+    name: attest verified bootstrap manifest
+    needs: verify-public-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+
+    steps:
+      - name: Attest the verified multi-architecture bootstrap digest
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/openai/codex-security
+          subject-digest: ${{ needs.verify-public-package.outputs.manifest-digest }}
+          push-to-registry: true
