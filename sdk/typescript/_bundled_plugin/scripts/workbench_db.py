@@ -1430,6 +1430,7 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
+            completion_warnings=warnings,
         )
         warning = scan_target_warning(scan)
         if warning is not None and warning not in warnings:
@@ -3435,7 +3436,7 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
         raise SystemExit(
             f"{file_name}: expected a regular file inside the scan directory."
         ) from exc
-    if resolved.as_posix().lower() != candidate.as_posix().lower() or not candidate.is_file():
+    if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():
         raise SystemExit(f"{file_name}: expected a regular non-symlink file.")
     return resolved
 
@@ -3449,7 +3450,9 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         raise SystemExit(
             "Scan directory must be an existing canonical non-symlink directory."
         ) from exc
-    if not stat.S_ISDIR(metadata.st_mode) or resolved.as_posix().lower() != scan_dir.as_posix().lower():
+    if not stat.S_ISDIR(metadata.st_mode) or os.path.normcase(resolved) != os.path.normcase(
+        scan_dir
+    ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
     return scan_dir
 

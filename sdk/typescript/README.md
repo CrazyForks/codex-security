@@ -197,6 +197,9 @@ the implied provider. Use `--model gpt-5.6-terra` to switch models and
 `--codex KEY=VALUE` for other Codex settings; existing
 `--codex 'model_reasoning_effort="high"'` overrides remain supported.
 
+These overrides do not change the scan's approval policy or filesystem
+permissions. See [Local security model](#local-security-model).
+
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
 Completion summarizes findings, severity, coverage, elapsed time, available
@@ -343,6 +346,30 @@ Terminals and noninteractive CI logs also show how to retry with
 Progress remains on stderr so JSON output stays machine readable. Network
 failures and rate limits remain retryable; definitive authentication and model
 authorization failures stop immediately.
+
+## Local security model
+
+Codex Security runs with your local operating-system permissions. Scan only
+repositories you trust and either own or are authorized to assess. Your
+repository, Git installation, configured tools, and other scans under the
+same account are not separate security principals.
+
+Every scan uses the `codex_security_scan` filesystem profile and
+`approvalPolicy: "never"`. It can read the local filesystem and write to
+workspace roots and the selected scan state directory. Scans do not request
+interactive approval. Setting `approval_policy`, `sandbox_mode`, or permissions
+through `--codex` or SDK `codexOverrides` does not replace these controls or
+make them more restrictive. Independently enforced host and network
+restrictions still apply.
+
+Scan and workbench subprocesses can inherit your environment, including
+unrelated API tokens and cloud credentials. Start a scan with only the
+credentials it needs.
+
+The scanner must stay within the target and output paths you authorize and
+must not disclose private data beyond the operation you requested. Its results
+must accurately report the scan mode, reviewed files, and exclusions. Consult
+the security policy for the full threat model and private reporting process.
 
 ## Documentation and security
 
