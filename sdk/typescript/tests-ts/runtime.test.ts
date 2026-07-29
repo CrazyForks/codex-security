@@ -1244,6 +1244,74 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(oversized.stderr).toContain("bounded regular file");
   });
 
+  test("preserves deferred review when an inventoried file disappears", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    const disappearingFile = join(repository, "disappears.ts");
+    await writeFile(disappearingFile, "export const transient = true;\n");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    await rm(disappearingFile);
+    const surface = {
+      id: "scope-review",
+      label: "Exhaustive standard scope review",
+      disposition: "needs_follow_up",
+      receiptRefs: ["artifacts/03_coverage/scope_review.jsonl"],
+    };
+    await Promise.all([
+      writeFile(
+        join(coverageDirectory, "scope_review.jsonl"),
+        `${JSON.stringify({
+          path: "disappears.ts",
+          disposition: "deferred",
+          reason: "The inventoried file was removed before review.",
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "artifacts", "02_discovery", "candidate_ledger.jsonl"),
+        "",
+      ),
+      writeFile(join(scanDir, "findings.json"), '{"findings":[]}\n'),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({ completeness: "partial", surfaces: [surface] })}\n`,
+      ),
+    ]);
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {},
+    };
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        completeness: "partial",
+        surfaces: [{ ...surface, disposition: "no_issue_found" }],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /deferred.*needs.follow.up|needs.follow.up.*deferred/iu,
+    );
+  });
+
   test("rejects forged finding payloads and unsealable review surfaces", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1392,6 +1460,36 @@ describe("runtime directories and plugin Python boundary", () => {
       environment: {},
     };
     await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const changeConditions = [
+      "Input validation would block the behavior.",
+      "A guarded source would prevent the transition.",
+    ];
+    await Promise.all([
+      writeFile(
+        candidateLedger,
+        `${JSON.stringify({
+          ...candidate,
+          validation,
+          attack_path: { ...attackPath, change_conditions: changeConditions },
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({
+          findings: [
+            {
+              ...canonicalFinding,
+              severity: {
+                ...canonicalFinding.severity,
+                changeConditions: changeConditions.join("\n"),
+              },
+            },
+          ],
+        })}\n`,
+      ),
+    ]);
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
 
     const forgedFindings = [

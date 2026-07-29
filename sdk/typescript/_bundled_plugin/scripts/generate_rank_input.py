@@ -726,6 +726,8 @@ def validate_standard_finding_payload(
     assert isinstance(confidence, dict)
     assert isinstance(finding_validation, dict)
     assert isinstance(finding_attack_path, dict)
+    conditions = attack_path.get("change_conditions")
+    canonical_conditions = "\n".join(conditions) if isinstance(conditions, list) else conditions
 
     fields = (
         ("taxonomy", taxonomy.get("cwe"), candidate.get("cwe_ids")),
@@ -738,7 +740,7 @@ def validate_standard_finding_payload(
         (
             "severity change conditions",
             severity.get("changeConditions"),
-            attack_path.get("change_conditions"),
+            canonical_conditions,
         ),
         ("confidence", confidence.get("level"), validation.get("confidence")),
         (
@@ -845,6 +847,9 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
     surfaces = coverage.get("surfaces")
     if not isinstance(surfaces, list):
         raise SystemExit("Standard scan coverage must reference the exhaustive scope-review ledger")
+    has_deferred_reviews = any(row["disposition"] == "deferred" for row in reviews)
+    if coverage.get("completeness") == "complete" and has_deferred_reviews:
+        raise SystemExit("Complete standard scan coverage cannot contain deferred inventory paths")
     surface_ids: set[str] = set()
     has_review_receipt = False
     for index, surface in enumerate(surfaces, start=1):
@@ -889,13 +894,17 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
                     else MAX_SCOPE_COVERAGE_BYTES
                 ),
             )
+            if (
+                receipt == review_relative
+                and has_deferred_reviews
+                and disposition != "needs_follow_up"
+            ):
+                raise SystemExit(
+                    "Deferred scope-review paths require a needs_follow_up receipt surface"
+                )
             has_review_receipt = has_review_receipt or receipt == review_relative
     if not has_review_receipt:
         raise SystemExit("Standard scan coverage must reference the exhaustive scope-review ledger")
-    if coverage.get("completeness") == "complete" and any(
-        row["disposition"] == "deferred" for row in reviews
-    ):
-        raise SystemExit("Complete standard scan coverage cannot contain deferred inventory paths")
 
     candidate_path = require_standard_scope_artifact(
         scan_dir,

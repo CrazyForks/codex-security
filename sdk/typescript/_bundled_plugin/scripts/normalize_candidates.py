@@ -198,8 +198,21 @@ def read_scope_inventory(path: Path, repo_root: Path) -> set[str]:
                 row: object = json.loads(line)
                 if not isinstance(row, dict) or set(row) != {"path"}:
                     raise ValueError("expected an object with only a path field")
-                relative, _ = relative_file(row["path"], repo_root)
-                if relative != row["path"]:
+                value = row["path"]
+                if not isinstance(value, str) or not value or "\0" in value:
+                    raise ValueError("path: expected a non-empty repository-relative path")
+                lexical_path = PurePosixPath(value)
+                if (
+                    lexical_path.is_absolute()
+                    or any(part in {"", ".", ".."} for part in value.split("/"))
+                    or (
+                        sys.platform == "win32"
+                        and ("\\" in value or re.match(r"^[A-Za-z]:", value))
+                    )
+                ):
+                    raise ValueError("path: expected a repository-relative path without traversal")
+                relative = lexical_path.as_posix()
+                if relative != value:
                     raise ValueError("path: expected a canonical repository-relative path")
                 if relative in scope:
                     raise ValueError("path: duplicate inventory path")
