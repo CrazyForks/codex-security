@@ -808,6 +808,35 @@ export class CodexSecurity {
       });
       checkOpen();
 
+      const verifyAuthoritativeScope = async (): Promise<void> => {
+        if (standardScopeInventory === null) return;
+        await verifyScopeInventory(standardScopeInventory, signal);
+        if (scopeInventoryFile === null || scopeInventoryDirectory === null) {
+          throw new CodexSecurityError(
+            "The standard scan scope inventory is missing its protected snapshot.",
+          );
+        }
+        await verifyScopeInventory(
+          { ...standardScopeInventory, path: scopeInventoryFile },
+          signal,
+        );
+        await (this.#dependencies.verifyScopeCoverage ?? verifyScopeCoverage)({
+          python,
+          pluginRoot: scopeInventoryDirectory,
+          repository: repo,
+          scanDir,
+          inventory: {
+            ...standardScopeInventory,
+            path: scopeInventoryFile,
+          },
+          environment: selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+          ),
+          signal,
+        });
+      };
+
       const result = await runScanEvents({
         thread,
         events,
@@ -819,38 +848,7 @@ export class CodexSecurity {
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
         onFinalize: async (usage) => {
-          if (standardScopeInventory !== null) {
-            await verifyScopeInventory(standardScopeInventory, signal);
-            if (
-              scopeInventoryFile === null ||
-              scopeInventoryDirectory === null
-            ) {
-              throw new CodexSecurityError(
-                "The standard scan scope inventory is missing its protected snapshot.",
-              );
-            }
-            await verifyScopeInventory(
-              { ...standardScopeInventory, path: scopeInventoryFile },
-              signal,
-            );
-            await (
-              this.#dependencies.verifyScopeCoverage ?? verifyScopeCoverage
-            )({
-              python,
-              pluginRoot: scopeInventoryDirectory,
-              repository: repo,
-              scanDir,
-              inventory: {
-                ...standardScopeInventory,
-                path: scopeInventoryFile,
-              },
-              environment: selectedScanEnvironment(
-                runtime.environment,
-                options.auth,
-              ),
-              signal,
-            });
-          }
+          await verifyAuthoritativeScope();
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
@@ -867,6 +865,7 @@ export class CodexSecurity {
             "--scan-id",
             scanId,
           ]);
+          await verifyAuthoritativeScope();
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
