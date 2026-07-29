@@ -111,6 +111,10 @@ pass it on stdin:
 printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 ```
 
+Environment API keys are supplied directly to the current scan and are never
+saved to the Codex credential home or system keyring. Only an explicit
+`login --with-api-key` stores an API key.
+
 To pass a Codex access token explicitly, use
 `login --with-access-token` and provide the token on stdin. An access token
 environment variable is not automatically used as a scan API key.
@@ -122,10 +126,16 @@ $env:OPENAI_API_KEY = "<your-api-key>"
 npx @openai/codex-security scan C:\code\repository
 ```
 
-Check or remove the stored sign-in with `npx @openai/codex-security login status` and
-`npx @openai/codex-security logout`. Codex Security reuses an existing file-based Codex
-sign-in. If Codex stores credentials in the system keyring, run
-`npx @openai/codex-security login` once before scanning.
+Check or remove the stored sign-in with `npx @openai/codex-security login status`
+and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
+private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
+`$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
+configured. Login, status, logout, and scans use the same home. Codex manages
+credentials using its configured file or system-keyring backend and honors
+managed-device policies. An existing file-based Codex sign-in is imported only
+when the dedicated home does not already contain stored credentials. Logging
+out prevents later scans from automatically reimporting that ambient sign-in
+until you explicitly log in again.
 
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an

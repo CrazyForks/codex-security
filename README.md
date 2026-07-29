@@ -17,7 +17,13 @@ npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 ```
 
-For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in. Environment API keys are
+passed directly to the current scan and are never stored in Codex's credential
+home or system keyring.
+
+Local sign-in honors Codex's configured credential backend, including a system
+keyring required by a managed device. Codex Security keeps login and scan
+credentials in the same private, persistent state directory.
 
 If both a ChatGPT sign-in and an API key are available, interactive scans ask
 which credential to use. CI and other noninteractive scans keep the existing
