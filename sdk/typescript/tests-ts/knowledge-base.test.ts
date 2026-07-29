@@ -8,6 +8,7 @@ import {
   rm,
   stat,
   symlink,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -49,13 +50,19 @@ function docx(text: string): Uint8Array {
   });
 }
 
-function pdf(text: string): Uint8Array {
+function pdf(text: string, pages = 1): Uint8Array {
   const escaped = text.replace(/[\\()]/gu, "\\$&");
   const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  const pageObjects = Array.from({ length: pages }, (_, index) => index + 3);
+  const font = pages + 3;
+  const content = pages + 4;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /Pages /Kids [${pageObjects.map((number) => `${number} 0 R`).join(" ")}] /Count ${pages} >>`,
+    ...pageObjects.map(
+      () =>
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`,
+    ),
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
   ];
@@ -185,6 +192,99 @@ describe("scan knowledge bases", () => {
     await expect(prepareKnowledgeBase([invalidXml])).rejects.toThrow(
       "Cannot extract text from knowledge base DOCX",
     );
+  });
+
+  test("bounds document count, nesting depth, and individual input size", async () => {
+    const countRoot = await temporaryDirectory();
+    const documents = Array.from({ length: 129 }, (_, index) =>
+      join(countRoot, `${index}.md`),
+    );
+    await Promise.all(documents.map((path) => writeFile(path, "scope")));
+    await expect(prepareKnowledgeBase(documents)).rejects.toThrow(
+      "more than 128 documents",
+    );
+
+    const depthRoot = await temporaryDirectory();
+    let nested = depthRoot;
+    for (let depth = 0; depth < 17; depth += 1) {
+      nested = join(nested, "nested");
+      await mkdir(nested);
+    }
+    await writeFile(join(nested, "scope.md"), "scope");
+    await expect(prepareKnowledgeBase([depthRoot])).rejects.toThrow(
+      "16-level nesting limit",
+    );
+
+    const sizeRoot = await temporaryDirectory();
+    const oversized = join(sizeRoot, "oversized.md");
+    await writeFile(oversized, "");
+    await truncate(oversized, 8 * 1024 * 1024 + 1);
+    await expect(prepareKnowledgeBase([oversized])).rejects.toThrow(
+      "8388608-byte input limit",
+    );
+  });
+
+  test("bounds aggregate input and extracted text", async () => {
+    const inputRoot = await temporaryDirectory();
+    const inputs = Array.from({ length: 5 }, (_, index) =>
+      join(inputRoot, `${index}.md`),
+    );
+    for (const [index, path] of inputs.entries()) {
+      await writeFile(path, "");
+      await truncate(path, index === inputs.length - 1 ? 1 : 8 * 1024 * 1024);
+    }
+    await expect(prepareKnowledgeBase(inputs)).rejects.toThrow(
+      "33554432-byte aggregate limit",
+    );
+
+    const documentOutputRoot = await temporaryDirectory();
+    const oversizedOutput = join(documentOutputRoot, "oversized.docx");
+    await writeFile(oversizedOutput, docx("x".repeat(8 * 1024 * 1024)));
+    await expect(prepareKnowledgeBase([oversizedOutput])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+
+    const outputRoot = await temporaryDirectory();
+    const compressedText = "x".repeat(7 * 1024 * 1024);
+    for (let index = 0; index < 5; index += 1) {
+      await writeFile(join(outputRoot, `${index}.docx`), docx(compressedText));
+    }
+    await expect(prepareKnowledgeBase([outputRoot])).rejects.toThrow(
+      "extracted text exceeds the 33554432-byte aggregate limit",
+    );
+  });
+
+  test("limits PDF page extraction", async () => {
+    const root = await temporaryDirectory();
+    const oversized = join(root, "oversized.pdf");
+    await writeFile(oversized, pdf("scope", 513));
+
+    await expect(prepareKnowledgeBase([oversized])).rejects.toThrow(
+      "512-page limit",
+    );
+  });
+
+  test("observes cancellation while discovering directories", async () => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "one", "two");
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, "scope.md"), "scope");
+    const controller = new AbortController();
+    const reason = new DOMException("cancel discovery", "AbortError");
+    const throwIfAborted = controller.signal.throwIfAborted.bind(
+      controller.signal,
+    );
+    let checks = 0;
+    controller.signal.throwIfAborted = (): void => {
+      checks += 1;
+      if (checks === 5) controller.abort(reason);
+      throwIfAborted();
+    };
+
+    await expect(prepareKnowledgeBase([root], controller.signal)).rejects.toBe(
+      reason,
+    );
+    expect(checks).toBe(5);
   });
 
   testPosix("does not follow symbolic links", async () => {

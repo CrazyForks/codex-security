@@ -223,6 +223,10 @@ to
 
 Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
 searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
+Knowledge bases are limited to 128 documents and 4,096 discovered entries across
+16 directory levels. Each input and extracted document is limited to 8 MiB,
+aggregate input and extracted text are each limited to 32 MiB, and PDFs are
+limited to 512 pages.
 
 On macOS/Linux, an existing output directory must be private to the current
 user (`chmod 700`).
