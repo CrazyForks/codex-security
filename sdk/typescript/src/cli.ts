@@ -8,7 +8,14 @@ import {
   realpathSync,
   writeSync,
 } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -1070,8 +1077,8 @@ export async function main(
           );
           const git = await resolveTrustedExecutable(
             "git",
-            isolatedGitEnvironment(dependencies.environment),
-            [invocationDirectory, repository],
+            dependencies.environment,
+            await protectedHookExecutableRoots(invocationDirectory, repository),
           );
           if (git === null) {
             throw new Error("Git is not available on a trusted PATH.");
@@ -2779,14 +2786,29 @@ function quoteCliPath(path: string): string {
     : `'${path.replaceAll("'", `'"'"'`)}'`;
 }
 
-function isolatedGitEnvironment(
-  environment: Readonly<NodeJS.ProcessEnv>,
-): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) => !name.toUpperCase().startsWith("GIT_"),
-    ),
-  );
+async function protectedHookExecutableRoots(
+  invocationDirectory: string,
+  repository: string,
+): Promise<readonly string[]> {
+  const roots = new Set([repository]);
+
+  for (const directory of new Set([invocationDirectory, repository])) {
+    let current = directory;
+    while (true) {
+      try {
+        await lstat(join(current, ".git"));
+        roots.add(current);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+
+  return [...roots];
 }
 
 function targetFromArguments(arguments_: ScanArguments): ScanTarget {

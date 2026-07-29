@@ -48,6 +48,11 @@ operations can use repository configuration, hooks, filters, attributes,
 credential helpers, worktrees, and executables on your `PATH`. These are not
 separate security boundaries.
 
+Some commands defensively resolve executables outside Git checkout roots to
+avoid accidentally running repository-local or package-manager-provided shims.
+This does not make untrusted repositories safe, turn `PATH` into an isolation
+boundary, or override the operator's Git configuration.
+
 The product also does not isolate users, tasks, repositories, or scan jobs
 that share the same operating-system account, credentials, or local state.
 Do not treat shared local state as a multi-user or multi-tenant system.

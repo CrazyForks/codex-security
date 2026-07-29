@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, normalize } from "node:path";
+import { delimiter, join, normalize, parse } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -321,12 +321,7 @@ describe("CLI", () => {
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
         currentDirectory: root,
-        environment: {
-          ...process.env,
-          GIT_CONFIG_COUNT: "1",
-          GIT_CONFIG_KEY_0: "core.hooksPath",
-          GIT_CONFIG_VALUE_0: join(root, "injected-hooks"),
-        },
+        environment: { ...process.env },
         onRun: () => (started = true),
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -349,9 +344,6 @@ describe("CLI", () => {
       expect(await readFile(hook, "utf8")).toContain(
         "--working-tree --fail-on-severity medium",
       );
-      await expect(stat(join(root, "injected-hooks"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
       expect(started).toBe(false);
 
       const trustedHook = await readFile(hook, "utf8");
@@ -473,6 +465,210 @@ describe("CLI", () => {
           fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
         ),
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("installs the hook at Git's effective configured hook path", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-configured-hook-")),
+    );
+    try {
+      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
+      execFileSync(
+        "git",
+        ["-C", root, "config", "core.hooksPath", ".repository hooks"],
+        { timeout: 10_000 },
+      );
+      const hookDirectory = join(root, ".environment hooks");
+      const hook = join(hookDirectory, "pre-commit");
+      const environment = {
+        ...process.env,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "core.hooksPath",
+        GIT_CONFIG_VALUE_0: hookDirectory,
+      };
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["install-hook", ".", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ currentDirectory: root, environment }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toBe("");
+      expect(
+        normalize((JSON.parse(stdout.text()) as { hook: string }).hook),
+      ).toBe(hook);
+      expect(await readFile(hook, "utf8")).toContain(
+        "scan . --working-tree --fail-on-severity high",
+      );
+      expect(
+        normalize(
+          execFileSync(
+            "git",
+            [
+              "-C",
+              root,
+              "rev-parse",
+              "--path-format=absolute",
+              "--git-path",
+              "hooks/pre-commit",
+            ],
+            { encoding: "utf8", env: environment, timeout: 10_000 },
+          ).trim(),
+        ),
+      ).toBe(hook);
+      await expect(
+        stat(join(root, ".repository hooks", "pre-commit")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves the operator's Git repository discovery ceiling", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-git-ceiling-")),
+    );
+    try {
+      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
+      execFileSync(
+        "git",
+        ["-C", root, "config", "core.hooksPath", ".repository hooks"],
+        { timeout: 10_000 },
+      );
+      const nested = join(root, "nested");
+      await mkdir(nested);
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["install-hook", nested, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: root,
+            environment: {
+              ...process.env,
+              GIT_CEILING_DIRECTORIES: root,
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("not a git repository");
+      await expect(
+        stat(join(root, ".repository hooks", "pre-commit")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("installs a hook when invoked from a filesystem root", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-root-hook-")),
+    );
+    try {
+      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
+      execFileSync(
+        "git",
+        ["-C", root, "config", "core.hooksPath", ".repository hooks"],
+        { timeout: 10_000 },
+      );
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["install-hook", root, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: parse(root).root,
+            environment: { ...process.env },
+          }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toBe("");
+      expect(
+        normalize((JSON.parse(stdout.text()) as { hook: string }).hook),
+      ).toBe(join(root, ".repository hooks", "pre-commit"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores Git shims in both invoking and target checkouts", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-trusted-git-")),
+    );
+    try {
+      const invocation = join(root, "invocation");
+      const repository = join(root, "repository");
+      const invocationBinaries = join(invocation, "node_modules", ".bin");
+      const repositoryBinaries = join(repository, "node_modules", ".bin");
+      await Promise.all([
+        mkdir(invocationBinaries, { recursive: true }),
+        mkdir(repositoryBinaries, { recursive: true }),
+      ]);
+      execFileSync("git", ["init", "-q", invocation], { timeout: 10_000 });
+      execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
+      execFileSync(
+        "git",
+        ["-C", repository, "config", "core.hooksPath", ".repository hooks"],
+        { timeout: 10_000 },
+      );
+
+      const marker = join(root, "git-shim-executed");
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      const maliciousGit =
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
+      await Promise.all([
+        writeFile(join(invocationBinaries, gitName), maliciousGit, {
+          mode: 0o755,
+        }),
+        writeFile(join(repositoryBinaries, gitName), maliciousGit, {
+          mode: 0o755,
+        }),
+      ]);
+      const path = Object.entries(process.env).find(
+        ([name]) => name.toUpperCase() === "PATH",
+      )?.[1];
+      const environment = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([name]) => name.toUpperCase() !== "PATH",
+        ),
+      );
+      environment["PATH"] = [
+        invocationBinaries,
+        repositoryBinaries,
+        path ?? "",
+      ].join(delimiter);
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["install-hook", repository, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ currentDirectory: invocation, environment }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toBe("");
+      expect(
+        normalize((JSON.parse(stdout.text()) as { hook: string }).hook),
+      ).toBe(join(repository, ".repository hooks", "pre-commit"));
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

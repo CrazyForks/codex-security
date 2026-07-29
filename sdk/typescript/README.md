@@ -136,6 +136,7 @@ npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
 npx @openai/codex-security install-hook
+npx @openai/codex-security install-hook /path/to/repository
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
@@ -162,9 +163,11 @@ default model, reasoning effort, and first-scan command. A scan with `--dry-run`
 also reports its effective model and reasoning effort, including `--codex`
 overrides, without starting Codex or contacting the network.
 
-`install-hook` scans staged and unstaged changes before each commit. It respects
-`core.hooksPath`, does not replace an existing hook, and blocks high-severity
-findings or failed scans. Set `--fail-on-severity` to change the threshold.
+`install-hook` scans staged and unstaged changes before each commit. It resolves
+Git outside the invoking and selected Git checkouts while preserving the
+operator's effective Git configuration, including `core.hooksPath`. It does not
+replace an existing hook and blocks high-severity findings or failed scans. Set
+`--fail-on-severity` to change the threshold.
 
 `--path` scopes a scan to one or more paths, `--diff` scans committed changes,
 and `--working-tree` scans staged and unstaged changes. Deep scans support
