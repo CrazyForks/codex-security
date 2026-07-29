@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -1002,8 +1003,11 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(inventory.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(inventory.fileCount).toBe(1);
     expect(inventory.byteLength).toBeGreaterThan(0);
-    expect(await readFile(inventory.path, "utf8")).toBe(
-      '{"path": "safe.ts"}\n',
+    const serializedInventory = await readFile(inventory.path, "utf8");
+    expect(JSON.parse(serializedInventory)).toEqual({ path: "safe.ts" });
+    expect(Buffer.byteLength(serializedInventory)).toBe(inventory.byteLength);
+    expect(createHash("sha256").update(serializedInventory).digest("hex")).toBe(
+      inventory.sha256,
     );
     if (process.platform !== "win32") {
       expect((await stat(inventory.path)).mode & 0o777).toBe(0o600);
@@ -1013,6 +1017,27 @@ describe("runtime directories and plugin Python boundary", () => {
       ).toBe(0o700);
     }
     await verifyScopeInventory(inventory);
+  });
+
+  test("verifies LF and CRLF inventory snapshots against their exact original bytes", async () => {
+    const root = await temporaryDirectory();
+    for (const [label, newline] of [
+      ["lf", "\n"],
+      ["crlf", "\r\n"],
+    ] as const) {
+      const path = join(root, `scope-inventory-${label}.jsonl`);
+      const contents = `${JSON.stringify({ path: "safe.ts" })}${newline}`;
+      await writeFile(path, contents);
+      const inventory = {
+        path,
+        sha256: createHash("sha256").update(contents).digest("hex"),
+        fileCount: 1,
+        byteLength: Buffer.byteLength(contents),
+      };
+
+      await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
+      expect(await readFile(path, "utf8")).toBe(contents);
+    }
   });
 
   test("rejects oversized or substituted standard inventories after attestation", async () => {
