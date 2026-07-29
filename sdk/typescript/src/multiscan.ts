@@ -1,6 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
+  type FileHandle,
   lstat,
   mkdir,
   open,
@@ -8,7 +10,6 @@ import {
   realpath,
   rename,
   rm,
-  truncate,
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -255,12 +256,83 @@ async function ensureOutputDirectory(path: string): Promise<void> {
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
-  const file = await open(path, "a", 0o600);
+  const file = await openReceiptLedger(
+    path,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT,
+  );
   try {
     await file.writeFile(receipt, "utf8");
     await file.sync();
   } finally {
     await file.close();
+  }
+}
+
+async function openReceiptLedger(
+  path: string,
+  flags: number,
+): Promise<FileHandle> {
+  const parentPath = dirname(path);
+  const parent = await lstat(parentPath);
+  const expected = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return undefined;
+  });
+  if (
+    !parent.isDirectory() ||
+    parent.isSymbolicLink() ||
+    (expected !== undefined &&
+      (!expected.isFile() || expected.isSymbolicLink() || expected.nlink !== 1))
+  ) {
+    throw new Error(
+      "Multiscan results ledger must be a regular, single-link, non-symbolic-link file.",
+    );
+  }
+
+  let file: FileHandle | undefined;
+  try {
+    file = await open(
+      path,
+      flags |
+        (process.platform === "win32"
+          ? 0
+          : constants.O_NOFOLLOW | constants.O_NONBLOCK),
+      0o600,
+    );
+    const [opened, currentParent, current] = await Promise.all([
+      file.stat(),
+      lstat(parentPath),
+      lstat(path),
+    ]);
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      !currentParent.isDirectory() ||
+      currentParent.isSymbolicLink() ||
+      currentParent.dev !== parent.dev ||
+      currentParent.ino !== parent.ino ||
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      current.nlink !== 1 ||
+      current.dev !== opened.dev ||
+      current.ino !== opened.ino ||
+      (expected !== undefined &&
+        (opened.dev !== expected.dev || opened.ino !== expected.ino))
+    ) {
+      throw new Error(
+        "Multiscan results ledger must be a regular, single-link, non-symbolic-link file.",
+      );
+    }
+    return file;
+  } catch (error) {
+    await file?.close();
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error(
+        "Multiscan results ledger must be a regular, single-link, non-symbolic-link file.",
+        { cause: error },
+      );
+    }
+    throw error;
   }
 }
 
@@ -312,27 +384,32 @@ async function ensureManifest(
 async function readReceipts(
   path: string,
 ): Promise<Map<string, MultiscanReceipt>> {
-  let contents: string;
+  let file: FileHandle;
   try {
-    contents = await readFile(path, "utf8");
+    file = await openReceiptLedger(path, constants.O_RDWR);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
     throw error;
   }
-  const lines = contents.split("\n");
-  if (!contents.endsWith("\n")) {
-    const partial = lines.pop()!;
-    await truncate(
-      path,
-      Buffer.byteLength(contents) - Buffer.byteLength(partial),
+  try {
+    const contents = await file.readFile("utf8");
+    const lines = contents.split("\n");
+    if (!contents.endsWith("\n")) {
+      const partial = lines.pop()!;
+      await file.truncate(
+        Buffer.byteLength(contents) - Buffer.byteLength(partial),
+      );
+      await file.sync();
+    }
+    return new Map(
+      lines.filter(Boolean).map((line): [string, MultiscanReceipt] => {
+        const receipt = JSON.parse(line) as MultiscanReceipt;
+        return [receipt.id.toLowerCase(), receipt];
+      }),
     );
+  } finally {
+    await file.close();
   }
-  return new Map(
-    lines.filter(Boolean).map((line): [string, MultiscanReceipt] => {
-      const receipt = JSON.parse(line) as MultiscanReceipt;
-      return [receipt.id.toLowerCase(), receipt];
-    }),
-  );
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {

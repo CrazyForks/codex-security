@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -501,6 +502,246 @@ describe("multiscan", () => {
       "manifest does not match",
     );
     expect(calls).toBe(2);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects symlinked receipt ledgers without reading or changing external files",
+    async () => {
+      for (const contents of ["", '{"id":"interrupted"']) {
+        const paths = await fixture();
+        const source = await repository(paths.root, "ledger-source");
+        const external = join(paths.root, "external-results.jsonl");
+        await writeFile(
+          paths.input,
+          `id,repository,revision\nledger,${source.path},${source.revision}\n`,
+        );
+        await mkdir(paths.output);
+        await writeFile(external, contents);
+        await symlink(external, join(paths.output, "results.jsonl"));
+
+        let scans = 0;
+        await expect(
+          runMultiscan(
+            options(
+              paths,
+              client(async (_repository, scanOptions = {}) => {
+                scans += 1;
+                return await completedScan(scanOptions.outputDir!);
+              }),
+            ),
+          ),
+        ).rejects.toThrow(/ledger|symbolic link|ELOOP/iu);
+
+        expect(scans).toBe(0);
+        expect(await readFile(external, "utf8")).toBe(contents);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects dangling receipt-ledger symlinks without creating external files",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "dangling-ledger");
+      const external = join(paths.root, "missing-external-results.jsonl");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ndangling,${source.path},${source.revision}\n`,
+      );
+      await mkdir(paths.output);
+      await symlink(external, join(paths.output, "results.jsonl"));
+
+      let scans = 0;
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+          ),
+        ),
+      ).rejects.toThrow(/ledger|symbolic link|ELOOP/iu);
+
+      expect(scans).toBe(0);
+      await expect(access(external)).rejects.toThrow();
+    },
+  );
+
+  test("rejects hard-linked receipt ledgers without changing external files", async () => {
+    for (const contents of ["", '{"id":"interrupted"']) {
+      const paths = await fixture();
+      const source = await repository(paths.root, "hard-linked-ledger");
+      const external = join(paths.root, "external-results.jsonl");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nledger,${source.path},${source.revision}\n`,
+      );
+      await mkdir(paths.output);
+      await writeFile(external, contents);
+      await link(external, join(paths.output, "results.jsonl"));
+
+      let scans = 0;
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+          ),
+        ),
+      ).rejects.toThrow(/ledger|regular|link/iu);
+
+      expect(scans).toBe(0);
+      expect(await readFile(external, "utf8")).toBe(contents);
+    }
+  });
+
+  test("rejects non-regular receipt ledgers before starting scans", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "directory-ledger");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ndirectory,${source.path},${source.revision}\n`,
+    );
+    await mkdir(join(paths.output, "results.jsonl"), { recursive: true });
+
+    let scans = 0;
+    await expect(
+      runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            scans += 1;
+            return await completedScan(scanOptions.outputDir!);
+          }),
+        ),
+      ),
+    ).rejects.toThrow(/ledger|regular/iu);
+
+    expect(scans).toBe(0);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects FIFO receipt ledgers without opening or blocking",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "fifo-ledger");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nfifo,${source.path},${source.revision}\n`,
+      );
+      await mkdir(paths.output);
+      execFileSync("mkfifo", [join(paths.output, "results.jsonl")], {
+        stdio: "ignore",
+      });
+
+      let scans = 0;
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+          ),
+        ),
+      ).rejects.toThrow(/ledger|regular/iu);
+
+      expect(scans).toBe(0);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects a receipt ledger replaced by a symlink before appending",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "ledger-replacement");
+      const external = join(paths.root, "external-results.jsonl");
+      const preserved = "external file must not receive a scan receipt\n";
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nledger,${source.path},${source.revision}\n`,
+      );
+      await writeFile(external, preserved);
+
+      let scans = 0;
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) => {
+              scans += 1;
+              await symlink(external, join(paths.output, "results.jsonl"));
+              return await completedScan(scanOptions.outputDir!);
+            }),
+          ),
+        ),
+      ).rejects.toThrow(/ledger|symbolic link|ELOOP/iu);
+
+      expect(scans).toBe(1);
+      expect(await readFile(external, "utf8")).toBe(preserved);
+    },
+  );
+
+  test("rejects a receipt ledger replaced by a hard link before appending", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "hard-link-replacement");
+    const external = join(paths.root, "external-results.jsonl");
+    const preserved = "external file must not receive a scan receipt\n";
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nledger,${source.path},${source.revision}\n`,
+    );
+    await writeFile(external, preserved);
+
+    let scans = 0;
+    await expect(
+      runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            scans += 1;
+            await link(external, join(paths.output, "results.jsonl"));
+            return await completedScan(scanOptions.outputDir!);
+          }),
+        ),
+      ),
+    ).rejects.toThrow(/ledger|regular|link/iu);
+
+    expect(scans).toBe(1);
+    expect(await readFile(external, "utf8")).toBe(preserved);
+  });
+
+  test("repairs an interrupted regular ledger without dropping completed receipts", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "ledger-recovery");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nledger,${source.path},${source.revision}\n`,
+    );
+
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const initial = await runMultiscan(options(paths, security));
+    const completed = await readFile(initial.resultsPath, "utf8");
+    await appendFile(
+      initial.resultsPath,
+      '{"id":"interrupted","error":"\u20ac',
+    );
+
+    const recovered = await runMultiscan(options(paths, security));
+
+    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+    expect(scans).toBe(1);
+    expect(await readFile(initial.resultsPath, "utf8")).toBe(completed);
   });
 
   test("ignores repository-local Git shims while preserving credential configuration", async () => {
