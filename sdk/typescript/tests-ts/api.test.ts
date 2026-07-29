@@ -3074,6 +3074,12 @@ describe("CodexSecurity orchestration", () => {
     expect(skill).toContain("one JSONL scope inventory");
     expect(skill).toContain("scope_inventory.jsonl");
     expect(skill).toContain("scope_review.jsonl");
+    expect(skill).toContain("CODEX_SECURITY_SCOPE_INVENTORY_FILE");
+    expect(skill).toContain("verify-scope-coverage");
+    expect(skill).toContain("--inventory <scope_inventory_file>");
+    expect(skill.indexOf("verify-scope-coverage")).toBeLessThan(
+      skill.indexOf("finalize_scan_contract.py"),
+    );
     expect(skill).not.toContain("in_scope_files.txt");
     expect(workflow).toContain("CODEX_SECURITY_SCOPE_INVENTORY_FILE");
     expect(workflow).toContain("make-scope-inventory");

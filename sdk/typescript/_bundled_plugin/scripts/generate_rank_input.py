@@ -1032,7 +1032,7 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
                     location["role"],
                 )
                 for location in candidate["locations"]
-                if isinstance(location, dict) and location.get("path") in scope
+                if isinstance(location, dict)
             }
             if not expected_locations.issubset(reported_locations[candidate_id]):
                 raise SystemExit(

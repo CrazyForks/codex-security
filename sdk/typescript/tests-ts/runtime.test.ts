@@ -1485,6 +1485,124 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
 
+    await restore();
+    await writeFile(
+      join(repository, "shared-sink.ts"),
+      "export const sharedSink = (value: string) => value;\n",
+    );
+    await writeFile(
+      rawCandidates,
+      `${JSON.stringify({
+        cwe_ids: ["CWE-20"],
+        locations: [
+          { path: "safe.ts", start_line: 1, role: "evidence" },
+          { path: "safe.ts", start_line: 2, role: "evidence" },
+          { path: "shared-sink.ts", start_line: 1, role: "sink" },
+        ],
+        summary: "The reviewed candidate reaches a shared sink.",
+        evidence: "Both in-scope source lines reach the shared sink.",
+      })}\n`,
+    );
+    const normalizedCrossScopeCandidate = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        rawCandidates,
+        "--out",
+        candidateLedger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        inventory.path,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(normalizedCrossScopeCandidate.status).toBe(0);
+    const crossScopeCandidate = JSON.parse(
+      await readFile(candidateLedger, "utf8"),
+    ) as Record<string, unknown>;
+    const crossScopeCandidateId = crossScopeCandidate["candidate_id"] as string;
+    const crossScopeFinding = {
+      ...canonicalFinding,
+      extensions: { candidateId: crossScopeCandidateId },
+    };
+    await Promise.all([
+      writeFile(
+        candidateLedger,
+        `${JSON.stringify({
+          ...crossScopeCandidate,
+          validation,
+          attack_path: attackPath,
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            scopeSurface,
+            { ...candidateSurface, id: crossScopeCandidateId },
+          ],
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({ findings: [crossScopeFinding] })}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /unreported source locations/u,
+    );
+    const runManualScopeVerifier = () =>
+      spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "verify-scope-coverage",
+          "--repo",
+          repository,
+          "--inventory",
+          inventory.path,
+          "--scan-dir",
+          scanDir,
+        ],
+        { encoding: "utf8" },
+      );
+    const rejectedManualCompletion = runManualScopeVerifier();
+    expect(rejectedManualCompletion.status).not.toBe(0);
+    expect(rejectedManualCompletion.stderr).toContain(
+      "unreported source locations",
+    );
+
+    const sharedSink = {
+      path: "shared-sink.ts",
+      startLine: 1,
+      endLine: 1,
+      role: "sink",
+    };
+    await writeFile(
+      join(scanDir, "findings.json"),
+      `${JSON.stringify({
+        findings: canonicalFinding.locations.map((location, index) => ({
+          ...crossScopeFinding,
+          identity: {
+            anchor: "reviewed-candidate",
+            instance: `source-${index + 1}`,
+          },
+          locations: [location, sharedSink],
+        })),
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+    const acceptedManualCompletion = runManualScopeVerifier();
+    expect(acceptedManualCompletion.status).toBe(0);
+    expect(acceptedManualCompletion.stderr).toBe("");
+
     for (const receipt of STANDARD_SCOPE_RECEIPTS.slice(1)) {
       await restore();
       await writeFile(
