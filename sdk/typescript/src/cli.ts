@@ -2935,8 +2935,26 @@ async function protectedHookExecutableRoots(
           ([name]) => name.toUpperCase() === "GIT_DIR",
         )?.[1]
       : environment["GIT_DIR"];
+  const gitDirectories = new Set<string>();
   if (selectedGitDirectory) {
-    roots.add(await realpath(resolve(repository, selectedGitDirectory)));
+    const selected = await canonicalProtectedHookRoot(
+      resolve(repository, selectedGitDirectory),
+    );
+    roots.add(selected);
+    gitDirectories.add(selected);
+  }
+  const selectedCommonDirectory =
+    process.platform === "win32"
+      ? Object.entries(environment).find(
+          ([name]) => name.toUpperCase() === "GIT_COMMON_DIR",
+        )?.[1]
+      : environment["GIT_COMMON_DIR"];
+  if (selectedCommonDirectory) {
+    roots.add(
+      await canonicalProtectedHookRoot(
+        resolve(repository, selectedCommonDirectory),
+      ),
+    );
   }
   const selectedWorktree =
     process.platform === "win32"
@@ -2945,15 +2963,31 @@ async function protectedHookExecutableRoots(
         )?.[1]
       : environment["GIT_WORK_TREE"];
   if (selectedWorktree) {
-    roots.add(await realpath(resolve(repository, selectedWorktree)));
+    roots.add(
+      await canonicalProtectedHookRoot(resolve(repository, selectedWorktree)),
+    );
   }
 
   for (const directory of new Set([invocationDirectory, repository])) {
     let current = directory;
     while (true) {
       try {
-        await lstat(join(current, ".git"));
+        const marker = join(current, ".git");
+        const metadata = await lstat(marker);
         roots.add(current);
+        if (metadata.isFile()) {
+          const contents = await readFile(marker, "utf8");
+          const matched = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(contents);
+          if (matched?.[1] !== undefined) {
+            const selected = await canonicalProtectedHookRoot(
+              resolve(current, matched[1]),
+            );
+            roots.add(selected);
+            gitDirectories.add(selected);
+          }
+        } else if (metadata.isDirectory()) {
+          gitDirectories.add(await canonicalProtectedHookRoot(marker));
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -2964,7 +2998,33 @@ async function protectedHookExecutableRoots(
     }
   }
 
+  for (const gitDirectory of gitDirectories) {
+    try {
+      const commonDirectory = (
+        await readFile(join(gitDirectory, "commondir"), "utf8")
+      ).trim();
+      if (commonDirectory.length > 0) {
+        roots.add(
+          await canonicalProtectedHookRoot(
+            resolve(gitDirectory, commonDirectory),
+          ),
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
   return [...roots];
+}
+
+async function canonicalProtectedHookRoot(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return resolve(path);
+  }
 }
 
 function targetFromArguments(arguments_: ScanArguments): ScanTarget {

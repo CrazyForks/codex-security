@@ -915,6 +915,116 @@ describe("CLI", () => {
     }
   });
 
+  test("ignores Git shims inside a linked worktree's common Git directory", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-common-git-")),
+    );
+    try {
+      const primary = join(root, "primary");
+      const linked = join(root, "linked");
+      execFileSync("git", ["init", "-q", primary], { timeout: 10_000 });
+      execFileSync(
+        "git",
+        [
+          "-C",
+          primary,
+          "-c",
+          "user.email=test@example.com",
+          "-c",
+          "user.name=Test",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "initial",
+        ],
+        { timeout: 10_000 },
+      );
+      execFileSync(
+        "git",
+        ["-C", primary, "worktree", "add", "-q", "--detach", linked],
+        {
+          timeout: 10_000,
+        },
+      );
+      const commonDirectory = execFileSync(
+        "git",
+        [
+          "-C",
+          linked,
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-common-dir",
+        ],
+        { encoding: "utf8", timeout: 10_000 },
+      ).trim();
+      const binaries = join(commonDirectory, "node_modules", ".bin");
+      await mkdir(binaries, { recursive: true });
+      const marker = join(root, "git-shim-executed");
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      const maliciousGit =
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
+      await writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 });
+      const environment = {
+        ...process.env,
+        PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+      };
+      const stdout = capture();
+      const stderr = capture();
+
+      const exitCode = await main(
+        ["install-hook", linked, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ currentDirectory: linked, environment }),
+      );
+      expect([0, 2]).toContain(exitCode);
+      if (exitCode === 2) {
+        expect(stderr.text()).toContain("A pre-commit hook already exists");
+      }
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts a selected Git worktree that has not been created yet", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-future-worktree-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      const gitDirectory = join(root, "git-directory");
+      await mkdir(repository);
+      execFileSync("git", ["init", "--bare", "-q", gitDirectory], {
+        timeout: 10_000,
+      });
+      const stdout = capture();
+      const stderr = capture();
+
+      const exitCode = await main(
+        ["install-hook", repository, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: repository,
+          environment: {
+            ...process.env,
+            GIT_DIR: gitDirectory,
+            GIT_WORK_TREE: join(root, "not-created-yet"),
+          },
+        }),
+      );
+      expect([0, 2]).toContain(exitCode);
+      if (exitCode === 2) {
+        expect(stderr.text()).toContain("A pre-commit hook already exists");
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
