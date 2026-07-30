@@ -53,10 +53,15 @@ function docx(text: string): Uint8Array {
   });
 }
 
-function pdf(text: string, pages = 1, compressed = false): Uint8Array {
+function pdf(
+  text: string,
+  pages = 1,
+  compressed = false,
+  streamPrefix = "",
+): Uint8Array {
   const escaped = text.replace(/[\\()]/gu, "\\$&");
   const chunks = escaped.match(/.{1,512}/gu) ?? [""];
-  const stream = `BT /F1 12 Tf 72 720 Td ${chunks
+  const stream = `${streamPrefix}BT /F1 12 Tf 72 720 Td ${chunks
     .map((chunk) => `(${chunk}) Tj`)
     .join(" ")} ET`;
   const streamBytes = compressed
@@ -277,6 +282,18 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     const oversized = join(root, "compressed.pdf");
     const compressed = pdf("x".repeat(300 * 1024), 32, true);
+    expect(compressed.byteLength).toBeLessThan(8 * 1024 * 1024);
+    await writeFile(oversized, compressed);
+
+    await expect(prepareKnowledgeBase([oversized])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+  });
+
+  test("rejects oversized compressed PDF streams before parsing operands", async () => {
+    const root = await temporaryDirectory();
+    const oversized = join(root, "compressed-operand.pdf");
+    const compressed = pdf("reviewable", 1, true, " ".repeat(9 * 1024 * 1024));
     expect(compressed.byteLength).toBeLessThan(8 * 1024 * 1024);
     await writeFile(oversized, compressed);
 

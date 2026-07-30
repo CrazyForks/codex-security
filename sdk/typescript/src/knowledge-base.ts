@@ -18,6 +18,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { inflateSync } from "node:zlib";
 import { unzipSync } from "fflate";
 
 const SUPPORTED_EXTENSIONS = new Set([
@@ -361,6 +362,59 @@ function decodeText(path: string, bytes: Uint8Array): string {
   }
 }
 
+function boundCompressedPdfStreams(
+  path: string,
+  bytes: Uint8Array,
+  signal?: AbortSignal,
+): void {
+  const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const contents = source.toString("latin1");
+  const filters = /\/(?:FlateDecode|Fl)(?=[\s/>[\]])/gu;
+  for (const filter of contents.matchAll(filters)) {
+    signal?.throwIfAborted();
+    const marker = filter.index;
+    const headerEnd = Math.min(contents.length, marker + 64 * 1024);
+    const header = contents.slice(marker, headerEnd);
+    const stream = /\bstream(?:\r\n|\r|\n)/u.exec(header);
+    if (stream?.index === undefined) continue;
+
+    const streamStart = marker + stream.index + stream[0].length;
+    const dictionaryStart = contents.lastIndexOf("<<", marker);
+    const dictionary = contents.slice(
+      Math.max(0, dictionaryStart),
+      streamStart,
+    );
+    const declared = /\/Length\s+(\d+)(?!\s+\d+\s+R)/u.exec(dictionary);
+    const length = declared?.[1] === undefined ? NaN : Number(declared[1]);
+    let streamEnd = Number.isSafeInteger(length)
+      ? streamStart + length
+      : contents.indexOf("\nendstream", streamStart);
+    if (streamEnd === -1)
+      streamEnd = contents.indexOf("\rendstream", streamStart);
+    if (streamEnd < streamStart || streamEnd > source.byteLength) continue;
+
+    try {
+      inflateSync(source.subarray(streamStart, streamEnd), {
+        maxOutputLength: MAX_EXTRACTED_DOCUMENT_BYTES,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ERR_BUFFER_TOO_LARGE"
+      ) {
+        throw new KnowledgeBaseLimitError(
+          `Knowledge base document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte extracted-text limit: ${path}`,
+        );
+      }
+      throw new Error(
+        `Knowledge base PDF compressed stream cannot be safely bounded: ${path}`,
+        { cause: error },
+      );
+    }
+  }
+}
+
 async function extractPdf(
   path: string,
   bytes: Uint8Array,
@@ -368,6 +422,7 @@ async function extractPdf(
 ): Promise<string> {
   signal?.throwIfAborted();
   try {
+    boundCompressedPdfStreams(path, bytes, signal);
     const { getDocument, VerbosityLevel } = await import(
       "pdfjs-dist/legacy/build/pdf.mjs"
     );
