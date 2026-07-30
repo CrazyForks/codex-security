@@ -907,21 +907,22 @@ async function publishReceiptRepair(
       ) {
         throw error;
       }
-      const destination = await openReceiptLedger(
-        path,
-        constants.O_WRONLY | constants.O_TRUNC,
-      );
-      const source = await open(replacement, constants.O_RDONLY);
+      const destination = await openReceiptLedger(path, constants.O_RDWR);
       try {
-        for await (const chunk of source.createReadStream({
-          autoClose: false,
-          highWaterMark: 64 * 1024,
-        })) {
-          await destination.writeFile(chunk);
+        const source = await open(replacement, constants.O_RDONLY);
+        try {
+          await destination.truncate(0);
+          for await (const chunk of source.createReadStream({
+            autoClose: false,
+            highWaterMark: 64 * 1024,
+          })) {
+            await destination.writeFile(chunk);
+          }
+          await destination.sync();
+        } finally {
+          await source.close();
         }
-        await destination.sync();
       } finally {
-        await source.close();
         await destination.close();
       }
       await rm(replacement, { force: true });
