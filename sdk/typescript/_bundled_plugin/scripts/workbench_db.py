@@ -384,7 +384,6 @@ def require_diff_target(
                     "Working-tree contents changed after they were selected. "
                     "Select Uncommitted changes again."
                 )
-            current_digest = content_digest
         return {
             "kind": kind,
             "baseRevision": current_head,

@@ -238,6 +238,31 @@ describe("diff rank input", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe(await realpath(trustedGit!));
     await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const nested = join(fixture.repository, "vendor", "nested");
+    await mkdir(nested, { recursive: true });
+    git(nested, "init", "-q");
+    const nestedResult = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "from pathlib import Path",
+          "import sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_constants import trusted_git_executable",
+          "print(trusted_git_executable(Path(sys.argv[2])))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        nested,
+      ],
+      { encoding: "utf8", env: environment },
+    );
+    expect(nestedResult.status, nestedResult.stderr).toBe(0);
+    expect(nestedResult.stdout.trim()).toBe(await realpath(trustedGit!));
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test.skipIf(process.platform === "win32")(
@@ -410,6 +435,12 @@ describe("diff rank input", () => {
     );
     git(fixture.repository, "add", "--force", path);
 
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview: "replacement dependency",
+    });
+    await rm(join(fixture.repository, path));
     expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
       path,
       area: "diff",
@@ -929,7 +960,7 @@ describe("diff rank input", () => {
     };
 
     expect(snapshot.modern).not.toBe(snapshot.legacy);
-    expect(snapshot.selected).toBe(snapshot.legacy);
+    expect(snapshot.selected).toBe(snapshot.modern);
     expect(snapshot.warning).toBeNull();
   });
 

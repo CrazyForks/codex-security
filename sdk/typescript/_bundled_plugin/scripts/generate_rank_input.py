@@ -818,7 +818,10 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
         combined = dict(staged)
-        combined.update(unstaged)
+        for path, status in unstaged:
+            if status == "D" and combined.get(path) == "T":
+                continue
+            combined[path] = status
         return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
@@ -867,7 +870,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     f"Git submodule pinned to commit {gitlink_revision}",
                     False,
                 )
-            elif status == "A" and not path.exists() and not path.is_symlink():
+            elif status in {"A", "T"} and not path.exists() and not path.is_symlink():
                 preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
             else:
                 preview, is_binary = confined_diff_preview(repo, path, args.preview_bytes)
