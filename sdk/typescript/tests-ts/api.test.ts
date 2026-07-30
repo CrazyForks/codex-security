@@ -3383,9 +3383,9 @@ describe("CodexSecurity orchestration", () => {
       ],
       { stdio: "pipe" },
     );
-    expect(await readFile(inventory, "utf8")).toBe(
-      `${JSON.stringify({ path: "submodule/app.ts" })}\n`,
-    );
+    expect(JSON.parse((await readFile(inventory, "utf8")).trim())).toEqual({
+      path: "submodule/app.ts",
+    });
     execFileSync(
       python!,
       [
