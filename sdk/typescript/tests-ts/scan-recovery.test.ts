@@ -337,6 +337,79 @@ describe("malformed scan artifact recovery", () => {
     }
   });
 
+  test("completes standard no-finding scans with authoritative compact review evidence", async () => {
+    const fixture = await startDraftScan();
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const discovery = join(fixture.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+    surface.disposition = "no_issue_found";
+    surface.receiptRefs = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeFile(join(discovery, "in_scope_files.txt"), "src/extract.py\n"),
+      writeFile(join(discovery, "candidate_ledger.jsonl"), ""),
+      workbench(fixture, [
+        "update-progress",
+        "--scan-id",
+        fixture.scanId,
+        "--review-items-total",
+        "1",
+        "--review-items-completed",
+        "1",
+      ]),
+    ]);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(0);
+    const manifest = await readJson<{
+      scan: { artifacts: Array<{ path: string }> };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(manifest.scan.artifacts.map((artifact) => artifact.path)).toEqual(
+      expect.arrayContaining([
+        "artifacts/02_discovery/candidate_ledger.jsonl",
+        "artifacts/02_discovery/in_scope_files.txt",
+      ]),
+    );
+    expect(
+      (
+        (await readJson<CoverageDocument>(coveragePath))
+          .surfaces as CoverageSurface[]
+      )[0],
+    ).toMatchObject({ disposition: "no_issue_found", receiptRefs: [] });
+  });
+
+  test("rejects a compact candidate ledger before host-owned review progress is complete", async () => {
+    const fixture = await startDraftScan();
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const discovery = join(fixture.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+    surface.disposition = "no_issue_found";
+    surface.receiptRefs = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeFile(join(discovery, "in_scope_files.txt"), "src/extract.py\n"),
+      writeFile(join(discovery, "candidate_ledger.jsonl"), ""),
+    ]);
+
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
+  });
+
   test("exports trusted receiptless legacy scans to SARIF without weakening fresh validation", async () => {
     const fixture = await startDraftScan();
     await completeScan(fixture);

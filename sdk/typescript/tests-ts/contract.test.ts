@@ -389,17 +389,31 @@ describe("canonical scan contract", () => {
     const coveragePath = join(scanDir, "coverage.json");
     const manifestPath = join(scanDir, "scan-manifest.json");
     const receipt = "artifacts/02_discovery/work_ledger.jsonl";
+    const worklist = "artifacts/02_discovery/deep_review_input.jsonl";
     const receiptPath = join(scanDir, receipt);
     const findings = await readJson(findingsPath);
     const coverage = await readJson(coveragePath);
     const manifest = await readJson(manifestPath);
     await mkdir(dirname(receiptPath), { recursive: true });
-    await writeFile(receiptPath, '{"status":"reviewed"}\n');
-    manifest["scan"]["artifacts"].push({
-      path: receipt,
-      sha256: "",
-      mediaType: "application/x-ndjson",
-    });
+    await writeFile(
+      receiptPath,
+      `${JSON.stringify({
+        path: "src/example.py",
+        status: "reviewed",
+        evidence: "Reviewed the complete source file.",
+      })}\n`,
+    );
+    await writeFile(
+      join(scanDir, worklist),
+      `${JSON.stringify({ path: "src/example.py", area: "source" })}\n`,
+    );
+    for (const path of [receipt, worklist]) {
+      manifest["scan"]["artifacts"].push({
+        path,
+        sha256: "",
+        mediaType: "application/x-ndjson",
+      });
+    }
     findings["findings"] = [];
     coverage["surfaces"] = [
       {
@@ -519,6 +533,11 @@ describe("canonical scan contract", () => {
       ["artifacts/02_discovery/work_ledger.jsonl", ""],
       ["artifacts/02_discovery/work_ledger.jsonl", "not a receipt\n"],
       ["artifacts/02_discovery/work_ledger.jsonl", '{"status":"claimed"}\n'],
+      ["artifacts/02_discovery/work_ledger.jsonl", '{"status":"reviewed"}\n'],
+      [
+        "artifacts/02_discovery/candidate_ledger.jsonl",
+        '{"status":"reviewed"}\n',
+      ],
     ] as const) {
       const scanDir = await copyExample();
       const findingsPath = join(scanDir, "findings.json");
@@ -554,6 +573,57 @@ describe("canonical scan contract", () => {
         "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
       );
     }
+  });
+
+  test("streams review ledgers larger than the source-file size limit", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const receipt = "artifacts/02_discovery/work_ledger.jsonl";
+    const worklist = "artifacts/02_discovery/deep_review_input.jsonl";
+    await mkdir(join(scanDir, "artifacts", "02_discovery"), {
+      recursive: true,
+    });
+    const claimed = `${JSON.stringify({
+      path: "src/example.py",
+      status: "claimed",
+      evidence: "x".repeat(4096),
+    })}\n`;
+    const completed = `${JSON.stringify({
+      path: "src/example.py",
+      status: "complete",
+      evidence: "Read the source file in full.",
+    })}\n`;
+    await writeFile(join(scanDir, receipt), claimed.repeat(2700) + completed);
+    await writeFile(
+      join(scanDir, worklist),
+      `${JSON.stringify({ path: "src/example.py", area: "source" })}\n`,
+    );
+    const findings = await readJson(findingsPath);
+    const coverage = await readJson(coveragePath);
+    const manifest = await readJson(manifestPath);
+    findings["findings"] = [];
+    coverage["surfaces"][0]["disposition"] = "no_issue_found";
+    coverage["surfaces"][0]["receiptRefs"] = [receipt];
+    for (const path of [receipt, worklist]) {
+      manifest["scan"]["artifacts"].push({
+        path,
+        sha256: "",
+        mediaType: "application/x-ndjson",
+      });
+    }
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeJson(manifestPath, manifest),
+    ]);
+    await reseal(scanDir);
+    await writeFile(join(scanDir, "report.md"), "# Existing sealed scan\n");
+
+    const result = runPythonContractTool(scanDir, "validate_scan_contract.py");
+
+    expect(result.status, result.stderr).toBe(0);
   });
 
   test("honors cancellation during contract validation", async () => {

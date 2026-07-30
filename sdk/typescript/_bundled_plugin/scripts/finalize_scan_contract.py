@@ -69,6 +69,8 @@ CONTRACT_DOCUMENT_MAX_BYTES = {
 }
 SCHEMA_DOCUMENT_MAX_BYTES = 4 * 1024 * 1024
 JSON_DOCUMENT_READ_CHUNK_SIZE = 64 * 1024
+REVIEW_LEDGER_MAX_BYTES = 256 * 1024 * 1024
+REVIEW_LEDGER_ROW_MAX_BYTES = 1024 * 1024
 MAX_JSON_DEPTH = 256
 MAX_JSON_INTEGER = (1 << 53) - 1
 MAX_SCHEMA_NODES = 8192
@@ -1342,6 +1344,7 @@ def _validate_coverage(
     *,
     enforce_complete_review: bool = False,
     authoritative_empty_scope_inventory: str | None = None,
+    authoritative_review_progress: dict[str, Any] | None = None,
 ) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
@@ -1372,6 +1375,9 @@ def _validate_coverage(
             )
     has_verified_review = has_reviewed_surface and (
         has_findings
+        or _has_verified_standard_scan_review(
+            scan_dir, scan, coverage, authoritative_review_progress
+        )
         or any(
             isinstance(surface, dict)
             and surface.get("disposition") != "not_applicable"
@@ -1456,26 +1462,139 @@ def _has_verified_review_receipt(scan_dir: Path, reference: str) -> bool:
     if reference != "artifacts/02_discovery/work_ledger.jsonl":
         return False
     try:
-        descriptor = open_scan_local_file_descriptor(scan_dir, reference, "review receipt")
-        with os.fdopen(descriptor, "rb") as ledger:
-            if os.fstat(ledger.fileno()).st_size > SOURCE_READ_MAX_BYTES:
+        expected_paths = {
+            _review_row_path(row)
+            for row in _review_jsonl_rows(
+                scan_dir, "artifacts/02_discovery/deep_review_input.jsonl"
+            )
+        }
+        if not expected_paths:
+            return False
+        reviewed_paths: set[str] = set()
+        for receipt in _review_jsonl_rows(scan_dir, reference):
+            status = receipt.get("status")
+            if status not in {"reviewed", "completed", "complete"}:
+                continue
+            path = _review_row_path(receipt)
+            evidence = next(
+                (
+                    value
+                    for key in ("evidence", "note", "notes", "summary")
+                    if isinstance(value := receipt.get(key), str) and value.strip()
+                ),
+                None,
+            )
+            if path not in expected_paths or evidence is None:
                 return False
-            for raw_line in ledger:
-                if len(raw_line) > JSON_DOCUMENT_READ_CHUNK_SIZE:
-                    return False
-                try:
-                    receipt = _loads_json(raw_line.decode("utf-8"))
-                except (UnicodeError, ValueError):
-                    return False
-                if isinstance(receipt, dict) and receipt.get("status") in {
-                    "reviewed",
-                    "completed",
-                    "complete",
-                }:
-                    return True
-    except (ContractError, OSError):
+            reviewed_paths.add(path)
+        return reviewed_paths == expected_paths
+    except (ContractError, OSError, UnicodeError, ValueError):
         return False
-    return False
+
+
+def _review_jsonl_rows(scan_dir: Path, reference: str) -> Iterator[dict[str, Any]]:
+    descriptor = open_scan_local_file_descriptor(scan_dir, reference, "review evidence")
+    with os.fdopen(descriptor, "rb") as ledger:
+        if os.fstat(ledger.fileno()).st_size > REVIEW_LEDGER_MAX_BYTES:
+            raise ContractError("review evidence exceeds its size limit")
+        while raw_line := ledger.readline(REVIEW_LEDGER_ROW_MAX_BYTES + 1):
+            if len(raw_line) > REVIEW_LEDGER_ROW_MAX_BYTES or not raw_line.strip():
+                raise ContractError("review evidence contains an invalid JSONL row")
+            row = _loads_json(raw_line.decode("utf-8"))
+            if not isinstance(row, dict):
+                raise ContractError("review evidence contains a non-object JSONL row")
+            _require_safe_json_value(row, "review evidence")
+            yield row
+
+
+def _review_row_path(row: dict[str, Any]) -> str:
+    path = row.get("path")
+    if not isinstance(path, str):
+        raise ContractError("review evidence row is missing its repository path")
+    return _require_safe_relative_path(path, "review evidence repository path")
+
+
+def _has_verified_standard_scan_review(
+    scan_dir: Path,
+    scan: dict[str, Any],
+    coverage: dict[str, Any],
+    authoritative_review_progress: dict[str, Any] | None,
+) -> bool:
+    if coverage.get("mode") not in {"repository", "scoped_path"}:
+        return False
+
+    ledger_path = "artifacts/02_discovery/candidate_ledger.jsonl"
+    inventory_path = "artifacts/02_discovery/in_scope_files.txt"
+    if scan.get("artifacts") is not None:
+        sealed_paths = {
+            artifact.get("path")
+            for artifact in scan["artifacts"]
+            if isinstance(artifact, dict)
+        }
+        if ledger_path not in sealed_paths or inventory_path not in sealed_paths:
+            return False
+
+    try:
+        descriptor = open_scan_local_file_descriptor(scan_dir, inventory_path, "scope inventory")
+        with os.fdopen(descriptor, "rb") as inventory:
+            if os.fstat(inventory.fileno()).st_size > REVIEW_LEDGER_MAX_BYTES:
+                return False
+            scope_paths: set[str] = set()
+            while raw_line := inventory.readline(REVIEW_LEDGER_ROW_MAX_BYTES + 1):
+                if len(raw_line) > REVIEW_LEDGER_ROW_MAX_BYTES:
+                    return False
+                path = raw_line.decode("utf-8").rstrip("\r\n")
+                if not path:
+                    return False
+                normalized = _require_safe_relative_path(path, "review inventory path")
+                if normalized in scope_paths:
+                    return False
+                scope_paths.add(normalized)
+        if not scope_paths:
+            return False
+
+        if authoritative_review_progress is not None:
+            scope_count = authoritative_review_progress.get("scopeFileCount")
+            review_total = authoritative_review_progress.get("reviewItemsTotal")
+            review_completed = authoritative_review_progress.get("reviewItemsCompleted")
+            if (
+                not isinstance(scope_count, int)
+                or isinstance(scope_count, bool)
+                or scope_count != len(scope_paths)
+                or review_total != scope_count
+                or review_completed != scope_count
+            ):
+                return False
+
+        for candidate in _review_jsonl_rows(scan_dir, ledger_path):
+            candidate_id = candidate.get("candidate_id")
+            locations = candidate.get("locations")
+            validation = candidate.get("validation")
+            if (
+                not isinstance(candidate_id, str)
+                or not candidate_id.strip()
+                or not isinstance(locations, list)
+                or not locations
+                or not isinstance(validation, dict)
+            ):
+                return False
+            if not any(
+                isinstance(location, dict)
+                and isinstance(location.get("path"), str)
+                and location["path"] in scope_paths
+                for location in locations
+            ):
+                return False
+            disposition = validation.get("disposition")
+            if disposition not in {"suppressed", "not_applicable", "reportable"}:
+                return False
+            if disposition == "reportable":
+                attack_path = candidate.get("attack_path")
+                if not isinstance(attack_path, dict) or attack_path.get("decision") != "ignore":
+                    return False
+        return True
+    except (ContractError, OSError, UnicodeError, ValueError):
+        return False
 
 
 def _validate_manifest(manifest: dict[str, Any]) -> None:
@@ -2537,6 +2656,7 @@ def _prepare_scan_finalization(
         findings,
         enforce_complete_review=enforce_fresh_scan,
         authoritative_empty_scope_inventory=authoritative_empty_scope_inventory,
+        authoritative_review_progress=completion_binding,
     )
     _validate_canonical_schemas_before_projection(manifest, findings, coverage, schema_dir)
     _require_derived_writeup_files(scan_dir, findings)
@@ -2571,6 +2691,26 @@ def _prepare_scan_finalization(
             for ref in sorted(
                 {
                     *_coverage_receipt_refs(coverage),
+                    *(
+                        [
+                            "artifacts/02_discovery/candidate_ledger.jsonl",
+                            "artifacts/02_discovery/in_scope_files.txt",
+                        ]
+                        if coverage.get("completeness") == "complete"
+                        and _has_verified_standard_scan_review(
+                            scan_dir, scan, coverage, completion_binding
+                        )
+                        else []
+                    ),
+                    *(
+                        ["artifacts/02_discovery/deep_review_input.jsonl"]
+                        if coverage.get("completeness") == "complete"
+                        and any(
+                            _has_verified_review_receipt(scan_dir, reference)
+                            for reference in _coverage_receipt_refs(coverage)
+                        )
+                        else []
+                    ),
                     *(
                         [authoritative_empty_scope_inventory]
                         if coverage.get("completeness") == "complete"

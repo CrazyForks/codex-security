@@ -601,7 +601,12 @@ def workbench_completion_binding(
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
     progress_row = connection.execute(
-        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
+        """
+        SELECT scope_file_count, review_items_total, review_items_completed
+        FROM scan_progress
+        WHERE scan_id = ?
+        """,
+        (scan["id"],),
     ).fetchone()
     if progress_row is None:
         raise SystemExit("Codex Security scan is missing authoritative scope progress.")
@@ -617,6 +622,8 @@ def workbench_completion_binding(
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
         "scopeFileCount": scope_file_count,
+        "reviewItemsTotal": progress_row["review_items_total"],
+        "reviewItemsCompleted": progress_row["review_items_completed"],
         **(
             {"emptyScopeInventory": AUTHORITATIVE_EMPTY_SCOPE_INVENTORY}
             if scope_file_count == 0
