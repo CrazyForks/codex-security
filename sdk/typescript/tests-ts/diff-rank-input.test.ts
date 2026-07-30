@@ -795,12 +795,38 @@ describe("diff rank input", () => {
       input: `${index}\n`,
     });
     expect(updated.status, updated.stderr).toBe(0);
+    await mkdir(join(fixture.repository, path), { recursive: true });
 
     const row = (await runDiffRankInput(fixture, "local-patch")).find(
       (candidate) => candidate.path === path,
     );
 
     expect(row?.preview).toContain("Merge base (stage 1):");
+    expect(row?.preview).toContain("Ours (stage 2):");
+    expect(row?.preview).toContain("Theirs (stage 3):");
+    expect(row?.preview).toContain(
+      `Git submodule pinned to commit ${fixture.base}`,
+    );
+  });
+
+  test("reviews conflicted submodule stages under excluded dependency directories", async () => {
+    const fixture = await createRepository();
+    const path = "vendor/dependency";
+    const index = [
+      `0 ${"0".repeat(40)}\t${path}`,
+      ...[2, 3].map((stage) => `160000 ${fixture.base} ${stage}\t${path}`),
+    ].join("\n");
+    const updated = spawnSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+      input: `${index}\n`,
+    });
+    expect(updated.status, updated.stderr).toBe(0);
+
+    const row = (await runDiffRankInput(fixture, "local-patch")).find(
+      (candidate) => candidate.path === path,
+    );
+
     expect(row?.preview).toContain("Ours (stage 2):");
     expect(row?.preview).toContain("Theirs (stage 3):");
     expect(row?.preview).toContain(
@@ -1172,6 +1198,58 @@ describe("diff rank input", () => {
       "--cacheinfo",
       `100644,${replacement},${path}`,
     );
+
+    expect(digest()).not.toBe(previous);
+  });
+
+  test("binds every unresolved Git merge stage into local-patch snapshot digests", async () => {
+    const fixture = await createRepository();
+    const path = "src/app.ts";
+    const objectId = (contents: string): string =>
+      execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: fixture.repository,
+        encoding: "utf8",
+        input: contents,
+      }).trim();
+    const stageIds = ["base", "ours", "theirs"].map((value) =>
+      objectId(`export const value = '${value}';\n`),
+    );
+    const setStages = (identifiers: string[]): void => {
+      const index = [
+        `0 ${"0".repeat(40)}\t${path}`,
+        ...identifiers.map(
+          (identifier, stage) => `100644 ${identifier} ${stage + 1}\t${path}`,
+        ),
+      ].join("\n");
+      const updated = spawnSync("git", ["update-index", "--index-info"], {
+        cwd: fixture.repository,
+        encoding: "utf8",
+        input: `${index}\n`,
+      });
+      expect(updated.status, updated.stderr).toBe(0);
+    };
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const digest = (): string =>
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from workbench_target import worktree_content_digest; print(worktree_content_digest(Path(sys.argv[2])))",
+          join(PLUGIN_ROOT, "scripts"),
+          fixture.repository,
+        ],
+        { encoding: "utf8" },
+      ).trim();
+
+    setStages(stageIds);
+    const previous = digest();
+    setStages([
+      objectId("export const value = 'different base';\n"),
+      ...stageIds.slice(1),
+    ]);
 
     expect(digest()).not.toBe(previous);
   });

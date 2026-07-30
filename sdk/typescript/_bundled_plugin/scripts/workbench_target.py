@@ -145,6 +145,7 @@ def worktree_content_digest_for_context(
     if legacy:
         staged = b""
         unstaged = b""
+        conflicted_index = b""
     else:
         staged = git_bytes(
             repository,
@@ -174,6 +175,28 @@ def worktree_content_digest_for_context(
             git_dir=git_dir,
             work_tree=work_tree,
         )
+        index_entries = git_bytes(
+            repository,
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            pathspec,
+            git_dir=git_dir,
+            work_tree=work_tree,
+        )
+        if index_entries is None:
+            raise SystemExit("Could not snapshot the selected Git index.")
+        conflicts: list[bytes] = []
+        for entry in (row for row in index_entries.split(b"\0") if row):
+            try:
+                metadata, _path = entry.split(b"\t", 1)
+                _mode, _object_id, stage = metadata.split(b" ", 2)
+            except ValueError as error:
+                raise SystemExit("Could not snapshot the selected Git index.") from error
+            if stage != b"0":
+                conflicts.append(entry)
+        conflicted_index = b"\0".join(sorted(conflicts))
     untracked = git_bytes(
         repository,
         "ls-files",
@@ -193,6 +216,8 @@ def worktree_content_digest_for_context(
     if staged or unstaged:
         update_digest_field(digest, b"index-diff", staged)
         update_digest_field(digest, b"working-tree-diff", unstaged)
+    if conflicted_index:
+        update_digest_field(digest, b"conflicted-index", conflicted_index)
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
         path = (work_tree or repository) / relative_path

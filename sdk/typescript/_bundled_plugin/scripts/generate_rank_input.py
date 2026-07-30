@@ -936,6 +936,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         rel = path.relative_to(repo)
         gitlink_revision = None
         index_is_gitlink = False
+        index_has_conflicted_gitlink = False
         if args.mode == "revisions":
             revisions = (
                 (args.base, args.head)
@@ -949,6 +950,9 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         else:
             gitlink_revision = index_gitlink_revision(repo, rel)
             index_is_gitlink = gitlink_revision is not None
+            if gitlink_revision is None and (status == "U" or path.is_dir()):
+                gitlink_revision = index_gitlink_revision(repo, rel, allow_conflicted=True)
+                index_has_conflicted_gitlink = gitlink_revision is not None
             if (
                 gitlink_revision is None
                 and status in {"D", "T"}
@@ -970,7 +974,9 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     f"Git submodule pinned to commit {gitlink_revision}",
                     False,
                 )
-            elif is_staged and status == "U" and path.is_symlink():
+            elif is_staged and (status == "U" or index_has_conflicted_gitlink) and (
+                path.is_symlink() or path.is_dir() or index_has_conflicted_gitlink
+            ):
                 preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
             elif is_staged and not path.exists() and not path.is_symlink():
                 preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
@@ -1054,7 +1060,9 @@ def is_immutable_gitlink(repo: Path, head: str, relative: Path) -> bool:
     return len(entries) == 1 and entries[0].startswith(b"160000 commit ")
 
 
-def index_gitlink_revision(repo: Path, relative: Path) -> str | None:
+def index_gitlink_revision(
+    repo: Path, relative: Path, *, allow_conflicted: bool = False
+) -> str | None:
     executable = trusted_git_executable(repo)
     if executable is None:
         raise SystemExit("Git is unavailable on the trusted executable path.")
@@ -1083,16 +1091,21 @@ def index_gitlink_revision(repo: Path, relative: Path) -> str | None:
     if listed.returncode != 0:
         raise SystemExit("Could not inspect the selected Git diff.")
     entries = [entry for entry in listed.stdout.split(b"\0") if entry]
-    if len(entries) != 1:
+    if len(entries) != 1 and not allow_conflicted:
         return None
-    try:
-        metadata, path = entries[0].split(b"\t", 1)
-        mode, object_id, _stage = metadata.split(b" ", 2)
-    except ValueError:
-        return None
-    if mode != b"160000" or path != os.fsencode(relative.as_posix()):
-        return None
-    return object_id.decode("ascii")
+    for entry in entries:
+        try:
+            metadata, path = entry.split(b"\t", 1)
+            mode, object_id, stage = metadata.split(b" ", 2)
+        except ValueError:
+            return None
+        if (
+            mode == b"160000"
+            and path == os.fsencode(relative.as_posix())
+            and (stage == b"0" or allow_conflicted)
+        ):
+            return object_id.decode("ascii")
+    return None
 
 
 def make_rank_shards(args: argparse.Namespace) -> None:
