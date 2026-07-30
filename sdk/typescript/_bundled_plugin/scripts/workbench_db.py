@@ -43,7 +43,7 @@ from filesystem_identity import serialize_filesystem_identity as serialize_files
 from filesystem_identity import (
     stored_filesystem_identity_matches as stored_filesystem_identity_matches,
 )
-from generate_rank_input import standard_scope_exclusions
+from generate_rank_input import standard_scope_exclusions, verify_scope_coverage
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -1464,6 +1464,7 @@ def complete_scan_locked(
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        verify_standard_scope_completion(scan, scan_dir)
         require_recorded_manifest_digest(scan, scan_dir)
         verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
         try:
@@ -1491,6 +1492,7 @@ def complete_scan_locked(
     if warning is not None and warning not in warnings:
         warnings.append(warning)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    verify_standard_scope_completion(scan, scan_dir)
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
     if scan["recipe_json"] is not None:
@@ -1590,6 +1592,22 @@ def complete_scan_locked(
         connection.rollback()
         raise
     return scan_context(connection, scan["id"])
+
+
+def verify_standard_scope_completion(scan: sqlite3.Row, scan_dir: Path) -> None:
+    if scan["mode"] != "standard":
+        return
+    durable = scan_dir / "artifacts" / "02_discovery" / "scope_inventory.jsonl"
+    if not durable.exists():
+        return
+    inventory = Path(os.environ.get("CODEX_SECURITY_SCOPE_INVENTORY_FILE", durable))
+    verify_scope_coverage(
+        argparse.Namespace(
+            repo=scan["target_path"],
+            inventory=str(inventory),
+            scan_dir=str(scan_dir),
+        )
+    )
 
 
 def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:

@@ -240,6 +240,28 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
+  test("verifies app-backed standard coverage before publishing scan completion", async () => {
+    const fixture = await startDraftScan();
+    const discovery = join(fixture.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    await writeFile(join(discovery, "scope_inventory.jsonl"), "");
+    const before = await readFile(
+      join(fixture.scanDir, "scan-manifest.json"),
+      "utf8",
+    );
+
+    await expect(completeScan(fixture)).rejects.toThrow("Scope-review ledger");
+    const context = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((context["scan"] as ScanSummary).progress.status).toBe("running");
+    expect(
+      await readFile(join(fixture.scanDir, "scan-manifest.json"), "utf8"),
+    ).toBe(before);
+  });
+
   test("rejects model-edited persisted scope exclusions against the protected snapshot", async () => {
     const fixture = await startDraftScan();
     const scope = (
