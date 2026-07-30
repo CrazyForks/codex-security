@@ -65,9 +65,12 @@ function pdf(
     indirectLength?: boolean;
     indirectFilter?: boolean;
     indirectFilterArray?: boolean;
+    indirectCommentedFilterArray?: boolean;
+    indirectContentsArray?: boolean;
     indirectValuePrefix?: string;
     indirectValueComment?: string;
     imageBytes?: Buffer;
+    formBytes?: Buffer;
     headerComment?: string;
     dictionaryPrefix?: string;
     streamComment?: string;
@@ -88,29 +91,39 @@ function pdf(
   const directFilter =
     options.filter ?? (compressed ? "/FlateDecode" : undefined);
   const extraStreams = options.extraStreams ?? 0;
-  const length = options.indirectLength
-    ? `${content + extraStreams + 1} 0 R`
-    : String(streamBytes.byteLength);
-  const indirectFilter = options.indirectFilter || options.indirectFilterArray;
-  const filterReference = `${content + extraStreams + 1 + (options.indirectLength ? 1 : 0)} 0 R`;
+  let nextObject = content + extraStreams + 1;
+  const lengthObject = options.indirectLength ? nextObject++ : undefined;
+  const indirectFilter =
+    options.indirectFilter ||
+    options.indirectFilterArray ||
+    options.indirectCommentedFilterArray;
+  const filterObject = indirectFilter ? nextObject++ : undefined;
+  const filterNameObject = options.indirectCommentedFilterArray
+    ? nextObject++
+    : undefined;
+  const contentsArrayObject = options.indirectContentsArray
+    ? nextObject++
+    : undefined;
+  const imageObject =
+    options.imageBytes === undefined ? undefined : nextObject++;
+  const formObject = options.formBytes === undefined ? undefined : nextObject++;
+  const length =
+    lengthObject === undefined
+      ? String(streamBytes.byteLength)
+      : `${lengthObject} 0 R`;
+  const filterReference = `${filterObject} 0 R`;
   const filter = options.indirectFilterArray
     ? `[${filterReference}]`
-    : options.indirectFilter
+    : options.indirectFilter || options.indirectCommentedFilterArray
       ? filterReference
       : directFilter;
-  const imageObject =
-    content +
-    extraStreams +
-    1 +
-    (options.indirectLength ? 1 : 0) +
-    (indirectFilter ? 1 : 0);
   const streamObject = `<< ${options.dictionaryPrefix ?? ""}/Length ${length}${filter === undefined ? "" : ` /Filter ${filter}`} >>${options.streamComment === undefined ? "\n" : ` ${options.streamComment}\n`}stream\n${streamBytes.toString("latin1")}\nendstream`;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     `<< /Type /Pages /Kids [${pageObjects.map((number) => `${number} 0 R`).join(" ")}] /Count ${pages} >>`,
     ...pageObjects.map(
       () =>
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 2000000 792] /Resources << /Font << /F1 ${font} 0 R >>${options.imageBytes === undefined ? "" : ` /XObject << /Im1 ${imageObject} 0 R >>`} >> /Contents ${content} 0 R >>`,
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 2000000 792] /Resources << /Font << /F1 ${font} 0 R >>${imageObject === undefined && formObject === undefined ? "" : ` /XObject <<${imageObject === undefined ? "" : ` /Im1 ${imageObject} 0 R`}${formObject === undefined ? "" : ` /Fm1 ${formObject} 0 R`} >>`} >> /Contents ${contentsArrayObject ?? content} 0 R >>`,
     ),
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     streamObject,
@@ -122,13 +135,20 @@ function pdf(
       : []),
     ...(indirectFilter
       ? [
-          `${options.indirectValuePrefix ?? ""}${directFilter ?? "/FlateDecode"}${options.indirectValueComment ?? ""}`,
+          `${options.indirectValuePrefix ?? ""}${filterNameObject === undefined ? directFilter ?? "/FlateDecode" : `[${filterNameObject} % valid filter comment\n0 R]`}${options.indirectValueComment ?? ""}`,
         ]
       : []),
+    ...(filterNameObject === undefined ? [] : [directFilter ?? "/FlateDecode"]),
+    ...(contentsArrayObject === undefined ? [] : [`[${content} 0 R]`]),
     ...(options.imageBytes === undefined
       ? []
       : [
           `<< /Type /XObject /Subtype /Image /Width 1024 /Height ${Math.ceil(options.imageBytes.byteLength / 1024)} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${deflateSync(options.imageBytes).byteLength} /Filter /FlateDecode >>\nstream\n${deflateSync(options.imageBytes).toString("latin1")}\nendstream`,
+        ]),
+    ...(options.formBytes === undefined
+      ? []
+      : [
+          `<< /Type /XObject /Subtype /Form /Foo << /Subtype /Image >> /BBox [0 0 1 1] /Length ${deflateSync(options.formBytes).byteLength} /Filter /FlateDecode >>\nstream\n${deflateSync(options.formBytes).toString("latin1")}\nendstream`,
         ]),
   ];
   let output = `%PDF-1.4\n${options.headerComment === undefined ? "" : `% ${options.headerComment}\n`}`;
@@ -639,6 +659,10 @@ describe("scan knowledge bases", () => {
     const indirect = join(root, "indirect.pdf");
     const indirectFilter = join(root, "indirect-filter.pdf");
     const indirectFilterArray = join(root, "indirect-filter-array.pdf");
+    const commentedIndirectFilterArray = join(
+      root,
+      "commented-indirect-filter-array.pdf",
+    );
     const commentedIndirect = join(root, "commented-indirect.pdf");
     const leadingCommentedIndirect = join(root, "leading-comment-indirect.pdf");
     const escaped = join(root, "escaped.pdf");
@@ -663,6 +687,12 @@ describe("scan knowledge bases", () => {
       indirectFilterArray,
       pdf("Indirect array stream filter", 1, true, "", {
         indirectFilterArray: true,
+      }),
+    );
+    await writeFile(
+      commentedIndirectFilterArray,
+      pdf("Commented indirect array filter", 1, true, "", {
+        indirectCommentedFilterArray: true,
       }),
     );
     await writeFile(
@@ -707,6 +737,7 @@ describe("scan knowledge bases", () => {
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
       [
         "ASCII85 then Flate",
+        "Commented indirect array filter",
         "Commented indirect values",
         "Escaped PDF filter",
         "Indirect array stream filter",
@@ -814,6 +845,45 @@ describe("scan knowledge bases", () => {
     ]);
   });
 
+  test("bounds sample-level work in bit-packed TIFF cross-reference predictors", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "bit-packed-tiff-predictor.pdf");
+    const original = xrefStreamPdf(
+      pdf("Bound the packed predictor", 1, true, "", {
+        indirectLength: true,
+        indirectFilter: true,
+      }),
+      false,
+      0,
+      { tiffPredictor: true },
+    ).toString("latin1");
+    const start = original.lastIndexOf("\nstream\n");
+    const end = original.indexOf("\nendstream", start);
+    const packed = deflateSync(Buffer.alloc(5 * 1024 * 1024));
+    const header = original
+      .slice(0, start)
+      .replace(
+        /\/Length \d+(?= \/Filter \/FlateDecode \/DecodeParms)/u,
+        `/Length ${packed.byteLength}`,
+      )
+      .replace(
+        "/Columns 7 /Colors 1 /BitsPerComponent 8",
+        "/Columns 8 /Colors 1 /BitsPerComponent 1",
+      );
+    await writeFile(
+      document,
+      Buffer.concat([
+        Buffer.from(`${header}\nstream\n`, "latin1"),
+        packed,
+        Buffer.from(original.slice(end), "latin1"),
+      ]),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "Cannot extract text from knowledge base PDF",
+    );
+  });
+
   test("excludes compressed image pixels from the extracted-text budget", async () => {
     const root = await temporaryDirectory();
     const document = join(root, "large-image.pdf");
@@ -829,6 +899,21 @@ describe("scan knowledge bases", () => {
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
       "Small document text",
     ]);
+  });
+
+  test("bounds compressed form streams with nested image-subtype decoys", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "nested-image-decoy.pdf");
+    await writeFile(
+      document,
+      pdf("Small document text", 1, true, "/Fm1 Do ", {
+        formBytes: Buffer.alloc(9 * 1024 * 1024, 32),
+      }),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
   });
 
   test("rejects negative cross-reference stream field widths", async () => {
@@ -924,8 +1009,19 @@ describe("scan knowledge bases", () => {
       ],
       ["indirect-filter-array", { indirectFilterArray: true }],
       [
+        "commented-indirect-filter-array",
+        { indirectCommentedFilterArray: true },
+      ],
+      [
         "page-content-marked-as-image",
         { dictionaryPrefix: "/Subtype /Image " },
+      ],
+      [
+        "indirect-page-content-marked-as-image",
+        {
+          dictionaryPrefix: "/Subtype /Image ",
+          indirectContentsArray: true,
+        },
       ],
     ] as const) {
       const document = join(root, `${name}.pdf`);

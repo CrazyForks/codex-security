@@ -411,7 +411,7 @@ function boundCompressedPdfStreams(
     );
     if (dictionary === null) continue;
     const lexicalDictionary = pdfDictionaryLexicalValues(dictionary);
-    if (/\/Subtype\s*\/Image(?=[\s/>])/u.test(lexicalDictionary)) {
+    if (pdfTopLevelDictionaryName(lexicalDictionary, "Subtype") === "Image") {
       let low = 0;
       let high = objectOffsets.length;
       while (low < high) {
@@ -424,10 +424,13 @@ function boundCompressedPdfStreams(
       const pageContent =
         number !== undefined &&
         generation !== undefined &&
-        new RegExp(
-          `/Contents\\s+(?:${number}\\s+${generation}\\s+R|\\[[^\\]]*\\b${number}\\s+${generation}\\s+R)`,
-          "u",
-        ).test(contents);
+        pdfContentsReferencesObject(
+          contents,
+          number,
+          generation,
+          indirectObjects,
+          path,
+        );
       if (!pageContent) continue;
     }
     const filters = pdfStreamFilters(
@@ -946,6 +949,15 @@ function pdfCrossReferenceStream(
     let output = 0;
     if (predictor === 2) {
       const samples = columns * colors;
+      const rows = decoded.byteLength / rowBytes;
+      const reconstructionWork = rows * Math.max(0, samples - colors);
+      if (
+        !Number.isSafeInteger(reconstructionWork) ||
+        reconstructionWork > work.remaining
+      ) {
+        return null;
+      }
+      work.remaining -= reconstructionWork;
       const sampleMask = 2 ** bits - 1;
       for (let row = 0; row < reconstructed.byteLength; row += rowBytes) {
         for (let sample = colors; sample < samples; sample += 1) {
@@ -1078,6 +1090,83 @@ function pdfDictionaryLexicalValues(
     : output;
 }
 
+function pdfTopLevelDictionaryName(
+  dictionary: string,
+  key: string,
+): string | undefined {
+  let dictionaryDepth = 0;
+  let arrayDepth = 0;
+  for (let index = 0; index < dictionary.length; index += 1) {
+    if (dictionary.startsWith("<<", index)) {
+      dictionaryDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (dictionary.startsWith(">>", index)) {
+      dictionaryDepth -= 1;
+      index += 1;
+      continue;
+    }
+    if (dictionary[index] === "[") {
+      arrayDepth += 1;
+      continue;
+    }
+    if (dictionary[index] === "]") {
+      arrayDepth -= 1;
+      continue;
+    }
+    if (
+      dictionaryDepth !== 1 ||
+      arrayDepth !== 0 ||
+      !dictionary.startsWith(`/${key}`, index)
+    ) {
+      continue;
+    }
+    const value = new RegExp(
+      `^/${key}\\s*/([^\\s<>[\\]()%/]+)(?=[\\s/>])`,
+      "u",
+    ).exec(dictionary.slice(index));
+    if (value?.[1] !== undefined) return value[1];
+  }
+  return undefined;
+}
+
+function pdfContentsReferencesObject(
+  contents: string,
+  number: string,
+  generation: string,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
+  path: string,
+): boolean {
+  const references = /\/(?:Contents)\s+(\[[^\]]*\]|\d+\s+\d+\s+R)/gu;
+  for (const entry of contents.matchAll(references)) {
+    const pending = [entry[1]!];
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const current = pdfDictionaryLexicalValues(pending.pop()!);
+      for (const reference of current.matchAll(/(\d+)\s+(\d+)\s+R/gu)) {
+        const key = `${reference[1]}:${reference[2]}`;
+        if (reference[1] === number && reference[2] === generation) {
+          return true;
+        }
+        if (visited.has(key) || visited.size >= MAX_PDF_XREF_OBJECTS) continue;
+        visited.add(key);
+        const resolved = pdfIndirectValue(
+          contents,
+          reference[1]!,
+          reference[2]!,
+          offsets,
+          path,
+        );
+        if (resolved?.trimStart().startsWith("[") === true) {
+          pending.push(resolved);
+        }
+      }
+    }
+  }
+  return false;
+}
+
 function pdfStreamFilters(
   contents: string,
   dictionary: string,
@@ -1102,7 +1191,7 @@ function pdfStreamFilters(
     if (resolved === undefined) {
       throw new Error("Compressed PDF filter cannot be resolved safely.");
     }
-    value = resolved;
+    value = pdfDictionaryLexicalValues(resolved);
   }
   const filters: string[] = [];
   for (const filter of value.matchAll(
@@ -1117,7 +1206,9 @@ function pdfStreamFilters(
         offsets,
         path,
       );
-      const reference = /^\/([^\s<>[\]()%/]+)$/u.exec(resolved ?? "");
+      const reference = /^\/([^\s<>[\]()%/]+)$/u.exec(
+        pdfDictionaryLexicalValues(resolved ?? "").trim(),
+      );
       if (reference?.[1] === undefined) {
         throw new Error("Compressed PDF filter cannot be resolved safely.");
       }
