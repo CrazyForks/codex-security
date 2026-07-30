@@ -72,7 +72,7 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      executable ??= canonical;
+      executable ??= pathLike ? canonical : current.path;
     } catch {
       continue;
     }
