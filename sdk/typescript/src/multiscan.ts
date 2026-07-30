@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import {
   type FileHandle,
+  copyFile,
   link,
   lstat,
   mkdir,
@@ -42,6 +43,7 @@ const MAX_LOCK_OWNER_BYTES = 4 * 1024;
 const MAX_RECEIPT_LEDGER_BYTES = 64 * 1024 * 1024;
 const MAX_RECEIPT_LINE_BYTES = 1024 * 1024;
 const MAX_RECEIPT_ERROR_BYTES = 64 * 1024;
+const pendingReceiptAppends = new Map<string, Promise<void>>();
 
 interface MultiscanLockOwner {
   pid: number;
@@ -151,7 +153,11 @@ async function runCampaign(
   let completed = 0;
   let failed = 0;
   for (const task of tasks) {
-    const receipt = receipts.get(task.id.toLowerCase());
+    const recorded = receipts.get(task.id.toLowerCase());
+    const receipt =
+      recorded !== undefined && sameMultiscanTask(recorded, task)
+        ? recorded
+        : undefined;
     if (
       receipt?.status === "completed" &&
       receipt.outputDir ===
@@ -159,6 +165,7 @@ async function runCampaign(
       (await hasArtifacts(
         receipt.outputDir,
         await resumePluginRoot(),
+        task,
         options.signal,
       ))
     ) {
@@ -302,19 +309,54 @@ async function ensureOutputDirectory(path: string): Promise<void> {
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
-  if (Buffer.byteLength(receipt) > MAX_RECEIPT_LINE_BYTES) {
+  const receiptBytes = Buffer.byteLength(receipt);
+  if (receiptBytes > MAX_RECEIPT_LINE_BYTES) {
     throw new Error("Multiscan receipt exceeds the 1 MiB safety limit.");
   }
-  const file = await openReceiptLedger(
-    path,
-    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT,
-  );
+  const preceding = pendingReceiptAppends.get(path) ?? Promise.resolve();
+  const append = preceding
+    .catch(() => undefined)
+    .then(async () => {
+      const file = await openReceiptLedger(
+        path,
+        constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT,
+      );
+      try {
+        if (
+          (await file.stat()).size + receiptBytes >
+          MAX_RECEIPT_LEDGER_BYTES
+        ) {
+          throw new Error(
+            "Multiscan receipt ledger exceeds the 64 MiB safety limit.",
+          );
+        }
+        await file.writeFile(receipt, "utf8");
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+    });
+  pendingReceiptAppends.set(path, append);
   try {
-    await file.writeFile(receipt, "utf8");
-    await file.sync();
+    await append;
   } finally {
-    await file.close();
+    if (pendingReceiptAppends.get(path) === append) {
+      pendingReceiptAppends.delete(path);
+    }
   }
+}
+
+function sameMultiscanTask(
+  receipt: MultiscanReceipt,
+  task: MultiscanTask,
+): boolean {
+  return (
+    receipt.id.toLowerCase() === task.id.toLowerCase() &&
+    receipt.repository === task.repository &&
+    receipt.revision === task.revision &&
+    receipt.mode === task.mode &&
+    receipt.scope === task.scope
+  );
 }
 
 async function openReceiptLedger(
@@ -402,7 +444,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   try {
     for (;;) {
       try {
-        await link(pending, path);
+        await publishLock(pending, path, owner);
         const recovering = await readLockOwner(recovery);
         if (
           recovering !== null &&
@@ -431,17 +473,43 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
       }
 
       try {
-        await link(pending, recovery);
+        await publishLock(pending, recovery, owner);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         const recovering = await readLockOwner(recovery);
         if (recovering !== null && processIsRunning(recovering.pid)) {
           throw new Error("A multiscan supervisor is already running.");
         }
-        await rm(recovery, { force: true });
+        const stale = join(output, `.lock.recovery.stale-${randomUUID()}`);
+        try {
+          await rename(recovery, stale);
+        } catch (renameError) {
+          if ((renameError as NodeJS.ErrnoException).code === "ENOENT") {
+            continue;
+          }
+          throw renameError;
+        }
+        try {
+          const moved = await readLockOwner(stale);
+          if (moved !== null && processIsRunning(moved.pid)) {
+            try {
+              await publishLock(stale, recovery, `${JSON.stringify(moved)}\n`);
+            } catch (restoreError) {
+              if ((restoreError as NodeJS.ErrnoException).code !== "EEXIST") {
+                throw restoreError;
+              }
+            }
+            throw new Error("A multiscan supervisor is already running.");
+          }
+        } finally {
+          await rm(stale, { force: true });
+        }
         continue;
       }
       try {
+        if ((await readLockOwner(recovery))?.token !== token) {
+          throw new Error("A multiscan supervisor is already running.");
+        }
         const current = await readLockOwner(path);
         if (current !== null && processIsRunning(current.pid)) {
           throw new Error("A multiscan supervisor is already running.");
@@ -464,6 +532,10 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
           // is never absent while another supervisor may be running.
           await rename(pending, path);
         }
+        if ((await readLockOwner(recovery))?.token !== token) {
+          await releaseLock(path, token);
+          throw new Error("A multiscan supervisor is already running.");
+        }
         return async () => await releaseLock(path, token);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
@@ -475,6 +547,36 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   } finally {
     await rm(pending, { force: true });
   }
+}
+
+async function publishLock(
+  pending: string,
+  destination: string,
+  owner: string,
+): Promise<void> {
+  try {
+    await link(pending, destination);
+    return;
+  } catch (error) {
+    if (
+      !["EPERM", "EOPNOTSUPP", "ENOTSUP", "EXDEV"].includes(
+        (error as NodeJS.ErrnoException).code ?? "",
+      )
+    ) {
+      throw error;
+    }
+  }
+
+  const file = await open(destination, "wx", 0o600);
+  try {
+    await file.writeFile(owner, "utf8");
+    await file.sync();
+  } catch (error) {
+    await file.close();
+    await rm(destination, { force: true });
+    throw error;
+  }
+  await file.close();
 }
 
 async function readLockOwner(path: string): Promise<MultiscanLockOwner | null> {
@@ -578,107 +680,115 @@ async function readReceipts(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
     throw error;
   }
-  signal?.throwIfAborted();
-  const metadata = await file.stat();
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    await file.close();
-    throw new Error(
-      "Multiscan receipt ledger must be a regular file. Move results.jsonl aside before resuming.",
-    );
-  }
-  if (metadata.size > MAX_RECEIPT_LEDGER_BYTES) {
-    await file.close();
-    await replaceCorruptReceiptLedger(path, async () => {});
-    return new Map();
-  }
+  let opened: FileHandle | undefined = file;
+  try {
+    signal?.throwIfAborted();
+    const metadata = await file.stat();
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(
+        "Multiscan receipt ledger must be a regular file. Move results.jsonl aside before resuming.",
+      );
+    }
+    if (metadata.size > MAX_RECEIPT_LEDGER_BYTES) {
+      await file.close();
+      opened = undefined;
+      await replaceCorruptReceiptLedger(path, async () => {});
+      return new Map();
+    }
 
-  const receipts = new Map<string, MultiscanReceipt>();
-  const replacement = receiptRepairPath(path);
-  const repaired = await open(replacement, "wx", 0o600);
+    const receipts = new Map<string, MultiscanReceipt>();
+    const initial = await readReceiptLines(file, signal, async (receipt) => {
+      receipts.set(receipt.id.toLowerCase(), receipt);
+    });
+    if (!initial.corrupted) return receipts;
+
+    const replacement = receiptRepairPath(path);
+    let repaired: FileHandle | undefined;
+    try {
+      repaired = await open(replacement, "wx", 0o600);
+      if (!initial.discardAll) {
+        await readReceiptLines(file, signal, async (_receipt, bytes) => {
+          await repaired!.write(bytes);
+          await repaired!.write("\n");
+        });
+      } else {
+        receipts.clear();
+      }
+      await repaired.sync();
+      await repaired.close();
+      repaired = undefined;
+      await file.close();
+      opened = undefined;
+      await publishReceiptRepair(path, replacement);
+    } catch (error) {
+      await repaired?.close();
+      await rm(replacement, { force: true });
+      throw error;
+    }
+    return receipts;
+  } finally {
+    await opened?.close();
+  }
+}
+
+async function readReceiptLines(
+  file: FileHandle,
+  signal: AbortSignal | undefined,
+  accept: (receipt: MultiscanReceipt, bytes: Buffer) => Promise<void>,
+): Promise<{ corrupted: boolean; discardAll: boolean }> {
+  const pending = Buffer.alloc(MAX_RECEIPT_LINE_BYTES);
+  let pendingBytes = 0;
+  let discardingLine = false;
+  let totalBytes = 0;
   let corrupted = false;
   let discardAll = false;
-  try {
-    const pending = Buffer.alloc(MAX_RECEIPT_LINE_BYTES);
-    let pendingBytes = 0;
-    let discardingLine = false;
-    let totalBytes = 0;
-    const acceptLine = async (bytes: Buffer): Promise<void> => {
-      if (bytes.length === 0) return;
-      const receipt = parseMultiscanReceipt(bytes);
-      if (receipt === null) {
-        corrupted = true;
-        return;
-      }
-      await repaired.write(bytes);
-      await repaired.write("\n");
-      receipts.set(receipt.id.toLowerCase(), receipt);
-    };
-
-    const input = file.createReadStream({
-      autoClose: false,
-      highWaterMark: 64 * 1024,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    for await (const rawChunk of input) {
-      signal?.throwIfAborted();
-      const chunk = Buffer.isBuffer(rawChunk)
-        ? rawChunk
-        : Buffer.from(rawChunk);
-      totalBytes += chunk.length;
-      if (totalBytes > MAX_RECEIPT_LEDGER_BYTES) {
-        corrupted = true;
-        discardAll = true;
-        receipts.clear();
-        break;
-      }
-
-      let start = 0;
-      while (start < chunk.length) {
-        signal?.throwIfAborted();
-        const newline = chunk.indexOf(0x0a, start);
-        const end = newline === -1 ? chunk.length : newline;
-        const segment = chunk.subarray(start, end);
-        if (!discardingLine) {
-          if (pendingBytes + segment.length > MAX_RECEIPT_LINE_BYTES) {
-            corrupted = true;
-            discardingLine = true;
-            pendingBytes = 0;
-          } else if (segment.length > 0) {
-            segment.copy(pending, pendingBytes);
-            pendingBytes += segment.length;
-          }
-        }
-        if (newline === -1) break;
-        if (!discardingLine) {
-          await acceptLine(pending.subarray(0, pendingBytes));
-        }
-        pendingBytes = 0;
-        discardingLine = false;
-        start = newline + 1;
-      }
-    }
+  const input = file.createReadStream({
+    autoClose: false,
+    start: 0,
+    highWaterMark: 64 * 1024,
+    ...(signal === undefined ? {} : { signal }),
+  });
+  for await (const rawChunk of input) {
     signal?.throwIfAborted();
-    if (discardAll) {
-      await repaired.truncate(0);
-    } else if (discardingLine || pendingBytes > 0) {
+    const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_RECEIPT_LEDGER_BYTES) {
       corrupted = true;
+      discardAll = true;
+      break;
     }
-    await repaired.sync();
-  } catch (error) {
-    await file.close();
-    await repaired.close();
-    await rm(replacement, { force: true });
-    throw error;
-  }
-  await file.close();
-  await repaired.close();
 
-  if (!corrupted) {
-    await rm(replacement, { force: true });
-    return receipts;
+    let start = 0;
+    while (start < chunk.length) {
+      signal?.throwIfAborted();
+      const newline = chunk.indexOf(0x0a, start);
+      const end = newline === -1 ? chunk.length : newline;
+      const segment = chunk.subarray(start, end);
+      if (!discardingLine) {
+        if (pendingBytes + segment.length > MAX_RECEIPT_LINE_BYTES) {
+          corrupted = true;
+          discardingLine = true;
+          pendingBytes = 0;
+        } else if (segment.length > 0) {
+          segment.copy(pending, pendingBytes);
+          pendingBytes += segment.length;
+        }
+      }
+      if (newline === -1) break;
+      if (!discardingLine && pendingBytes > 0) {
+        const bytes = pending.subarray(0, pendingBytes);
+        const receipt = parseMultiscanReceipt(bytes);
+        if (receipt === null) corrupted = true;
+        else await accept(receipt, bytes);
+      }
+      pendingBytes = 0;
+      discardingLine = false;
+      start = newline + 1;
+    }
   }
-  await publishReceiptRepair(path, replacement);
-  return receipts;
+  signal?.throwIfAborted();
+  if (discardingLine || pendingBytes > 0) corrupted = true;
+  return { corrupted, discardAll };
 }
 
 function parseMultiscanReceipt(bytes: Buffer): MultiscanReceipt | null {
@@ -784,11 +894,10 @@ async function publishReceiptRepair(
     dirname(path),
     `results.corrupt-${randomUUID()}.jsonl`,
   );
-  await rename(path, quarantine);
+  await copyFile(path, quarantine, constants.COPYFILE_EXCL);
   try {
     await rename(replacement, path);
   } catch (error) {
-    await rename(quarantine, path).catch(() => undefined);
     await rm(replacement, { force: true });
     throw error;
   }
@@ -797,6 +906,7 @@ async function publishReceiptRepair(
 async function hasArtifacts(
   path: string,
   pluginRoot: string,
+  task: MultiscanTask,
   signal?: AbortSignal,
 ): Promise<boolean> {
   try {
@@ -805,7 +915,24 @@ async function hasArtifacts(
     for (const artifact of REQUIRED_ARTIFACTS) {
       if (!(await lstat(join(path, artifact))).isFile()) return false;
     }
-    const contract = await loadContract(path, { pluginRoot, signal });
+    const plugin = JSON.parse(
+      await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
+    ) as { version?: unknown };
+    if (typeof plugin.version !== "string") return false;
+    const contract = await loadContract(path, {
+      pluginRoot,
+      signal,
+      expectation: {
+        repository: task.repository,
+        repositoryRevision: task.revision,
+        target:
+          task.scope === undefined
+            ? { kind: "repository", paths: [] }
+            : { kind: "paths", paths: [task.scope] },
+        mode: task.mode,
+        pluginVersion: plugin.version,
+      },
+    });
     return contract.coverage.completeness === "complete";
   } catch (error) {
     if (signal?.aborted === true) signal.throwIfAborted();
@@ -849,15 +976,27 @@ async function parseInventory(
     highWaterMark: 64 * 1_024,
     ...(signal === undefined ? {} : { signal }),
   });
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   const bounded = new Transform({
+    readableObjectMode: true,
     transform(chunk: Buffer, _encoding, callback) {
       bytesRead += chunk.length;
-      callback(
-        bytesRead > MAX_BULK_SCAN_INVENTORY_BYTES
-          ? new Error("Multiscan CSV must not exceed 8 MiB.")
-          : null,
-        chunk,
-      );
+      if (bytesRead > MAX_BULK_SCAN_INVENTORY_BYTES) {
+        callback(new Error("Multiscan CSV must not exceed 8 MiB."));
+        return;
+      }
+      try {
+        callback(null, decoder.decode(chunk, { stream: true }));
+      } catch (error) {
+        callback(error instanceof Error ? error : new Error(String(error)));
+      }
+    },
+    flush(callback) {
+      try {
+        callback(null, decoder.decode());
+      } catch (error) {
+        callback(error instanceof Error ? error : new Error(String(error)));
+      }
     },
   });
   input.pipe(bounded);

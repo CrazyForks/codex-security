@@ -18,7 +18,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import type { ScanResult } from "../src/result.js";
@@ -95,6 +95,51 @@ async function completedScan(
   completeness: "complete" | "partial" = "complete",
 ): Promise<ScanResult> {
   await cp(COMPLETED_SCAN, outputDir, { recursive: true });
+  const campaign = dirname(dirname(dirname(outputDir)));
+  const taskId = basename(dirname(outputDir));
+  const campaignManifest = JSON.parse(
+    await readFile(join(campaign, "manifest.json"), "utf8"),
+  ) as {
+    tasks: Array<{
+      id: string;
+      revision: string;
+      mode: string;
+      scope?: string;
+    }>;
+  };
+  const task = campaignManifest.tasks.find(
+    (candidate) => candidate.id === taskId,
+  );
+  if (task === undefined) throw new Error("missing multiscan fixture task");
+  const plugin = JSON.parse(
+    await readFile(join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), "utf8"),
+  ) as { version: string };
+  const manifestPath = join(outputDir, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    scan: {
+      producer: { version: string };
+      target: { revision: string };
+      scope: { includePaths: string[] };
+    };
+  };
+  manifest.scan.producer.version = plugin.version;
+  manifest.scan.target.revision = task.revision;
+  if (task.scope !== undefined) manifest.scan.scope.includePaths = [task.scope];
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const coveragePath = join(outputDir, "coverage.json");
+  const coverage = JSON.parse(await readFile(coveragePath, "utf8")) as {
+    mode: string;
+    includePaths: string[];
+  };
+  coverage.includePaths = manifest.scan.scope.includePaths;
+  coverage.mode =
+    task.scope !== undefined
+      ? "scoped_path"
+      : task.mode === "deep"
+        ? "deep_repository"
+        : "repository";
+  await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
+  await reseal(outputDir);
   await writeFile(join(outputDir, "report.md"), "# Scan report\n");
   return { coverage: { completeness } } as ScanResult;
 }
@@ -226,6 +271,36 @@ describe("multiscan", () => {
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "payments", repository: source.path },
     ]);
+  });
+
+  test("preserves UTF-8 repository paths split across inventory stream chunks", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "caf\u00e9");
+    const header = "id,notes,repository,revision\n";
+    const accentedOffset = source.path.indexOf("\u00e9");
+    const prefix = `${header}unicode,`;
+    const padding =
+      64 * 1024 -
+      1 -
+      Buffer.byteLength(`${prefix},${source.path.slice(0, accentedOffset)}`);
+    await writeFile(
+      paths.input,
+      `${prefix}${"x".repeat(padding)},${source.path},${source.revision}\n`,
+    );
+
+    let scans = 0;
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          scans += 1;
+          return await completedScan(scanOptions.outputDir!);
+        }),
+      ),
+    );
+
+    expect(summary).toMatchObject({ completed: 1, failed: 0 });
+    expect(scans).toBe(1);
   });
 
   test("records each completed scan's cost in the resumable ledger", async () => {
@@ -599,6 +674,61 @@ describe("multiscan", () => {
     }
   });
 
+  test("does not delete a recovery owner published by a concurrent supervisor", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "recovery-replacement");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrecovery,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    const recovery = join(paths.output, ".lock.recovery");
+    await writeFile(lock, JSON.stringify({ pid: 999_999_997, token: "stale" }));
+    await writeFile(
+      recovery,
+      JSON.stringify({ pid: 999_999_998, token: "stale-recovery" }),
+    );
+    const originalKill = process.kill;
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === 999_999_998) {
+        writeFileSync(
+          recovery,
+          JSON.stringify({ pid: process.pid, token: "replacement" }),
+        );
+        const error = new Error(
+          "simulated stale recovery",
+        ) as NodeJS.ErrnoException;
+        error.code = "ESRCH";
+        throw error;
+      }
+      return originalKill.call(process, pid, signal);
+    }) as typeof process.kill;
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async () => {
+              throw new Error("scan must not start");
+            }),
+          ),
+        ),
+      ).rejects.toThrow(/supervisor/iu);
+      expect(JSON.parse(await readFile(recovery, "utf8"))).toMatchObject({
+        pid: process.pid,
+        token: "replacement",
+      });
+      expect(JSON.parse(await readFile(lock, "utf8"))).toMatchObject({
+        pid: 999_999_997,
+        token: "stale",
+      });
+    } finally {
+      process.kill = originalKill;
+    }
+  });
+
   test("retries a failed attempt and records both durable receipts", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
@@ -691,6 +821,36 @@ describe("multiscan", () => {
     await run(3);
     expect(attempts).toBe(3);
     expect(clients).toBe(2);
+  });
+
+  test("does not exhaust attempts using a receipt from a different task", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "foreign-failed-receipt");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nforeign,${source.path},${source.revision}\n`,
+    );
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      if (scans === 1) throw new Error("initial failure");
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const initial = await runMultiscan(
+      options(paths, security, { maxAttempts: 1 }),
+    );
+    const [receipt] = await results(initial.resultsPath);
+    await writeFile(
+      initial.resultsPath,
+      `${JSON.stringify({ ...receipt, revision: "0".repeat(40) })}\n`,
+    );
+
+    const resumed = await runMultiscan(
+      options(paths, security, { maxAttempts: 1 }),
+    );
+
+    expect(resumed).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(scans).toBe(2);
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
@@ -1049,6 +1209,40 @@ describe("multiscan", () => {
     expect(calls).toBe(4);
   });
 
+  test("binds resumed scan bundles to their pinned task and plugin version", async () => {
+    for (const mismatch of ["revision", "plugin"] as const) {
+      const paths = await fixture();
+      const source = await repository(paths.root, `foreign-bundle-${mismatch}`);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nforeign,${source.path},${source.revision}\n`,
+      );
+      let scans = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        scans += 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+      const initial = await runMultiscan(options(paths, security));
+      const [receipt] = await results(initial.resultsPath);
+      const outputDir = receipt!["outputDir"] as string;
+      const manifestPath = join(outputDir, "scan-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        scan: { producer: { version: string }; target: { revision: string } };
+      };
+      if (mismatch === "revision") {
+        manifest.scan.target.revision = "0".repeat(40);
+      } else {
+        manifest.scan.producer.version = "0.0.0";
+      }
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+      const resumed = await runMultiscan(options(paths, security));
+
+      expect(resumed).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+      expect(scans).toBe(2);
+    }
+  });
+
   test("quarantines malformed committed receipts and preserves valid history", async () => {
     const corruptions = (
       receipt: Record<string, unknown>,
@@ -1139,6 +1333,45 @@ describe("multiscan", () => {
     expect(
       (await lstat(join(paths.output, quarantines[0]!))).size,
     ).toBeGreaterThan(64 * 1024 * 1024);
+  });
+
+  test("never appends a receipt beyond the durable total-ledger limit", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "bounded-ledger");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nbounded,${source.path},${source.revision}\n`,
+    );
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const initial = await runMultiscan(options(paths, security));
+    const [receipt] = await results(initial.resultsPath);
+    const base = { ...receipt, error: "" };
+    const empty = `${JSON.stringify(base)}\n`;
+    const padded = `${JSON.stringify({ ...base, error: "x".repeat(64_000) })}\n`;
+    const maximum = 64 * 1024 * 1024;
+    let count = Math.floor(maximum / Buffer.byteLength(padded));
+    let remaining = maximum - count * Buffer.byteLength(padded);
+    if (remaining < Buffer.byteLength(empty)) {
+      count -= 1;
+      remaining += Buffer.byteLength(padded);
+    }
+    const tail = `${JSON.stringify({
+      ...base,
+      error: "x".repeat(remaining - Buffer.byteLength(empty)),
+    })}\n`;
+    await writeFile(initial.resultsPath, padded.repeat(count) + tail);
+    await rm(join(receipt!["outputDir"] as string, "report.md"));
+
+    await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+      /64 MiB safety limit/u,
+    );
+
+    expect(scans).toBe(2);
+    expect((await lstat(initial.resultsPath)).size).toBe(maximum);
   });
 
   test("ignores repository-local Git shims while preserving credential configuration", async () => {
