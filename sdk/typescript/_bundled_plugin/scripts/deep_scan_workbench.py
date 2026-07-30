@@ -575,7 +575,8 @@ def begin_deep_scan_for_target(
     target_identity = scan_target_identity(target, None, metadata=target_metadata)
     revision, target_snapshot_digest, target_device, target_inode = target_identity
     scope_file_count = directory_snapshot_reviewable_file_count(
-        target if scope == "." else target / scope
+        target,
+        **({"count_scopes": (target / scope,)} if scope != "." else {}),
     )
     verify_empty_scope_identity(target, None, scope_file_count, target_identity, scope=scope)
     connection.execute("BEGIN IMMEDIATE")

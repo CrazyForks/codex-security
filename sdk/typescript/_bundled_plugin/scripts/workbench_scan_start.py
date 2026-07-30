@@ -69,6 +69,7 @@ def verify_empty_scope_identity(
     target_identity: tuple[str, str | None, int | str, int | str],
     *,
     scope: str = ".",
+    scopes: tuple[str, ...] | None = None,
 ) -> None:
     if scope_file_count != 0:
         return
@@ -87,7 +88,9 @@ def verify_empty_scope_identity(
 
     snapshot_digest, captured_count = directory_snapshot_digest_and_reviewable_count(
         target,
-        count_scope=target if scope == "." else target / scope,
+        count_scopes=tuple(target / path for path in scopes)
+        if scopes
+        else (target if scope == "." else target / scope,),
     )
     if captured_count != 0:
         raise SystemExit(changed_message)
@@ -96,9 +99,14 @@ def verify_empty_scope_identity(
         if snapshot_digest != recorded_digest:
             raise SystemExit(changed_message)
         return
-    if recorded_digest != clean_worktree_content_digest():
-        raise SystemExit(changed_message)
-    tracked_scope = git_bytes(target, "ls-files", "--cached", "-z", "--", scope)
+    tracked_scope = git_bytes(
+        target,
+        "ls-files",
+        "--cached",
+        "-z",
+        "--",
+        *(scopes if scopes else (scope,)),
+    )
     if tracked_scope is None or tracked_scope:
         raise SystemExit(changed_message)
 

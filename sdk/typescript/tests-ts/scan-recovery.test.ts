@@ -320,6 +320,156 @@ describe("malformed scan artifact recovery", () => {
     ).toMatchObject({ filesTotal: 1 });
   });
 
+  test("allows empty scoped Git paths beside unrelated working-tree changes", async () => {
+    const fixture = await startDraftScan("clean");
+    await mkdir(join(fixture.repository, "empty"));
+    await writeFile(join(fixture.repository, "src", "extract.py"), "# dirty\n");
+    const scanDir = join(fixture.stateDir, "empty-dirty-scope");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const registration = await workbench(fixture, [
+      "register-cli-scan",
+      "--repository",
+      fixture.repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository: fixture.repository,
+        target: { kind: "paths", paths: ["empty"] },
+      }),
+    ]);
+    const context = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      String(registration["scanId"]),
+    ]);
+
+    expect(
+      (
+        context["scan"] as {
+          progress: { coverage: { filesTotal: number } };
+        }
+      ).progress.coverage,
+    ).toMatchObject({ filesTotal: 0 });
+  });
+
+  test("verifies every requested path when several Git scopes are empty", async () => {
+    const fixture = await startDraftScan("clean");
+    await Promise.all([
+      mkdir(join(fixture.repository, "empty-one")),
+      mkdir(join(fixture.repository, "empty-two")),
+    ]);
+    const scanDir = join(fixture.stateDir, "multiple-empty-scopes");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const registration = await workbench(fixture, [
+      "register-cli-scan",
+      "--repository",
+      fixture.repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository: fixture.repository,
+        target: { kind: "paths", paths: ["empty-one", "empty-two"] },
+      }),
+    ]);
+    const context = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      String(registration["scanId"]),
+    ]);
+
+    expect(
+      (
+        context["scan"] as {
+          progress: { coverage: { filesTotal: number } };
+        }
+      ).progress.coverage,
+    ).toMatchObject({ filesTotal: 0 });
+  });
+
+  test("counts an initialized empty Git submodule as a scoped review target", async () => {
+    const fixture = await startDraftScan("clean");
+    const root = join(fixture.repository, "..");
+    const child = join(root, "empty-submodule-source");
+    await mkdir(child);
+    for (const args of [
+      ["init", "--quiet", child],
+      [
+        "-C",
+        child,
+        "-c",
+        "user.name=Codex Security",
+        "-c",
+        "user.email=codex-security@example.invalid",
+        "commit",
+        "--allow-empty",
+        "--quiet",
+        "-m",
+        "empty",
+      ],
+      [
+        "-C",
+        fixture.repository,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        child,
+        "vendor/empty",
+      ],
+      [
+        "-C",
+        fixture.repository,
+        "-c",
+        "user.name=Codex Security",
+        "-c",
+        "user.email=codex-security@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "add empty submodule",
+      ],
+    ]) {
+      const result = spawnSync("git", args, { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    const scanDir = join(fixture.stateDir, "empty-submodule-scope");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const registration = await workbench(fixture, [
+      "register-cli-scan",
+      "--repository",
+      fixture.repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository: fixture.repository,
+        target: { kind: "paths", paths: ["vendor/empty"] },
+      }),
+    ]);
+    const context = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      String(registration["scanId"]),
+    ]);
+
+    expect(
+      (
+        context["scan"] as {
+          progress: { coverage: { filesTotal: number } };
+        }
+      ).progress.coverage,
+    ).toMatchObject({ filesTotal: 1 });
+  });
+
   test("rejects an empty scope that changes during snapshot capture", async () => {
     const fixture = await startDraftScan("directory", true);
     const scanDir = join(fixture.stateDir, "racing-scan");

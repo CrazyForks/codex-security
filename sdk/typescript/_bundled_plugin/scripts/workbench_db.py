@@ -626,11 +626,20 @@ def workbench_completion_binding(
 
 
 def authoritative_scope_file_count(
-    target: Path, scope: str, diff_target: dict[str, str] | None
+    target: Path,
+    scope: str,
+    diff_target: dict[str, str] | None,
+    *,
+    scopes: tuple[str, ...] | None = None,
 ) -> int:
     if diff_target is None:
         return directory_snapshot_reviewable_file_count(
-            target if scope == "." else target / scope
+            target,
+            count_scopes=tuple(target / path for path in scopes)
+            if scopes
+            else None
+            if scope == "."
+            else (target / scope,),
         )
     base = diff_target["baseRevision"]
     if diff_target["kind"] == "working_tree":
@@ -1615,18 +1624,19 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
-    scope_file_count = (
-        authoritative_scope_file_count(repository, scope, diff_target)
-        if diff_target is not None or not paths
-        else sum(
-            1
-            if (repository / path).is_file()
-            else directory_snapshot_reviewable_file_count(repository / path)
-            for path in paths
-        )
+    scope_file_count = authoritative_scope_file_count(
+        repository,
+        scope,
+        diff_target,
+        **({"scopes": tuple(paths)} if diff_target is None and paths else {}),
     )
     verify_empty_scope_identity(
-        repository, diff_target, scope_file_count, target_identity, scope=scope
+        repository,
+        diff_target,
+        scope_file_count,
+        target_identity,
+        scope=scope,
+        scopes=tuple(paths) if diff_target is None and paths else None,
     )
     parent_scan_id = (
         require_uuid(args.parent_scan_id, "parent-scan-id")
