@@ -1340,7 +1340,11 @@ def _validate_coverage(
     if coverage.get("excludePaths") != scope.get("excludePaths"):
         raise ContractError("coverage.excludePaths: must match manifest scope")
     surfaces = _require_list(coverage, "surfaces", "coverage")
-    if enforce_complete_review and completeness == "complete" and not surfaces:
+    has_reviewed_surface = any(
+        isinstance(surface, dict) and surface.get("disposition") != "not_applicable"
+        for surface in surfaces
+    )
+    if enforce_complete_review and completeness == "complete" and not has_reviewed_surface:
         try:
             if authoritative_empty_scope_inventory != AUTHORITATIVE_EMPTY_SCOPE_INVENTORY:
                 raise ContractError("scope inventory is not host-owned")
@@ -2103,7 +2107,9 @@ def _read_sealed_scan(
     )
     _validate_manifest(manifest)
     _validate_findings(manifest, findings)
-    _validate_coverage(manifest, coverage, scan_dir, findings)
+    _validate_coverage(
+        manifest, coverage, scan_dir, findings, enforce_complete_review=True
+    )
     _validate_sealed_coverage_receipts(scan, coverage)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")

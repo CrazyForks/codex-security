@@ -64,6 +64,7 @@ function runPythonContractTool(
   script:
     | "finalize_scan_contract.py"
     | "validate_scan_contract.py" = "finalize_scan_contract.py",
+  options: readonly string[] = [],
 ) {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) {
@@ -79,6 +80,7 @@ function runPythonContractTool(
       join(PLUGIN_ROOT, "scripts", script),
       "--scan-dir",
       realpathSync(scanDir),
+      ...options,
     ],
     { encoding: "utf8", timeout: 10_000 },
   );
@@ -170,16 +172,12 @@ describe("canonical scan contract", () => {
         findings: { findings: [] },
       });
       const projection = runPythonContractTool(scanDir);
-      expect(projection.status, projection.stderr).toBe(
-        surfaces.length === 0 ? 2 : 0,
-      );
+      expect(projection.status, projection.stderr).toBe(2);
       const validation = runPythonContractTool(
         scanDir,
         "validate_scan_contract.py",
       );
-      expect(validation.status, validation.stderr).toBe(
-        surfaces.length === 0 ? 2 : 0,
-      );
+      expect(validation.status, validation.stderr).toBe(2);
     }
   });
 
@@ -238,6 +236,22 @@ describe("canonical scan contract", () => {
     expect(result.stderr).toContain(
       "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
     );
+
+    for (const options of [
+      ["--sarif-only"],
+      ["--export-format", "json"],
+      ["--export-format", "csv"],
+    ]) {
+      const exported = runPythonContractTool(
+        scanDir,
+        "finalize_scan_contract.py",
+        options,
+      );
+      expect(exported.status, exported.stderr).toBe(2);
+      expect(exported.stderr).toContain(
+        "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+      );
+    }
   });
 
   test("preserves sealed complete v1 scans without reviewed surfaces", async () => {
@@ -331,7 +345,7 @@ describe("canonical scan contract", () => {
     }
   });
 
-  test("preserves complete scans containing only reviewed not-applicable surfaces", async () => {
+  test("does not trust receiptless not-applicable surfaces for complete scans", async () => {
     for (const label of ["Not applicable", "No files in the requested scope"]) {
       const scanDir = await copyExample();
       const findingsPath = join(scanDir, "findings.json");
@@ -362,7 +376,10 @@ describe("canonical scan contract", () => {
 
       const result = runPythonContractTool(scanDir);
       expect(result.error).toBeUndefined();
-      expect(result.status, result.stderr).toBe(0);
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain(
+        "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+      );
     }
   });
 
