@@ -1299,6 +1299,8 @@ describe("CLI", () => {
       "inactive-include",
       "uppercase-posix-class-include",
       "invalid-double-star-include",
+      "hasconfig-trailing-slash",
+      "unrelated-installation-config",
       "core-subsection",
       "disabled-worktree-config",
       "overridden-worktree",
@@ -1311,10 +1313,12 @@ describe("CLI", () => {
         const repository = join(root, "repository");
         execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
         const config = join(repository, ".git", "config");
+        let executablePath = dirname(trustedGit!);
         if (
           mode === "inactive-include" ||
           mode === "uppercase-posix-class-include" ||
-          mode === "invalid-double-star-include"
+          mode === "invalid-double-star-include" ||
+          mode === "hasconfig-trailing-slash"
         ) {
           const included = join(root, "inactive.gitconfig");
           await writeFile(
@@ -1323,15 +1327,41 @@ describe("CLI", () => {
           );
           const gitDirectory = join(repository, ".git").replaceAll("\\", "/");
           const condition =
-            mode === "uppercase-posix-class-include"
-              ? gitDirectory.replace("repository", "repositor[[:ALPHA:]]")
-              : mode === "invalid-double-star-include"
-                ? gitDirectory.replace("repository", "repo**sitory")
-                : "/never/selected";
+            mode === "hasconfig-trailing-slash"
+              ? "hasconfig:remote.*.url:https://github.com/openai/codex-security/"
+              : mode === "uppercase-posix-class-include"
+                ? gitDirectory.replace("repository", "repositor[[:ALPHA:]]")
+                : mode === "invalid-double-star-include"
+                  ? gitDirectory.replace("repository", "repo**sitory")
+                  : "/never/selected";
+          if (mode === "hasconfig-trailing-slash") {
+            execFileSync(
+              "git",
+              [
+                "-C",
+                repository,
+                "config",
+                "remote.origin.url",
+                "https://github.com/openai/codex-security",
+              ],
+              { timeout: 10_000 },
+            );
+          }
           await writeFile(
             config,
-            `${await readFile(config, "utf8")}[includeIf "gitdir:${condition}/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
+            `${await readFile(config, "utf8")}[includeIf "${mode === "hasconfig-trailing-slash" ? condition : `gitdir:${condition}/`}"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
           );
+        } else if (mode === "unrelated-installation-config") {
+          const tools = join(root, "unrelated-tools");
+          const binaries = join(tools, "bin");
+          const configuration = join(tools, "etc", "gitconfig");
+          await mkdir(binaries, { recursive: true });
+          await mkdir(dirname(configuration), { recursive: true });
+          await writeFile(
+            configuration,
+            `[core]\n\thooksPath = ${trustedDirectory}\n`,
+          );
+          executablePath = [binaries, dirname(trustedGit!)].join(delimiter);
         } else if (mode === "core-subsection") {
           await writeFile(
             config,
@@ -1364,7 +1394,7 @@ describe("CLI", () => {
                     GIT_CONFIG_VALUE_0: trustedDirectory,
                   }
                 : {}),
-              PATH: dirname(trustedGit!),
+              PATH: executablePath,
             },
           }),
         );
@@ -1383,6 +1413,7 @@ describe("CLI", () => {
     for (const mode of [
       "active-include",
       "hasconfig-include",
+      "hasconfig-transitive-include",
       "character-class-include",
       "posix-character-class-include",
       "environment-config-override",
@@ -1444,6 +1475,7 @@ describe("CLI", () => {
         if (
           mode === "active-include" ||
           mode === "hasconfig-include" ||
+          mode === "hasconfig-transitive-include" ||
           mode === "character-class-include" ||
           mode === "posix-character-class-include" ||
           mode === "included-hooks-path"
@@ -1451,11 +1483,12 @@ describe("CLI", () => {
           const included = join(root, "active.gitconfig");
           await writeFile(
             included,
-            `[core]\n\t${mode === "included-hooks-path" || mode === "hasconfig-include" ? "hooksPath" : "worktree"} = ${configuredWorktree}\n`,
+            `[core]\n\t${mode === "included-hooks-path" || mode === "hasconfig-include" || mode === "hasconfig-transitive-include" ? "hooksPath" : "worktree"} = ${configuredWorktree}\n`,
           );
           const gitDirectory = join(repository, ".git").replaceAll("\\", "/");
           const condition =
-            mode === "hasconfig-include"
+            mode === "hasconfig-include" ||
+            mode === "hasconfig-transitive-include"
               ? "hasconfig:remote.*.url:https://github.com/**"
               : mode === "character-class-include"
                 ? gitDirectory.replace("repository", "repositor[y]")
@@ -1475,9 +1508,16 @@ describe("CLI", () => {
               { timeout: 10_000 },
             );
           }
+          const remoteInclude = join(root, "remote.gitconfig");
+          if (mode === "hasconfig-transitive-include") {
+            await writeFile(
+              remoteInclude,
+              '[remote "origin"]\n\turl = https://github.com/openai/codex-security\n',
+            );
+          }
           await writeFile(
             config,
-            `${await readFile(config, "utf8")}[includeIf "${mode === "hasconfig-include" ? condition : `gitdir:${condition}/`}"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
+            `${await readFile(config, "utf8")}[includeIf "${mode === "hasconfig-include" || mode === "hasconfig-transitive-include" ? condition : `gitdir:${condition}/`}"]\n\tpath = ${included.replaceAll("\\", "/")}\n${mode === "hasconfig-transitive-include" ? `[include]\n\tpath = ${remoteInclude.replaceAll("\\", "/")}\n` : ""}`,
           );
         } else if (
           mode === "environment-config-override" ||

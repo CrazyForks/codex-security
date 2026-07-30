@@ -3076,22 +3076,52 @@ async function protectedHookExecutableRoots(
     let configuredHookPath: string | undefined;
     const globalConfigurationPaths = gitGlobalConfigurationPaths(environment);
     const remoteUrls = new Set<string>();
+    const remoteConfigurationPaths = new Set<string>();
+    const collectRemoteUrls = async (
+      configurationPath: string,
+    ): Promise<void> => {
+      if (remoteConfigurationPaths.has(configurationPath)) return;
+      if (remoteConfigurationPaths.size >= 256) {
+        throw new Error("Too many Git configuration includes.");
+      }
+      remoteConfigurationPaths.add(configurationPath);
+      try {
+        const metadata = await stat(configurationPath);
+        if (!metadata.isFile() || metadata.size > 1_024 * 1_024) return;
+        for (const entry of gitConfigEntries(
+          await readFile(configurationPath, "utf8"),
+        )) {
+          if (entry.kind === "remoteUrl") {
+            remoteUrls.add(entry.value);
+          } else if (
+            entry.kind === "include" &&
+            (entry.condition === undefined ||
+              (!entry.condition.toLowerCase().startsWith("hasconfig:") &&
+                (await gitIncludeConditionMatches(
+                  entry.condition,
+                  gitDirectory,
+                  configurationPath,
+                  remoteUrls,
+                ))))
+          ) {
+            await collectRemoteUrls(
+              resolve(
+                dirname(configurationPath),
+                await expandGitConfigIncludePath(entry.path),
+              ),
+            );
+          }
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    };
     for (const configurationPath of new Set([
       ...globalConfigurationPaths,
       join(commonGitDirectory, "config"),
       join(gitDirectory, "config.worktree"),
     ])) {
-      try {
-        const metadata = await stat(configurationPath);
-        if (!metadata.isFile() || metadata.size > 1_024 * 1_024) continue;
-        for (const entry of gitConfigEntries(
-          await readFile(configurationPath, "utf8"),
-        )) {
-          if (entry.kind === "remoteUrl") remoteUrls.add(entry.value);
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
+      await collectRemoteUrls(configurationPath);
     }
     const readConfiguration = async (path: string): Promise<void> => {
       try {
@@ -3283,6 +3313,23 @@ function gitGlobalConfigurationPaths(
   }
   const installationConfigurations = pathEntries.flatMap((entry) => {
     if (!isAbsolute(entry)) return [];
+    const names =
+      process.platform === "win32" ? ["git.exe", "git.com"] : ["git"];
+    const containsGit = names.some((name) => {
+      const candidate = join(entry, name);
+      try {
+        const metadata = lstatSync(candidate);
+        if (!metadata.isFile() && !metadata.isSymbolicLink()) return false;
+        accessSync(
+          candidate,
+          process.platform === "win32" ? constants.F_OK : constants.X_OK,
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!containsGit) return [];
     const prefix = dirname(entry);
     return [
       join(prefix, "etc", "gitconfig"),
@@ -3634,7 +3681,9 @@ async function gitIncludeConditionMatches(
   expression += "$";
   const matcher = new RegExp(expression, kind === "gitdir/i" ? "iu" : "u");
   return candidates.some(
-    (candidate) => matcher.test(candidate) || matcher.test(`${candidate}/`),
+    (candidate) =>
+      matcher.test(candidate) ||
+      (kind !== "hasconfig" && matcher.test(`${candidate}/`)),
   );
 }
 
