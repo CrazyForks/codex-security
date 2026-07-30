@@ -502,6 +502,81 @@ describe("CLI workbench", () => {
     });
   });
 
+  test("keeps one later-scan matching group across workbench pair pages", async () => {
+    const pairCount = 65;
+    const calls: Array<readonly string[]> = [];
+    let matcherCalls = 0;
+    const stdout = capture();
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "list-unmatched-scan-pairs") {
+              const offset = Number(args[4]);
+              return {
+                repository: "/repo",
+                scanCount: pairCount + 1,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: offset === 0 ? 64 : null,
+                pairs: Array.from(
+                  { length: offset === 0 ? 64 : 1 },
+                  (_, index) => ({
+                    beforeScanId: `before-${offset + index}`,
+                    afterScanId: "after",
+                  }),
+                ),
+              };
+            }
+            if (args[0] !== "get-scan-matching-inputs") return {};
+            const scanId = args[2]!;
+            return {
+              scanId,
+              findings: [{ occurrenceId: scanId }],
+              nextOffset: null,
+              totalFindings: 1,
+            };
+          },
+          onMatch: async (input) => {
+            matcherCalls += 1;
+            return {
+              matches: [
+                {
+                  beforeOccurrenceIds: input.before.map(
+                    ({ occurrenceId }) => occurrenceId,
+                  ),
+                  afterOccurrenceIds: ["after"],
+                  confidence: "high",
+                  reason: "Same root cause.",
+                },
+              ],
+              uncertain: [],
+            };
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(matcherCalls).toBe(1);
+    expect(
+      calls
+        .filter(([command]) => command === "list-unmatched-scan-pairs")
+        .map((args) => args[4]),
+    ).toEqual(["0", "64"]);
+    expect(
+      calls.filter(([command]) => command === "save-scan-comparison"),
+    ).toHaveLength(pairCount);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      matchedPairs: pairCount,
+      findingMatches: pairCount,
+    });
+  });
+
   test("freezes completed scans and skips cached pair pages in one workbench call", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();

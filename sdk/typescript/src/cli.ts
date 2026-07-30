@@ -264,6 +264,7 @@ type MatchingInputPage = JsonObject & {
 const MAX_MATCH_RESULT_BYTES = 1024 * 1024;
 const MAX_INLINE_MATCH_RESULT_BYTES = 16 * 1024;
 const MAX_GROUPED_MATCH_INPUT_BYTES = 512 * 1024;
+const MAX_GROUPED_MATCH_PAIRS = 1024;
 
 interface SkillCommandOutput {
   readonly command: "validate" | "patch";
@@ -1994,44 +1995,22 @@ async function matchAllScans(
   let offset = 0;
   let firstPage = true;
   const completedBefore = new Date().toISOString();
-  while (true) {
-    const page = (await dependencies.runWorkbench([
-      "list-unmatched-scan-pairs",
-      "--repository",
-      dependencies.currentDirectory(),
-      "--offset",
-      String(offset),
-      "--completed-before",
-      completedBefore,
-      ...(force ? ["--force"] : []),
-    ])) as MatchingPlanPage;
-    if (firstPage) {
-      ({ repository, scanCount, unavailableScans, skippedPairs } = page);
-      firstPage = false;
-    }
-    const groupedPairs = new Map<string, MatchingPair[]>();
-    for (const pair of page.pairs) {
-      const group = groupedPairs.get(pair.afterScanId) ?? [];
-      group.push(pair);
-      groupedPairs.set(pair.afterScanId, group);
-    }
-    const groupedMatching = new Map<
-      string,
-      Promise<Map<string, ScanComparisonResult> | null>
-    >();
-    for (const { beforeScanId, afterScanId } of page.pairs) {
+  let pendingPairs: MatchingPair[] = [];
+  const matchPendingPairs = async (): Promise<void> => {
+    if (pendingPairs.length === 0) return;
+    const group = pendingPairs;
+    pendingPairs = [];
+    const afterScanId = group[0]!.afterScanId;
+    const groupedMatching =
+      group.length > 1
+        ? matchScanGroupInOneBatch(dependencies, group, afterScanId).catch(
+            () => null,
+          )
+        : undefined;
+    for (const { beforeScanId } of group) {
       try {
-        const group = groupedPairs.get(afterScanId)!;
-        if (group.length > 1 && !groupedMatching.has(afterScanId)) {
-          groupedMatching.set(
-            afterScanId,
-            matchScanGroupInOneBatch(dependencies, group, afterScanId).catch(
-              () => null,
-            ),
-          );
-        }
         const matching =
-          (await groupedMatching.get(afterScanId))?.get(beforeScanId) ??
+          (await groupedMatching)?.get(beforeScanId) ??
           (await matchScanPairInBatches(
             dependencies,
             beforeScanId,
@@ -2057,6 +2036,34 @@ async function matchAllScans(
         );
       }
     }
+  };
+  while (true) {
+    const page = (await dependencies.runWorkbench([
+      "list-unmatched-scan-pairs",
+      "--repository",
+      dependencies.currentDirectory(),
+      "--offset",
+      String(offset),
+      "--completed-before",
+      completedBefore,
+      ...(force ? ["--force"] : []),
+    ])) as MatchingPlanPage;
+    if (firstPage) {
+      ({ repository, scanCount, unavailableScans, skippedPairs } = page);
+      firstPage = false;
+    }
+    for (const pair of page.pairs) {
+      if (
+        pendingPairs.length > 0 &&
+        pendingPairs[0]!.afterScanId !== pair.afterScanId
+      ) {
+        await matchPendingPairs();
+      }
+      pendingPairs.push(pair);
+      if (pendingPairs.length >= MAX_GROUPED_MATCH_PAIRS) {
+        await matchPendingPairs();
+      }
+    }
     if (page.nextOffset === null) break;
     if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset) {
       throw new CodexSecurityError(
@@ -2065,6 +2072,7 @@ async function matchAllScans(
     }
     offset = page.nextOffset;
   }
+  await matchPendingPairs();
   // A failure that left nothing matched is reported rather than presented as a
   // successful no-op, so an unwritable workbench or a rejected credential still
   // surfaces instead of being reduced to a warning.
