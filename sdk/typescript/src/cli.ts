@@ -3150,9 +3150,15 @@ async function protectedHookExecutableRoots(
   }
   if (!selectedWorktree) {
     for (const [gitDirectory, configured] of configuredWorktrees) {
-      const worktree = configuredEnvironmentWorktree ?? configured;
-      for (const base of [repository, gitDirectory]) {
-        roots.add(await canonicalProtectedHookRoot(resolve(base, worktree)));
+      for (const worktree of new Set([
+        configured,
+        ...(configuredEnvironmentWorktree === undefined
+          ? []
+          : [configuredEnvironmentWorktree]),
+      ])) {
+        for (const base of [repository, gitDirectory]) {
+          roots.add(await canonicalProtectedHookRoot(resolve(base, worktree)));
+        }
       }
     }
     if (
@@ -3376,14 +3382,50 @@ async function gitIncludeConditionMatches(
         closing += 1;
       }
       if (pattern[closing] === "]") closing += 1;
-      closing = pattern.indexOf("]", closing);
-      if (closing < 0) {
+      while (closing < pattern.length && pattern[closing] !== "]") {
+        if (pattern[closing] === "[" && pattern[closing + 1] === ":") {
+          const end = pattern.indexOf(":]", closing + 2);
+          if (end >= 0) {
+            closing = end + 2;
+            continue;
+          }
+        }
+        closing += 1;
+      }
+      if (closing >= pattern.length) {
         expression += "\\[";
         continue;
       }
-      let members = pattern.slice(index + 1, closing);
+      let members = pattern.slice(index + 1, closing).replaceAll("\\", "\\\\");
       if (members.startsWith("!")) members = `^${members.slice(1)}`;
-      expression += `(?=[^/])[${members.replaceAll("\\", "\\\\")}]`;
+      let unsupportedClass = false;
+      members = members.replace(
+        /\[:([A-Za-z]+):\]/gu,
+        (_match, name: string) => {
+          const classes: Readonly<Record<string, string>> = {
+            alnum: "A-Za-z0-9",
+            alpha: "A-Za-z",
+            blank: "\\t ",
+            cntrl: "\\x00-\\x1F\\x7F",
+            digit: "0-9",
+            graph: "\\x21-\\x7E",
+            lower: "a-z",
+            print: "\\x20-\\x7E",
+            punct: "!-/:-@\\[-\\x60\\{-~",
+            space: "\\t\\n\\v\\f\\r ",
+            upper: "A-Z",
+            xdigit: "A-Fa-f0-9",
+          };
+          const characters = classes[name.toLowerCase()];
+          if (characters === undefined) {
+            unsupportedClass = true;
+            return "";
+          }
+          return characters;
+        },
+      );
+      if (unsupportedClass) return false;
+      expression += `(?=[^/])[${members}]`;
       index = closing;
     } else {
       expression += character.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");

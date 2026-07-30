@@ -1357,6 +1357,8 @@ describe("CLI", () => {
     for (const mode of [
       "active-include",
       "character-class-include",
+      "posix-character-class-include",
+      "environment-config-override",
       "enabled-worktree-config",
       "implicit-worktree-config",
       "ordered-worktree-config",
@@ -1375,7 +1377,11 @@ describe("CLI", () => {
         const configuredWorktree = worktree.replaceAll("\\", "/");
         const config = join(repository, ".git", "config");
         let selectedCommonDirectory: string | undefined;
-        if (mode === "active-include" || mode === "character-class-include") {
+        if (
+          mode === "active-include" ||
+          mode === "character-class-include" ||
+          mode === "posix-character-class-include"
+        ) {
           const included = join(root, "active.gitconfig");
           await writeFile(
             included,
@@ -1385,10 +1391,18 @@ describe("CLI", () => {
           const condition =
             mode === "character-class-include"
               ? gitDirectory.replace("repository", "repositor[y]")
-              : gitDirectory;
+              : mode === "posix-character-class-include"
+                ? gitDirectory.replace("repository", "repositor[[:alpha:]]")
+                : gitDirectory;
           await writeFile(
             config,
             `${await readFile(config, "utf8")}[includeIf "gitdir:${condition}/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
+          );
+        } else if (mode === "environment-config-override") {
+          execFileSync(
+            "git",
+            ["-C", repository, "config", "core.worktree", configuredWorktree],
+            { timeout: 10_000 },
           );
         } else if (mode === "common-directory") {
           selectedCommonDirectory = join(root, "selected-common");
@@ -1463,6 +1477,13 @@ describe("CLI", () => {
               ...(selectedCommonDirectory === undefined
                 ? {}
                 : { GIT_COMMON_DIR: selectedCommonDirectory }),
+              ...(mode === "environment-config-override"
+                ? {
+                    GIT_CONFIG_COUNT: "1",
+                    GIT_CONFIG_KEY_0: "core.worktree",
+                    GIT_CONFIG_VALUE_0: join(root, "other-worktree"),
+                  }
+                : {}),
               PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
             },
           }),
