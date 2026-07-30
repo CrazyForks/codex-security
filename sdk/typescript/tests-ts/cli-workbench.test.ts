@@ -652,23 +652,15 @@ describe("CLI workbench", () => {
     const calls: Array<readonly string[]> = [];
     const stderr = capture();
     const stdout = capture();
-    const conflicted = {
-      afterScanId: "after-conflict",
-      afterFindings: [{ occurrenceId: "after" }],
-      beforeScans: [
-        {
-          scanId: "before-conflict",
-          findings: [{ occurrenceId: "confirmed" }, { occurrenceId: "loose" }],
-        },
+    const findings = new Map([
+      [
+        "before-conflict",
+        [{ occurrenceId: "confirmed" }, { occurrenceId: "loose" }],
       ],
-    };
-    const healthy = {
-      afterScanId: "after-ok",
-      afterFindings: [{ occurrenceId: "ok-after" }],
-      beforeScans: [
-        { scanId: "before-ok", findings: [{ occurrenceId: "ok-before" }] },
-      ],
-    };
+      ["after-conflict", [{ occurrenceId: "after" }]],
+      ["before-ok", [{ occurrenceId: "ok-before" }]],
+      ["after-ok", [{ occurrenceId: "ok-after" }]],
+    ]);
 
     expect(
       await main(
@@ -678,15 +670,41 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench: (args): JsonObject => {
             calls.push(args);
-            return args[0] === "list-unmatched-scan-pairs"
-              ? {
-                  repository: "/repo",
-                  scanCount: 3,
-                  unavailableScans: 0,
-                  skippedPairs: 0,
-                  batches: [conflicted, healthy],
-                }
-              : {};
+            if (args[0] === "list-unmatched-scan-pairs") {
+              const offset = Number(args[4]);
+              return {
+                repository: "/repo",
+                scanCount: 3,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: offset === 0 ? 1 : null,
+                pairs:
+                  offset === 0
+                    ? [
+                        {
+                          beforeScanId: "before-conflict",
+                          afterScanId: "after-conflict",
+                        },
+                      ]
+                    : [
+                        {
+                          beforeScanId: "before-ok",
+                          afterScanId: "after-ok",
+                        },
+                      ],
+              };
+            }
+            if (args[0] === "get-scan-matching-inputs") {
+              const scanId = args[2]!;
+              const pageFindings = findings.get(scanId)!;
+              return {
+                scanId,
+                findings: pageFindings,
+                nextOffset: null,
+                totalFindings: pageFindings.length,
+              };
+            }
+            return {};
           },
           onMatch: async (input) =>
             input.after[0]?.occurrenceId === "after"
@@ -725,6 +743,11 @@ describe("CLI workbench", () => {
     expect(
       calls.filter((args) => args[0] === "save-scan-comparison").length,
     ).toBe(1);
+    expect(
+      calls
+        .filter((args) => args[0] === "list-unmatched-scan-pairs")
+        .map((args) => args[4]),
+    ).toEqual(["0", "1"]);
     expect(calls.at(-1)?.[2]).toBe("before-ok");
     expect(stderr.text()).toContain("conflicting confirmed and uncertain");
     expect(stderr.text()).toContain("after-conflict");
@@ -741,17 +764,6 @@ describe("CLI workbench", () => {
 
   test("reports the underlying failure when no batch could be matched", async () => {
     const stderr = capture();
-    const batch = (afterScanId: string): JsonObject => ({
-      afterScanId,
-      afterFindings: [{ occurrenceId: `${afterScanId}-after` }],
-      beforeScans: [
-        {
-          scanId: `${afterScanId}-before`,
-          findings: [{ occurrenceId: `${afterScanId}-before` }],
-        },
-      ],
-    });
-
     expect(
       await main(
         ["scans", "match", "--all"],
@@ -765,7 +777,11 @@ describe("CLI workbench", () => {
                 scanCount: 2,
                 unavailableScans: 0,
                 skippedPairs: 0,
-                batches: [batch("one"), batch("two")],
+                nextOffset: null,
+                pairs: [
+                  { beforeScanId: "one-before", afterScanId: "one-after" },
+                  { beforeScanId: "two-before", afterScanId: "two-after" },
+                ],
               };
             }
             throw new CodexSecurityError(
