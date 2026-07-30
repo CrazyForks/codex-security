@@ -811,18 +811,52 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     return changed
 
 
-def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
+def git_untracked_paths(repo: Path) -> list[tuple[Path, str]]:
+    git = trusted_git_executable(repo)
+    if git is None:
+        raise SystemExit("Git is unavailable on the trusted executable path.")
+    environment = os.environ.copy()
+    for name in GIT_REPOSITORY_ENVIRONMENT:
+        environment.pop(name, None)
+    result = subprocess.run(
+        [
+            git,
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            str(repo),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    return [(repo / path, "A") for path in result.stdout.split("\0") if path]
+
+
+def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str, bool]]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        return [
+            (path, status, False)
+            for path, status in run_git_changed_paths(repo, [f"{base}..{head}"])
+        ]
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
-        combined = dict(staged)
+        combined = {path: (status, True) for path, status in staged}
         for path, status in unstaged:
-            if status == "D" and combined.get(path) == "T":
+            existing = combined.get(path)
+            if status == "D" and existing is not None and existing[0] == "T":
                 continue
-            combined[path] = status
-        return sorted(combined.items())
+            combined[path] = (status, existing is not None)
+        for path, status in git_untracked_paths(repo):
+            combined.setdefault(path, (status, False))
+        return [(path, *details) for path, details in sorted(combined.items())]
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
@@ -832,7 +866,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         raise SystemExit(f"Repo path not found: {repo}")
 
     rows: list[JsonRow] = []
-    for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
+    for path, status, is_staged in git_changed_paths(repo, args.base, args.head, args.mode):
         rel = path.relative_to(repo)
         gitlink_revision = None
         index_is_gitlink = False
@@ -870,8 +904,27 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     f"Git submodule pinned to commit {gitlink_revision}",
                     False,
                 )
-            elif status in {"A", "T"} and not path.exists() and not path.is_symlink():
+            elif is_staged and not path.exists() and not path.is_symlink():
                 preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
+            elif is_staged:
+                staged_preview, staged_binary = staged_diff_preview(repo, path, args.preview_bytes)
+                working_preview, working_binary = confined_diff_preview(
+                    repo, path, args.preview_bytes
+                )
+                is_binary = staged_binary or working_binary
+                preview = (
+                    staged_preview
+                    if staged_preview == working_preview
+                    else fit_preview_lines(
+                        [
+                            "Staged Git index:",
+                            *staged_preview.splitlines(),
+                            "Working tree:",
+                            *working_preview.splitlines(),
+                        ],
+                        args.preview_bytes,
+                    )
+                )
             else:
                 preview, is_binary = confined_diff_preview(repo, path, args.preview_bytes)
             if is_binary:

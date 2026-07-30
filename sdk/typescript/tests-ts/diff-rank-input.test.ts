@@ -658,6 +658,54 @@ describe("diff rank input", () => {
     });
   });
 
+  test("reviews both staged and restored working-tree versions of modified files", async () => {
+    const fixture = await createRepository();
+    const path = "src/app.ts";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const dangerous = 'staged vulnerable content';\n",
+    );
+    git(fixture.repository, "add", path);
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const value = 1;\n",
+    );
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview:
+        "Staged Git index:\nexport const dangerous = 'staged vulnerable content';\nWorking tree:\nexport const value = 1;",
+    });
+  });
+
+  test("inventories untracked security-sensitive files without including ignored files", async () => {
+    const fixture = await createRepository();
+    const workflow = ".github/workflows/deploy.yml";
+    await Promise.all([
+      writeRepositoryFile(
+        fixture.repository,
+        workflow,
+        "name: Untracked deploy\n",
+      ),
+      writeRepositoryFile(
+        fixture.repository,
+        "node_modules/ignored.ts",
+        "export const ignored = true;\n",
+      ),
+    ]);
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([
+      {
+        path: workflow,
+        area: "diff",
+        preview: "key name",
+      },
+    ]);
+  });
+
   test.skipIf(process.platform === "win32")(
     "never previews committed symlinks or repository paths escaping through a symlinked parent",
     async () => {
