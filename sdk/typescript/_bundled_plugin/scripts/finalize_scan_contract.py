@@ -1360,7 +1360,27 @@ def _validate_coverage(
         isinstance(surface, dict) and surface.get("disposition") != "not_applicable"
         for surface in surfaces
     )
-    if enforce_complete_review and completeness == "complete" and not has_reviewed_surface:
+    has_findings = findings is not None and bool(_require_list(findings, "findings", "findings"))
+    if enforce_complete_review and findings is not None and has_reviewed_surface:
+        has_reported_surface = any(
+            isinstance(surface, dict) and surface.get("disposition") == "reported"
+            for surface in surfaces
+        )
+        if has_reported_surface != has_findings:
+            raise ContractError(
+                "coverage.surfaces: reported surfaces must match completed findings"
+            )
+    has_verified_review = has_reviewed_surface and (
+        has_findings
+        or any(
+            isinstance(surface, dict)
+            and surface.get("disposition") != "not_applicable"
+            and isinstance(surface.get("receiptRefs"), list)
+            and bool(surface["receiptRefs"])
+            for surface in surfaces
+        )
+    )
+    if enforce_complete_review and completeness == "complete" and not has_verified_review:
         try:
             if authoritative_empty_scope_inventory != AUTHORITATIVE_EMPTY_SCOPE_INVENTORY:
                 raise ContractError("scope inventory is not host-owned")
@@ -1419,7 +1439,6 @@ def _validate_coverage(
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
     if enforce_complete_review and findings is not None:
-        has_findings = bool(_require_list(findings, "findings", "findings"))
         if has_reported_surface != has_findings:
             raise ContractError(
                 "coverage.surfaces: reported surfaces must match completed findings"

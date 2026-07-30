@@ -315,6 +315,28 @@ describe("malformed scan artifact recovery", () => {
     );
   });
 
+  test("rejects receiptless producer claims that nonempty coverage was fully reviewed", async () => {
+    for (const disposition of ["no_issue_found", "rejected"] as const) {
+      const fixture = await startDraftScan();
+      const findingsPath = join(fixture.scanDir, "findings.json");
+      const coveragePath = join(fixture.scanDir, "coverage.json");
+      const findings = await readJson<FindingsDocument>(findingsPath);
+      const coverage = await readJson<CoverageDocument>(coveragePath);
+      findings.findings = [];
+      const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+      surface.disposition = disposition;
+      surface.receiptRefs = [];
+      await Promise.all([
+        writeJson(findingsPath, findings),
+        writeJson(coveragePath, coverage),
+      ]);
+
+      await expect(completeScan(fixture)).rejects.toThrow(
+        "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+      );
+    }
+  });
+
   test("counts symlinks when a Deep Scan starts directly from a target", async () => {
     const fixture = await startDraftScan("directory", true, true);
     const started = await workbench(fixture, [

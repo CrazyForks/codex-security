@@ -387,15 +387,26 @@ describe("canonical scan contract", () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");
     const coveragePath = join(scanDir, "coverage.json");
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const receipt = "artifacts/02_discovery/work_ledger.jsonl";
+    const receiptPath = join(scanDir, receipt);
     const findings = await readJson(findingsPath);
     const coverage = await readJson(coveragePath);
+    const manifest = await readJson(manifestPath);
+    await mkdir(dirname(receiptPath), { recursive: true });
+    await writeFile(receiptPath, '{"status":"reviewed"}\n');
+    manifest["scan"]["artifacts"].push({
+      path: receipt,
+      sha256: "",
+      mediaType: "application/x-ndjson",
+    });
     findings["findings"] = [];
     coverage["surfaces"] = [
       {
         id: "surface_reviewed",
         label: "Reviewed source",
         disposition: "no_issue_found",
-        receiptRefs: [],
+        receiptRefs: [receipt],
       },
       {
         id: "surface_not_applicable",
@@ -406,6 +417,7 @@ describe("canonical scan contract", () => {
     ];
     await writeJson(findingsPath, findings);
     await writeJson(coveragePath, coverage);
+    await writeJson(manifestPath, manifest);
     await reseal(scanDir);
 
     await expect(
@@ -414,7 +426,7 @@ describe("canonical scan contract", () => {
       coverage: {
         completeness: "complete",
         surfaces: [
-          { disposition: "no_issue_found", receiptRefs: [] },
+          { disposition: "no_issue_found", receiptRefs: [receipt] },
           { disposition: "not_applicable", receiptRefs: [] },
         ],
       },
@@ -464,31 +476,41 @@ describe("canonical scan contract", () => {
     }
   });
 
-  test("preserves receiptless reviewed compact scans with no findings", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const coveragePath = join(scanDir, "coverage.json");
-    const findings = await readJson(findingsPath);
-    const coverage = await readJson(coveragePath);
-    findings["findings"] = [];
-    coverage["surfaces"][0]["disposition"] = "no_issue_found";
-    await writeJson(findingsPath, findings);
-    await writeJson(coveragePath, coverage);
-    await reseal(scanDir);
+  test("keeps receiptless legacy scans readable without treating them as verified", async () => {
+    for (const disposition of ["no_issue_found", "rejected"] as const) {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      findings["findings"] = [];
+      coverage["surfaces"][0]["disposition"] = disposition;
+      await writeJson(findingsPath, findings);
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
 
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toMatchObject({
-      coverage: {
-        completeness: "complete",
-        surfaces: [{ disposition: "no_issue_found", receiptRefs: [] }],
-      },
-      findings: { findings: [] },
-    });
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).resolves.toMatchObject({
+        coverage: {
+          completeness: "complete",
+          surfaces: [{ disposition, receiptRefs: [] }],
+        },
+        findings: { findings: [] },
+      });
 
-    const result = runPythonContractTool(scanDir);
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(0);
+      for (const tool of [
+        "finalize_scan_contract.py",
+        "validate_scan_contract.py",
+      ] as const) {
+        const result = runPythonContractTool(scanDir, tool);
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(
+          "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+        );
+      }
+    }
   });
 
   test("honors cancellation during contract validation", async () => {
