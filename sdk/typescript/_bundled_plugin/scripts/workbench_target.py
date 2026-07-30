@@ -141,6 +141,34 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
+    staged = git_bytes(
+        repository,
+        "diff",
+        "--cached",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        "HEAD",
+        "--",
+        pathspec,
+        git_dir=git_dir,
+        work_tree=work_tree,
+    )
+    unstaged = git_bytes(
+        repository,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        "--",
+        pathspec,
+        git_dir=git_dir,
+        work_tree=work_tree,
+    )
     untracked = git_bytes(
         repository,
         "ls-files",
@@ -152,11 +180,14 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if tracked is None or untracked is None:
+    if tracked is None or staged is None or unstaged is None or untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
     update_digest_field(digest, b"tracked-diff", tracked)
+    if staged or unstaged:
+        update_digest_field(digest, b"index-diff", staged)
+        update_digest_field(digest, b"working-tree-diff", unstaged)
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
         path = (work_tree or repository) / relative_path

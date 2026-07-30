@@ -318,6 +318,57 @@ describe("diff rank input", () => {
     });
   });
 
+  test("includes ignored Git submodules replaced by regular files", async () => {
+    const fixture = await createRepository();
+    const path = "vendor/dep";
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},${path}`,
+    );
+    git(fixture.repository, "commit", "-qm", "add gitlink dependency");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "rm", "--cached", "--quiet", path);
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "replacement dependency\n",
+    );
+    git(fixture.repository, "add", "--force", path);
+    git(
+      fixture.repository,
+      "commit",
+      "-qm",
+      "replace gitlink with regular file",
+    );
+
+    expect(await runDiffRankInput(fixture, "revisions")).toContainEqual({
+      path,
+      area: "diff",
+      preview: "replacement dependency",
+    });
+  });
+
+  test("includes staged gitlinks before their working trees are checked out", async () => {
+    const fixture = await createRepository();
+    const path = "vendor/index-only-dependency";
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},${path}`,
+    );
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview: `Git submodule pinned to commit ${fixture.base}`,
+    });
+  });
+
   test("previews local dirty Git submodules from their pinned index commit", async () => {
     const fixture = await createRepository();
     const submodule = join(fixture.repository, ".github", "actions", "sub");
@@ -353,6 +404,8 @@ describe("diff rank input", () => {
     const files: Record<string, string> = {
       ".dockerignore": "node_modules\nvendor\n",
       ".github/actions/build/action.yml": "runs:\n  using: composite\n",
+      ".github/actions/vendor/checkout/action.yml":
+        "runs:\n  using: composite\n",
       ".github/actions/security/action.yml": "runs:\n  using: composite\n",
       ".github/actions/security/index.js": "export const secure = true;\n",
       ".github/actions/security/script.py": "print('review action')\n",
@@ -406,6 +459,7 @@ describe("diff rank input", () => {
       fixture.repository,
       "add",
       "-f",
+      ".github/actions/vendor/checkout/action.yml",
       "node_modules/AGENTS.md",
       "node_modules/dependency.py",
       "vendor/Dockerfile",
@@ -423,6 +477,7 @@ describe("diff rank input", () => {
         ".github/actions/security/index.js",
         ".github/actions/security/script.py",
         ".github/actions/test/action.yml",
+        ".github/actions/vendor/checkout/action.yml",
         ".github/CODEOWNERS",
         ".github/copilot-instructions.md",
         ".github/dependabot.yml",
@@ -698,6 +753,7 @@ describe("diff rank input", () => {
     const rows = await runDiffRankInput(fixture, "revisions");
 
     expect(rows).toEqual([
+      { path: "src/old.py", area: "diff", preview: "" },
       { path: "src/remove.py", area: "diff", preview: "" },
       {
         path: "src/renamed.py",
@@ -705,6 +761,75 @@ describe("diff rank input", () => {
         preview: "print('rename')",
       },
     ]);
+  });
+
+  test("retains security-relevant rename sources when destinations are excluded", async () => {
+    const fixture = await createRepository();
+    const source = ".github/workflows/deploy.yml";
+    await writeRepositoryFile(
+      fixture.repository,
+      source,
+      "name: deploy\non: push\n",
+    );
+    git(fixture.repository, "add", source);
+    git(fixture.repository, "commit", "-qm", "add deployment workflow");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    await mkdir(join(fixture.repository, "docs"), { recursive: true });
+    await rename(
+      join(fixture.repository, source),
+      join(fixture.repository, "docs/deploy.yml"),
+    );
+    git(fixture.repository, "add", "-A");
+    git(
+      fixture.repository,
+      "commit",
+      "-qm",
+      "move deployment workflow to docs",
+    );
+
+    expect(await runDiffRankInput(fixture, "revisions")).toEqual([
+      { path: source, area: "diff", preview: "" },
+    ]);
+  });
+
+  test("binds staged-only Git index blobs into local-patch snapshot digests", async () => {
+    const fixture = await createRepository();
+    const path = "src/staged-only.ts";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const secret = 1;\n",
+    );
+    git(fixture.repository, "add", path);
+    await rm(join(fixture.repository, path));
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const digest = (): string =>
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-c",
+          "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from workbench_target import worktree_content_digest; print(worktree_content_digest(Path(sys.argv[2])))",
+          join(PLUGIN_ROOT, "scripts"),
+          fixture.repository,
+        ],
+        { encoding: "utf8" },
+      ).trim();
+    const previous = digest();
+    const replacement = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: fixture.repository,
+      input: "export const secret = 2;\n",
+      encoding: "utf8",
+    }).trim();
+    git(
+      fixture.repository,
+      "update-index",
+      "--cacheinfo",
+      `100644,${replacement},${path}`,
+    );
+
+    expect(digest()).not.toBe(previous);
   });
 
   test("continues to exclude binary files and ignored dependency directories", async () => {

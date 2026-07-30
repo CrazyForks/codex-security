@@ -365,6 +365,8 @@ def diff_path_is_security_relevant(path: Path) -> bool:
 
 def diff_path_is_included(path: Path) -> bool:
     if diff_path_is_security_relevant(path):
+        if len(path.parts) >= 2 and path.parts[0] == ".github" and path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES:
+            return ".git" not in path.parts
         return not any(part in SECURITY_RELEVANT_DIFF_EXCLUDED_DIRS for part in path.parts)
     return (
         not path_is_excluded(path)
@@ -800,6 +802,8 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         status = fields[index][0]
         index += 1
         if status in {"C", "R"}:
+            if status == "R":
+                changed.append((repo / fields[index], "D"))
             index += 1
         path = repo / fields[index]
         index += 1
@@ -829,10 +833,16 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         rel = path.relative_to(repo)
         gitlink_revision = None
         if args.mode == "revisions":
-            revision = args.base if status == "D" else args.head
-            if is_immutable_gitlink(repo, revision, rel):
-                gitlink_revision = revision
-        elif path.is_dir():
+            revisions = (
+                (args.base, args.head)
+                if status == "T"
+                else (args.base if status == "D" else args.head,)
+            )
+            for revision in revisions:
+                if is_immutable_gitlink(repo, revision, rel):
+                    gitlink_revision = revision
+                    break
+        else:
             gitlink_revision = index_gitlink_revision(repo, rel)
         if not diff_path_is_included(rel) and gitlink_revision is None:
             continue
