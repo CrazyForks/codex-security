@@ -2932,12 +2932,14 @@ async function protectedHookExecutableRoots(
   const objectDirectories = new Set<string>();
   const configuredWorktrees = new Map<string, string>();
   const configuredHookPaths = new Map<string, string>();
+  const discoveredWorktreeRoots = new Map<string, string>();
   if (selectedGitDirectory) {
     const selected = await canonicalProtectedHookRoot(
       resolve(repository, selectedGitDirectory),
     );
     roots.add(selected);
     gitDirectories.add(selected);
+    discoveredWorktreeRoots.set(selected, repository);
   }
   const selectedCommonDirectory = hookGitEnvironmentValue(
     environment,
@@ -2960,6 +2962,25 @@ async function protectedHookExecutableRoots(
     roots.add(
       await canonicalProtectedHookRoot(resolve(repository, selectedWorktree)),
     );
+    for (const gitDirectory of gitDirectories) {
+      discoveredWorktreeRoots.set(
+        gitDirectory,
+        resolve(repository, selectedWorktree),
+      );
+    }
+  }
+  try {
+    const [head, configuration, objects] = await Promise.all([
+      lstat(join(repository, "HEAD")),
+      lstat(join(repository, "config")),
+      lstat(join(repository, "objects")),
+    ]);
+    if (head.isFile() && configuration.isFile() && objects.isDirectory()) {
+      gitDirectories.add(repository);
+      roots.add(repository);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
   for (const directory of new Set([invocationDirectory, repository])) {
@@ -2986,10 +3007,12 @@ async function protectedHookExecutableRoots(
           );
           roots.add(selected);
           gitDirectories.add(selected);
+          discoveredWorktreeRoots.set(selected, current);
         } else if (metadata.isDirectory()) {
           const selected = await canonicalProtectedHookRoot(marker);
           roots.add(selected);
           gitDirectories.add(selected);
+          discoveredWorktreeRoots.set(selected, current);
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -3091,6 +3114,9 @@ async function protectedHookExecutableRoots(
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     };
+    for (const globalPath of gitGlobalConfigurationPaths(environment)) {
+      await readConfiguration(globalPath);
+    }
     await readConfiguration(join(commonGitDirectory, "config"));
     if (worktreeConfigEnabled) {
       await readConfiguration(join(gitDirectory, "config.worktree"));
@@ -3160,14 +3186,27 @@ async function protectedHookExecutableRoots(
     );
   }
   for (const [gitDirectory, configured] of configuredHookPaths) {
-    const hooksPath = await expandGitConfigIncludePath(
-      environmentHookPath ?? configured,
-    );
-    for (const base of [repository, gitDirectory]) {
+    const selectedHooksPath = environmentHookPath ?? configured;
+    if (selectedHooksPath.startsWith("%(prefix)/")) {
+      throw new Error(
+        "Git prefix-relative hook paths cannot be resolved safely.",
+      );
+    }
+    const hooksPath = await expandGitConfigIncludePath(selectedHooksPath);
+    for (const base of new Set([
+      repository,
+      gitDirectory,
+      discoveredWorktreeRoots.get(gitDirectory) ?? repository,
+    ])) {
       roots.add(await canonicalProtectedHookRoot(resolve(base, hooksPath)));
     }
   }
   if (environmentHookPath !== undefined && configuredHookPaths.size === 0) {
+    if (environmentHookPath.startsWith("%(prefix)/")) {
+      throw new Error(
+        "Git prefix-relative hook paths cannot be resolved safely.",
+      );
+    }
     const hooksPath = await expandGitConfigIncludePath(environmentHookPath);
     roots.add(await canonicalProtectedHookRoot(resolve(repository, hooksPath)));
   }
@@ -3180,6 +3219,40 @@ async function protectedHookExecutableRoots(
   }
 
   return [...roots];
+}
+
+function gitGlobalConfigurationPaths(
+  environment: Readonly<Record<string, string | undefined>>,
+): readonly string[] {
+  const system = hookGitEnvironmentValue(environment, "GIT_CONFIG_SYSTEM");
+  const disableSystem = hookGitEnvironmentValue(
+    environment,
+    "GIT_CONFIG_NOSYSTEM",
+  );
+  const home =
+    hookGitEnvironmentValue(
+      environment,
+      process.platform === "win32" ? "USERPROFILE" : "HOME",
+    ) ?? userInfo().homedir;
+  const xdg =
+    hookGitEnvironmentValue(environment, "XDG_CONFIG_HOME") ??
+    join(home, ".config");
+  const global = hookGitEnvironmentValue(environment, "GIT_CONFIG_GLOBAL");
+  return [
+    ...(disableSystem === undefined ||
+    ["0", "false", "no"].includes(disableSystem)
+      ? system === undefined
+        ? [
+            "/etc/gitconfig",
+            "/usr/local/etc/gitconfig",
+            "/opt/homebrew/etc/gitconfig",
+          ]
+        : [system]
+      : []),
+    ...(global === undefined
+      ? [join(xdg, "git", "config"), join(home, ".gitconfig")]
+      : [global]),
+  ];
 }
 
 function hookGitEnvironmentValue(

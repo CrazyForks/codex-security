@@ -1388,6 +1388,12 @@ describe("CLI", () => {
       "external-hooks-path",
       "environment-hooks-path",
       "included-hooks-path",
+      "relative-subdirectory-hooks-path",
+      "global-hooks-path",
+      "xdg-hooks-path",
+      "system-hooks-path",
+      "bare-hooks-path",
+      "prefix-hooks-path",
       "enabled-worktree-config",
       "integer-worktree-config",
       "implicit-worktree-config",
@@ -1402,11 +1408,26 @@ describe("CLI", () => {
         const worktree = join(root, "configured-worktree");
         const binaries = join(worktree, "node_modules", ".bin");
         const marker = join(root, "git-shim-executed");
-        execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
+        execFileSync(
+          "git",
+          mode === "bare-hooks-path"
+            ? ["init", "--bare", "-q", repository]
+            : ["init", "-q", repository],
+          { timeout: 10_000 },
+        );
         await mkdir(binaries, { recursive: true });
         const configuredWorktree = worktree.replaceAll("\\", "/");
-        const config = join(repository, ".git", "config");
+        const config = join(
+          repository,
+          ...(mode === "bare-hooks-path" ? ["config"] : [".git", "config"]),
+        );
+        const invocation =
+          mode === "relative-subdirectory-hooks-path"
+            ? join(repository, "nested")
+            : repository;
+        if (invocation !== repository) await mkdir(invocation);
         let selectedCommonDirectory: string | undefined;
+        let globalConfiguration: Record<string, string> = {};
         if (
           mode === "active-include" ||
           mode === "character-class-include" ||
@@ -1431,7 +1452,10 @@ describe("CLI", () => {
           );
         } else if (
           mode === "environment-config-override" ||
-          mode === "external-hooks-path"
+          mode === "external-hooks-path" ||
+          mode === "relative-subdirectory-hooks-path" ||
+          mode === "bare-hooks-path" ||
+          mode === "prefix-hooks-path"
         ) {
           execFileSync(
             "git",
@@ -1439,16 +1463,50 @@ describe("CLI", () => {
               "-C",
               repository,
               "config",
-              mode === "external-hooks-path"
+              mode === "external-hooks-path" ||
+              mode === "relative-subdirectory-hooks-path" ||
+              mode === "bare-hooks-path" ||
+              mode === "prefix-hooks-path"
                 ? "core.hooksPath"
                 : "core.worktree",
-              configuredWorktree,
+              mode === "relative-subdirectory-hooks-path"
+                ? "../configured-worktree"
+                : mode === "prefix-hooks-path"
+                  ? "%(prefix)/../tmp/unsafe-hooks"
+                  : configuredWorktree,
             ],
             { timeout: 10_000 },
           );
         } else if (mode === "environment-hooks-path") {
           // This late configuration changes Git's hook path without affecting
           // repository setup, so it must be protected before resolving Git.
+        } else if (
+          mode === "global-hooks-path" ||
+          mode === "xdg-hooks-path" ||
+          mode === "system-hooks-path"
+        ) {
+          const path =
+            mode === "xdg-hooks-path"
+              ? join(root, "xdg", "git", "config")
+              : join(root, `${mode}.gitconfig`);
+          await mkdir(dirname(path), { recursive: true });
+          await writeFile(
+            path,
+            `[core]\n\thooksPath = ${configuredWorktree}\n`,
+          );
+          globalConfiguration =
+            mode === "global-hooks-path"
+              ? { GIT_CONFIG_GLOBAL: path }
+              : mode === "system-hooks-path"
+                ? {
+                    GIT_CONFIG_SYSTEM: path,
+                    GIT_CONFIG_NOSYSTEM: "0",
+                    GIT_CONFIG_GLOBAL: "/dev/null",
+                  }
+                : {
+                    HOME: join(root, "home"),
+                    XDG_CONFIG_HOME: join(root, "xdg"),
+                  };
         } else if (mode === "common-directory") {
           selectedCommonDirectory = join(root, "selected-common");
           execFileSync(
@@ -1517,13 +1575,14 @@ describe("CLI", () => {
         );
         const stderr = capture();
         const exitCode = await main(
-          ["install-hook", repository, "--json"],
+          ["install-hook", invocation, "--json"],
           capture().stream,
           stderr.stream,
           dependencies({
-            currentDirectory: repository,
+            currentDirectory: invocation,
             environment: {
               ...process.env,
+              ...globalConfiguration,
               ...(selectedCommonDirectory === undefined
                 ? {}
                 : { GIT_COMMON_DIR: selectedCommonDirectory }),
@@ -1547,7 +1606,11 @@ describe("CLI", () => {
 
         expect([0, 2], `${mode}: ${stderr.text()}`).toContain(exitCode);
         if (exitCode === 2) {
-          expect(stderr.text()).toContain("A pre-commit hook already exists");
+          expect(stderr.text()).toContain(
+            mode === "prefix-hooks-path"
+              ? "prefix-relative hook paths cannot be resolved safely"
+              : "A pre-commit hook already exists",
+          );
         }
         await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
