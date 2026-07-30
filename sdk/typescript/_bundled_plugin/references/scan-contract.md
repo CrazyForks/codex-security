@@ -117,6 +117,12 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 
 Use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
 
+A complete scan may contain only `not_applicable` surfaces when every requested
+surface was actually reviewed and none applies. It may contain no surfaces only
+when a host-owned, exhaustive scope inventory proves that the requested scope
+contains no files. Every completed finding must correspond to a `reported`
+surface, and a `reported` surface requires at least one completed finding.
+
 Map detailed ledger closure into completed surface summaries in this order:
 
 | Completed surface condition | Disposition |

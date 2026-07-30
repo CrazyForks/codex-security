@@ -45,7 +45,6 @@ const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
   "artifacts",
   "findings",
   "coverage",
-  "surfaces",
   "scope",
 ]);
 const SAFE_SCHEMA_PATTERNS = new Set([
@@ -386,35 +385,6 @@ async function validateSeal(
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
 ): Promise<void> {
-  if (coverage.completeness === "complete") {
-    if (coverage.surfaces.length === 0) {
-      throw new ContractValidationError(
-        "coverage.surfaces: complete coverage requires at least one reviewed surface",
-      );
-    }
-    if (
-      !coverage.surfaces.some((surface) =>
-        ["reported", "no_issue_found", "rejected"].includes(
-          surface.disposition,
-        ),
-      )
-    ) {
-      throw new ContractValidationError(
-        "coverage.surfaces: complete coverage requires at least one applicable reviewed surface",
-      );
-    }
-    if (
-      coverage.surfaces.some(
-        (surface) => surface.disposition === "reported",
-      ) !==
-      findings.findings.length > 0
-    ) {
-      throw new ContractValidationError(
-        "coverage.surfaces: reported surfaces must match completed findings",
-      );
-    }
-  }
-
   const scan = manifest.scan;
   if (scan.sealedAt !== scan.completedAt) {
     throw new ContractValidationError(

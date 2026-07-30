@@ -43,7 +43,6 @@ TARGET_REQUIRED_COORDINATE_FIELDS = {
     "directory_snapshot": {"snapshotDigest"},
 }
 DISPOSITIONS = {"reported", "no_issue_found", "rejected", "not_applicable", "needs_follow_up"}
-REVIEWED_DISPOSITIONS = {"reported", "no_issue_found", "rejected"}
 SARIF_LEVELS = {
     "critical": "error",
     "high": "error",
@@ -1033,6 +1032,8 @@ def _validate_coverage(
     coverage: dict[str, Any],
     scan_dir: Path,
     findings: dict[str, Any] | None = None,
+    *,
+    enforce_complete_review: bool = False,
 ) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
@@ -1047,13 +1048,22 @@ def _validate_coverage(
     if coverage.get("excludePaths") != scope.get("excludePaths"):
         raise ContractError("coverage.excludePaths: must match manifest scope")
     surfaces = _require_list(coverage, "surfaces", "coverage")
-    if completeness == "complete" and not surfaces:
-        raise ContractError(
-            "coverage.surfaces: complete coverage requires at least one reviewed surface"
-        )
+    if enforce_complete_review and completeness == "complete" and not surfaces:
+        inventory = "artifacts/02_discovery/scope_inventory.jsonl"
+        try:
+            descriptor = open_scan_local_file_descriptor(scan_dir, inventory, "scope inventory")
+            try:
+                if os.fstat(descriptor).st_size != 0:
+                    raise ContractError("scope inventory is not empty")
+            finally:
+                os.close(descriptor)
+        except (ContractError, OSError) as error:
+            raise ContractError(
+                "coverage.surfaces: complete coverage requires a reviewed surface "
+                "or an authoritatively empty scope inventory"
+            ) from error
     surface_ids: set[str] = set()
     has_needs_follow_up = False
-    has_reviewed_surface = False
     has_reported_surface = False
     for index, surface in enumerate(surfaces):
         context = f"coverage.surfaces[{index}]"
@@ -1068,7 +1078,6 @@ def _validate_coverage(
         if disposition not in DISPOSITIONS:
             raise ContractError(f"{context}.disposition: unsupported disposition: {disposition}")
         has_needs_follow_up = has_needs_follow_up or disposition == "needs_follow_up"
-        has_reviewed_surface = has_reviewed_surface or disposition in REVIEWED_DISPOSITIONS
         has_reported_surface = has_reported_surface or disposition == "reported"
         receipt_refs = surface.get("receiptRefs", [])
         if not isinstance(receipt_refs, list):
@@ -1088,11 +1097,7 @@ def _validate_coverage(
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
-    if completeness == "complete" and not has_reviewed_surface:
-        raise ContractError(
-            "coverage.surfaces: complete coverage requires at least one applicable reviewed surface"
-        )
-    if completeness == "complete" and findings is not None:
+    if enforce_complete_review and completeness == "complete" and findings is not None:
         has_findings = bool(_require_list(findings, "findings", "findings"))
         if has_reported_surface != has_findings:
             raise ContractError(
@@ -2091,7 +2096,13 @@ def _prepare_scan_finalization(
     else:
         _populate_unsealed_finding_identities(manifest, findings)
     _validate_findings(manifest, findings)
-    _validate_coverage(manifest, coverage, scan_dir, findings)
+    _validate_coverage(
+        manifest,
+        coverage,
+        scan_dir,
+        findings,
+        enforce_complete_review=not was_sealed,
+    )
     _validate_canonical_schemas_before_projection(manifest, findings, coverage, schema_dir)
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)

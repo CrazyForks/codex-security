@@ -207,7 +207,6 @@
             "maxContains": 0
           },
           "surfaces": {
-            "minItems": 1,
             "contains": {
               "type": "object",
               "required": [
@@ -221,40 +220,6 @@
             },
             "minContains": 0,
             "maxContains": 0
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "completeness": {
-            "const": "complete"
-          }
-        },
-        "required": [
-          "completeness"
-        ]
-      },
-      "then": {
-        "properties": {
-          "surfaces": {
-            "contains": {
-              "type": "object",
-              "required": [
-                "disposition"
-              ],
-              "properties": {
-                "disposition": {
-                  "enum": [
-                    "reported",
-                    "no_issue_found",
-                    "rejected"
-                  ]
-                }
-              }
-            },
-            "minContains": 1
           }
         }
       }

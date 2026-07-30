@@ -57,6 +57,11 @@ For a standard repository or scoped-path scan, assemble the canonical JSON from 
 
 Apply row outcomes in this order: validation disposition `reportable` plus attack-path decision `reportable` becomes a finding with its distinct instance and all relevant entrypoint, root-control, sink, and supporting locations; otherwise, a `deferred` result from either phase becomes `needs_follow_up` coverage and a `coverage.deferred` entry using the recorded uncertainty or proof gap; otherwise, validation disposition `not_applicable` becomes `not_applicable` coverage; otherwise, validation disposition `suppressed` or attack-path decision `ignore` becomes `rejected` coverage. A missing required phase record leaves the candidate unresolved and prevents complete coverage. Do not require phase receipts, per-candidate narratives, or another reconciliation pass.
 
+Fully reviewed scopes whose surfaces are all `not_applicable` may still be
+marked `complete`. An empty complete surface list is valid only when the
+host-owned exhaustive scope inventory is empty. Keep completed findings and
+`reported` coverage surfaces consistent in both directions.
+
 Diff, deep, and resumed legacy scans may still provide per-candidate ledgers, validation closure tables, and repository coverage ledgers. When those artifacts exist, retain their traceability: start from reportable/surviving rows, preserve exact affected locations, and map suppressed, not-applicable, or deferred rows to public-facing coverage outcomes. Do not silently drop a seeded row because a same-family neighbor survived.
 
 ## Report Structure
