@@ -600,16 +600,48 @@ export async function main(
   let renderedHistory: string | undefined;
   const history = async (
     args: readonly string[],
-    select: (value: JsonObject) => JsonObject = (value) => value,
+    select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
+      value,
   ): Promise<JsonObject | undefined> => {
     try {
-      return select(await dependencies.runWorkbench(args));
+      return await select(await dependencies.runWorkbench(args));
     } catch (error) {
       errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
       exitCode = 2;
       return undefined;
     }
   };
+  const matchScanPair = async (
+    beforeId: string,
+    afterId: string,
+    force = false,
+  ): Promise<JsonObject | undefined> =>
+    history(
+      [
+        "compare-scans",
+        "--before-scan-id",
+        beforeId,
+        "--after-scan-id",
+        afterId,
+        "--include-matching-inputs",
+      ],
+      async ({ matchingCached, matchingInputs, ...comparison }) => {
+        if (matchingCached && !force) return comparison;
+        return await dependencies.runWorkbench([
+          "save-scan-comparison",
+          "--before-scan-id",
+          beforeId,
+          "--after-scan-id",
+          afterId,
+          "--matches-json",
+          JSON.stringify(
+            await dependencies.matchFindings(
+              matchingInputs as JsonObject & ScanComparisonInput,
+            ),
+          ),
+        ]);
+      },
+    );
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -830,34 +862,8 @@ export async function main(
               format,
             );
           }
-          const comparison = await history([
-            "compare-scans",
-            "--before-scan-id",
-            args.beforeId!,
-            "--after-scan-id",
-            args.afterId!,
-            "--include-matching-inputs",
-          ]);
-          if (comparison === undefined) return undefined;
-          const { matchingCached, matchingInputs, ...visibleComparison } =
-            comparison;
-          if (matchingCached && !options.force) {
-            return presentHistory(visibleComparison, "compare", format);
-          }
-
-          const matching = await dependencies.matchFindings(
-            matchingInputs as JsonObject & ScanComparisonInput,
-          );
           return presentHistory(
-            await history([
-              "save-scan-comparison",
-              "--before-scan-id",
-              args.beforeId!,
-              "--after-scan-id",
-              args.afterId!,
-              "--matches-json",
-              JSON.stringify(matching),
-            ]),
+            await matchScanPair(args.beforeId!, args.afterId!, options.force),
             "compare",
             format,
           );
@@ -869,7 +875,8 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Compare findings and coverage using saved matches.",
+      description: "Match and compare findings and coverage between scans.",
+      destructive: true,
       mcp: false,
       args: z.object({
         beforeId: z.string().min(1).describe("Earlier saved scan identifier."),
@@ -878,14 +885,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format }) {
         return presentHistory(
-          await history([
-            "compare-scans",
-            "--before-scan-id",
-            args.beforeId,
-            "--after-scan-id",
-            args.afterId,
-            "--require-matches",
-          ]),
+          await matchScanPair(args.beforeId, args.afterId),
           "compare",
           format,
         );
@@ -2659,7 +2659,14 @@ async function runScan(
   ).length;
   const incomplete = result.coverage.completeness !== "complete";
   progress?.stage("Scan complete");
-  printScanSummary(result, progress, errorOutput);
+  printScanSummary(
+    result,
+    progress,
+    errorOutput,
+    progress?.interactive === true &&
+      dependencies.environment["NO_COLOR"] === undefined &&
+      dependencies.environment["TERM"] !== "dumb",
+  );
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
@@ -2730,7 +2737,10 @@ function printScanSummary(
   result: ScanResult,
   progress: Progress | null,
   errorOutput: Writable,
+  color: boolean,
 ): void {
+  const paint = (value: string, code: number | string): string =>
+    color ? `\u001B[${code}m${value}\u001B[0m` : value;
   const severities = new Map<SeverityLevel, number>();
   for (const finding of result.findings.findings) {
     severities.set(
@@ -2744,9 +2754,6 @@ function printScanSummary(
   })
     .filter((value): value is string => value !== null)
     .join(", ");
-  errorOutput.write(
-    `codex-security: Findings: ${result.findings.findings.length}${severitySummary === "" ? "" : ` (${severitySummary})`}. Coverage: ${result.coverage.completeness}.\n`,
-  );
 
   const started = Date.parse(result.manifest.scan.startedAt);
   const completed = Date.parse(result.manifest.scan.completedAt);
@@ -2756,22 +2763,37 @@ function printScanSummary(
     completed >= started
       ? Math.floor((completed - started) / 1_000)
       : progress?.elapsedSeconds ?? 0;
-  errorOutput.write(`codex-security: Elapsed: ${elapsed}s.\n`);
+  const duration =
+    elapsed < 60
+      ? `${elapsed}s`
+      : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+  const findingCount = result.findings.findings.length;
+  const findingColor =
+    findingCount === 0
+      ? 32
+      : severities.has("critical") || severities.has("high")
+        ? 31
+        : severities.has("medium")
+          ? 33
+          : 36;
+  errorOutput.write(
+    `\n  ${paint("REPORT", "1;36")}    ${paint(cliErrorMessage(result.reportPath), 4)}\n\n` +
+      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${severitySummary === "" ? "" : ` (${severitySummary})`}`, findingColor)}\n` +
+      `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
+      `  ${paint("ELAPSED", 1)}   ${duration}\n`,
+  );
 
   const tokenSummary = formatTokenUsage(result.turnResult.usage);
   if (tokenSummary !== null) {
-    errorOutput.write(`codex-security: Tokens: ${tokenSummary}.\n`);
+    errorOutput.write(`  ${paint("TOKENS", 1)}    ${tokenSummary}\n`);
   }
   if (result.cost !== null) {
     errorOutput.write(
-      `codex-security: Estimated cost: ${formatUsd(result.cost.estimatedUsd)} USD.\n`,
+      `  ${paint("COST", 1)}      ${formatUsd(result.cost.estimatedUsd)}\n`,
     );
   }
   errorOutput.write(
-    `codex-security: Report: ${cliErrorMessage(result.reportPath)}\n`,
-  );
-  errorOutput.write(
-    `codex-security: Results: ${cliErrorMessage(result.scanDir)}\n`,
+    `  ${paint("RESULTS", 1)}   ${cliErrorMessage(result.scanDir)}\n`,
   );
 }
 
