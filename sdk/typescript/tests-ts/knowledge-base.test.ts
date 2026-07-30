@@ -58,18 +58,32 @@ function pdf(
   pages = 1,
   compressed = false,
   streamPrefix = "",
+  options: {
+    filter?: string;
+    encode?: (bytes: Buffer) => Buffer;
+    extraStreams?: number;
+    indirectLength?: boolean;
+    headerComment?: string;
+  } = {},
 ): Uint8Array {
   const escaped = text.replace(/[\\()]/gu, "\\$&");
   const chunks = escaped.match(/.{1,512}/gu) ?? [""];
   const stream = `${streamPrefix}BT /F1 12 Tf 72 720 Td ${chunks
     .map((chunk) => `(${chunk}) Tj`)
     .join(" ")} ET`;
-  const streamBytes = compressed
+  let streamBytes: Buffer = compressed
     ? deflateSync(Buffer.from(stream))
     : Buffer.from(stream);
+  if (options.encode !== undefined) streamBytes = options.encode(streamBytes);
   const pageObjects = Array.from({ length: pages }, (_, index) => index + 3);
   const font = pages + 3;
   const content = pages + 4;
+  const filter = options.filter ?? (compressed ? "/FlateDecode" : undefined);
+  const extraStreams = options.extraStreams ?? 0;
+  const length = options.indirectLength
+    ? `${content + extraStreams + 1} 0 R`
+    : String(streamBytes.byteLength);
+  const streamObject = `<< /Length ${length}${filter === undefined ? "" : ` /Filter ${filter}`} >>\nstream\n${streamBytes.toString("latin1")}\nendstream`;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     `<< /Type /Pages /Kids [${pageObjects.map((number) => `${number} 0 R`).join(" ")}] /Count ${pages} >>`,
@@ -78,9 +92,11 @@ function pdf(
         `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 2000000 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`,
     ),
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    `<< /Length ${streamBytes.byteLength}${compressed ? " /Filter /FlateDecode" : ""} >>\nstream\n${streamBytes.toString("latin1")}\nendstream`,
+    streamObject,
+    ...Array.from({ length: extraStreams }, () => streamObject),
+    ...(options.indirectLength ? [String(streamBytes.byteLength)] : []),
   ];
-  let output = "%PDF-1.4\n";
+  let output = `%PDF-1.4\n${options.headerComment === undefined ? "" : `% ${options.headerComment}\n`}`;
   const offsets = [0];
   for (const [index, object] of objects.entries()) {
     offsets.push(Buffer.byteLength(output, "latin1"));
@@ -93,6 +109,50 @@ function pdf(
   }
   output += `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
   return Buffer.from(output, "latin1");
+}
+
+function encodeAscii85(bytes: Buffer): Buffer {
+  let encoded = "";
+  for (let index = 0; index < bytes.length; index += 4) {
+    const group = bytes.subarray(index, index + 4);
+    let value = 0;
+    for (let position = 0; position < 4; position += 1) {
+      value = value * 256 + (group[position] ?? 0);
+    }
+    if (value === 0 && group.length === 4) {
+      encoded += "z";
+      continue;
+    }
+    let word = "";
+    for (let digit = 0; digit < 5; digit += 1) {
+      word = String.fromCharCode((value % 85) + 33) + word;
+      value = Math.floor(value / 85);
+    }
+    encoded += word.slice(0, group.length + 1);
+  }
+  return Buffer.from(`${encoded}~>`, "latin1");
+}
+
+function encodeRunLength(bytes: Buffer): Buffer {
+  const encoded: number[] = [];
+  for (let index = 0; index < bytes.length; ) {
+    let count = 1;
+    while (
+      count < 128 &&
+      index + count < bytes.length &&
+      bytes[index + count] === bytes[index]
+    ) {
+      count += 1;
+    }
+    if (count > 1) {
+      encoded.push(257 - count, bytes[index]!);
+      index += count;
+    } else {
+      encoded.push(0, bytes[index++]!);
+    }
+  }
+  encoded.push(128);
+  return Buffer.from(encoded);
 }
 
 describe("scan knowledge bases", () => {
@@ -356,6 +416,104 @@ describe("scan knowledge bases", () => {
 
     await expect(prepareKnowledgeBase([oversized])).rejects.toThrow(
       "8388608-byte extracted-text limit",
+    );
+  });
+
+  test("bounds every PDF compression pipeline and cumulative stream output", async () => {
+    const root = await temporaryDirectory();
+    const runLength = join(root, "run-length.pdf");
+    await writeFile(
+      runLength,
+      pdf("reviewable", 1, false, " ".repeat(9 * 1024 * 1024), {
+        filter: "/RunLengthDecode",
+        encode: encodeRunLength,
+      }),
+    );
+    await expect(prepareKnowledgeBase([runLength])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+
+    const cumulative = join(root, "cumulative.pdf");
+    await writeFile(
+      cumulative,
+      pdf("reviewable", 1, true, " ".repeat(3 * 1024 * 1024), {
+        extraStreams: 2,
+      }),
+    );
+    await expect(prepareKnowledgeBase([cumulative])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+  });
+
+  test("accepts PDF filter chains, indirect lengths, and escaped filter names", async () => {
+    const root = await temporaryDirectory();
+    const chained = join(root, "chained.pdf");
+    const indirect = join(root, "indirect.pdf");
+    const escaped = join(root, "escaped.pdf");
+    await writeFile(
+      chained,
+      pdf("ASCII85 then Flate", 1, true, "", {
+        filter: "[/ASCII85Decode /FlateDecode]",
+        encode: encodeAscii85,
+      }),
+    );
+    await writeFile(
+      indirect,
+      pdf("Indirect stream length", 1, true, "", { indirectLength: true }),
+    );
+    await writeFile(
+      escaped,
+      pdf("Escaped PDF filter", 1, true, "", { filter: "/#46lateDecode" }),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
+      [
+        "ASCII85 then Flate",
+        "Escaped PDF filter",
+        "Indirect stream length",
+      ].sort(),
+    );
+  });
+
+  test("does not mistake a PDF comment for a stream compression filter", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "comment.pdf");
+    await writeFile(
+      document,
+      pdf("Uncompressed PDF", 1, false, "", {
+        headerComment: "This metadata mentions /FlateDecode.",
+      }),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Uncompressed PDF",
+    ]);
+  });
+
+  test("rejects duplicate DOCX document entries before repeated inflation", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "duplicate.docx");
+    const alternate = "word/decument.xml";
+    const archive = Buffer.from(
+      zipSync({
+        "word/document.xml": strToU8("<w:document>safe</w:document>"),
+        [alternate]: strToU8("<w:document>duplicate</w:document>"),
+      }),
+    );
+    const replacement = Buffer.from("word/document.xml");
+    for (let offset = 0; ; offset += replacement.length) {
+      offset = archive.indexOf(alternate, offset);
+      if (offset < 0) break;
+      replacement.copy(archive, offset);
+    }
+    await writeFile(document, archive);
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "duplicate word/document.xml entries",
     );
   });
 

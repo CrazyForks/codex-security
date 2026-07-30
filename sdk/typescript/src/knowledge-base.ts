@@ -370,23 +370,24 @@ function boundCompressedPdfStreams(
 ): void {
   const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const contents = source.toString("latin1");
-  const filters = /\/(?:FlateDecode|Fl)(?=[\s/>[\]])/gu;
-  for (const filter of contents.matchAll(filters)) {
+  const streams = />>\s*stream(?:\r\n|\r|\n)/gu;
+  let inflatedBytes = 0;
+  for (const marker of contents.matchAll(streams)) {
     signal?.throwIfAborted();
-    const marker = filter.index;
-    const headerEnd = Math.min(contents.length, marker + 64 * 1024);
-    const header = contents.slice(marker, headerEnd);
-    const stream = /\bstream(?:\r\n|\r|\n)/u.exec(header);
-    if (stream?.index === undefined) continue;
+    const dictionary = pdfStreamDictionary(contents, marker.index + 2);
+    if (dictionary === null) continue;
+    const filters = pdfStreamFilters(contents, dictionary);
+    if (filters.length === 0) continue;
 
-    const streamStart = marker + stream.index + stream[0].length;
-    const dictionaryStart = contents.lastIndexOf("<<", marker);
-    const dictionary = contents.slice(
-      Math.max(0, dictionaryStart),
-      streamStart,
+    const streamStart = marker.index + marker[0].length;
+    const declared = /\/Length\s+(\d+)(?:\s+(\d+)\s+R)?(?=[\s/>])/u.exec(
+      dictionary,
     );
-    const declared = /\/Length\s+(\d+)(?!\s+\d+\s+R)/u.exec(dictionary);
-    const length = declared?.[1] === undefined ? NaN : Number(declared[1]);
+    let length = Number(declared?.[1]);
+    if (declared?.[2] !== undefined) {
+      const referenced = pdfIndirectValue(contents, declared[1]!, declared[2]);
+      length = Number(referenced);
+    }
     let streamEnd = Number.isSafeInteger(length)
       ? streamStart + length
       : contents.indexOf("\nendstream", streamStart);
@@ -394,26 +395,214 @@ function boundCompressedPdfStreams(
       streamEnd = contents.indexOf("\rendstream", streamStart);
     if (streamEnd < streamStart || streamEnd > source.byteLength) continue;
 
-    try {
-      inflateSync(source.subarray(streamStart, streamEnd), {
-        maxOutputLength: MAX_EXTRACTED_DOCUMENT_BYTES,
-      });
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        error.code === "ERR_BUFFER_TOO_LARGE"
-      ) {
-        throw new KnowledgeBaseLimitError(
-          `Knowledge base document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte extracted-text limit: ${path}`,
+    let decoded = source.subarray(streamStart, streamEnd);
+    for (const filter of filters) {
+      signal?.throwIfAborted();
+      const remaining = MAX_EXTRACTED_DOCUMENT_BYTES - inflatedBytes;
+      if (remaining <= 0) throw oversizedPdfStream(path);
+      try {
+        switch (filter) {
+          case "ASCIIHexDecode":
+          case "AHx":
+            decoded = decodePdfAsciiHex(decoded, remaining);
+            break;
+          case "ASCII85Decode":
+          case "A85":
+            decoded = decodePdfAscii85(decoded, remaining);
+            break;
+          case "RunLengthDecode":
+          case "RL":
+            decoded = decodePdfRunLength(decoded, remaining);
+            break;
+          case "FlateDecode":
+          case "Fl":
+            decoded = inflateSync(decoded, { maxOutputLength: remaining });
+            break;
+          case "DCTDecode":
+          case "DCT":
+          case "JPXDecode":
+          case "JBIG2Decode":
+          case "CCITTFaxDecode":
+          case "CCF":
+            // These image-only codecs are not evaluated while extracting text.
+            decoded = Buffer.alloc(0);
+            continue;
+          default:
+            throw new Error(`Unsupported compressed PDF filter: ${filter}`);
+        }
+        inflatedBytes += decoded.byteLength;
+        if (inflatedBytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
+          throw oversizedPdfStream(path);
+        }
+      } catch (error) {
+        if (error instanceof KnowledgeBaseLimitError) throw error;
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "ERR_BUFFER_TOO_LARGE"
+        ) {
+          throw oversizedPdfStream(path);
+        }
+        throw new Error(
+          `Knowledge base PDF compressed stream cannot be safely bounded: ${path}`,
+          { cause: error },
         );
       }
-      throw new Error(
-        `Knowledge base PDF compressed stream cannot be safely bounded: ${path}`,
-        { cause: error },
-      );
     }
   }
+}
+
+function pdfStreamDictionary(contents: string, end: number): string | null {
+  let depth = 1;
+  for (let index = end - 3; index >= 0; index -= 1) {
+    const token = contents.slice(index, index + 2);
+    if (token === ">>") {
+      depth += 1;
+      index -= 1;
+    } else if (token === "<<") {
+      depth -= 1;
+      if (depth === 0) {
+        return contents
+          .slice(index, end)
+          .replace(
+            /\/([^\s<>()\[\]{}/%]+)/gu,
+            (_match, name: string) =>
+              `/${name.replace(/#([0-9a-f]{2})/giu, (_escape, value: string) =>
+                String.fromCharCode(Number.parseInt(value, 16)),
+              )}`,
+          );
+      }
+      index -= 1;
+    }
+  }
+  return null;
+}
+
+function pdfIndirectValue(
+  contents: string,
+  object: string,
+  generation: string,
+): string | undefined {
+  const value = new RegExp(
+    `(?:^|\\s)${object}\\s+${generation}\\s+obj\\s*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)\\s*endobj`,
+    "u",
+  ).exec(contents)?.[1];
+  return value;
+}
+
+function pdfStreamFilters(contents: string, dictionary: string): string[] {
+  const match =
+    /\/(?:Filter|F)\s+(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+\s+\d+\s+R)(?=[\s/>])/u.exec(
+      dictionary,
+    );
+  if (match?.[1] === undefined) return [];
+  let value = match[1];
+  const reference = /^(\d+)\s+(\d+)\s+R$/u.exec(value);
+  if (reference !== null) {
+    const resolved = pdfIndirectValue(contents, reference[1]!, reference[2]!);
+    if (resolved === undefined) {
+      throw new Error("Compressed PDF filter cannot be resolved safely.");
+    }
+    value = resolved;
+  }
+  return [...value.matchAll(/\/([^\s<>[\]()%/]+)/gu)].map((filter) =>
+    filter[1]!.replace(/#([0-9a-f]{2})/giu, (_match, encoded: string) =>
+      String.fromCharCode(Number.parseInt(encoded, 16)),
+    ),
+  );
+}
+
+function oversizedPdfStream(path: string): KnowledgeBaseLimitError {
+  return new KnowledgeBaseLimitError(
+    `Knowledge base document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte extracted-text limit: ${path}`,
+  );
+}
+
+function decodePdfAsciiHex(value: Buffer, maximum: number): Buffer {
+  const digits = value.toString("latin1").replace(/[\u0000\t\n\f\r ]/gu, "");
+  const end = digits.indexOf(">");
+  const hex = end === -1 ? digits : digits.slice(0, end);
+  if (!/^[0-9a-f]*$/iu.test(hex)) throw new Error("Invalid PDF ASCIIHex data.");
+  if (Math.ceil(hex.length / 2) > maximum) {
+    throw Object.assign(new Error("Decoded PDF stream is too large."), {
+      code: "ERR_BUFFER_TOO_LARGE",
+    });
+  }
+  return Buffer.from(hex.length % 2 === 0 ? hex : `${hex}0`, "hex");
+}
+
+function decodePdfAscii85(value: Buffer, maximum: number): Buffer {
+  const encoded = value.toString("latin1").replace(/[\u0000\t\n\f\r ]/gu, "");
+  const output = Buffer.allocUnsafe(Math.min(maximum, encoded.length * 4));
+  let used = 0;
+  let group: number[] = [];
+  const append = (word: number, count: number): void => {
+    if (used + count > maximum) {
+      throw Object.assign(new Error("Decoded PDF stream is too large."), {
+        code: "ERR_BUFFER_TOO_LARGE",
+      });
+    }
+    for (let index = 0; index < count; index += 1) {
+      output[used++] = Math.floor(word / 256 ** (3 - index)) & 0xff;
+    }
+  };
+  for (let index = 0; index < encoded.length; index += 1) {
+    const character = encoded[index]!;
+    if (character === "~" && encoded[index + 1] === ">") break;
+    if (character === "z" && group.length === 0) {
+      append(0, 4);
+      continue;
+    }
+    const digit = character.charCodeAt(0) - 33;
+    if (digit < 0 || digit > 84) throw new Error("Invalid PDF ASCII85 data.");
+    group.push(digit);
+    if (group.length === 5) {
+      const word = group.reduce((result, part) => result * 85 + part, 0);
+      if (word > 0xffffffff) throw new Error("Invalid PDF ASCII85 group.");
+      append(word, 4);
+      group = [];
+    }
+  }
+  if (group.length === 1) throw new Error("Invalid partial PDF ASCII85 group.");
+  if (group.length > 1) {
+    const count = group.length - 1;
+    while (group.length < 5) group.push(84);
+    append(
+      group.reduce((result, part) => result * 85 + part, 0),
+      count,
+    );
+  }
+  return output.subarray(0, used);
+}
+
+function decodePdfRunLength(value: Buffer, maximum: number): Buffer {
+  const output = Buffer.allocUnsafe(maximum);
+  let written = 0;
+  for (let index = 0; index < value.length; ) {
+    const control = value[index++]!;
+    if (control === 128) break;
+    if (control < 128) {
+      const count = control + 1;
+      if (index + count > value.length || written + count > maximum) {
+        throw Object.assign(new Error("Decoded PDF stream is too large."), {
+          code: "ERR_BUFFER_TOO_LARGE",
+        });
+      }
+      value.copy(output, written, index, index + count);
+      index += count;
+      written += count;
+    } else {
+      const count = 257 - control;
+      if (index >= value.length || written + count > maximum) {
+        throw Object.assign(new Error("Decoded PDF stream is too large."), {
+          code: "ERR_BUFFER_TOO_LARGE",
+        });
+      }
+      output.fill(value[index++]!, written, written + count);
+      written += count;
+    }
+  }
+  return output.subarray(0, written);
 }
 
 async function extractPdf(
@@ -517,9 +706,16 @@ function extractDocx(
 ): string {
   signal?.throwIfAborted();
   try {
+    let seenDocument = false;
     const files = unzipSync(bytes, {
       filter: (file) => {
         if (file.name !== "word/document.xml") return false;
+        if (seenDocument) {
+          throw new KnowledgeBaseLimitError(
+            `Knowledge base DOCX contains duplicate word/document.xml entries: ${path}`,
+          );
+        }
+        seenDocument = true;
         if (file.originalSize > MAX_EXTRACTED_DOCUMENT_BYTES) {
           throw new KnowledgeBaseLimitError(
             `Knowledge base document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte extracted-text limit: ${path}`,
