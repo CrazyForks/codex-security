@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import {
   delimiter,
   dirname,
@@ -1385,6 +1385,9 @@ describe("CLI", () => {
       "character-class-include",
       "posix-character-class-include",
       "environment-config-override",
+      "external-hooks-path",
+      "environment-hooks-path",
+      "included-hooks-path",
       "enabled-worktree-config",
       "integer-worktree-config",
       "implicit-worktree-config",
@@ -1407,12 +1410,13 @@ describe("CLI", () => {
         if (
           mode === "active-include" ||
           mode === "character-class-include" ||
-          mode === "posix-character-class-include"
+          mode === "posix-character-class-include" ||
+          mode === "included-hooks-path"
         ) {
           const included = join(root, "active.gitconfig");
           await writeFile(
             included,
-            `[core]\n\tworktree = ${configuredWorktree}\n`,
+            `[core]\n\t${mode === "included-hooks-path" ? "hooksPath" : "worktree"} = ${configuredWorktree}\n`,
           );
           const gitDirectory = join(repository, ".git").replaceAll("\\", "/");
           const condition =
@@ -1425,12 +1429,26 @@ describe("CLI", () => {
             config,
             `${await readFile(config, "utf8")}[includeIf "gitdir:${condition}/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
           );
-        } else if (mode === "environment-config-override") {
+        } else if (
+          mode === "environment-config-override" ||
+          mode === "external-hooks-path"
+        ) {
           execFileSync(
             "git",
-            ["-C", repository, "config", "core.worktree", configuredWorktree],
+            [
+              "-C",
+              repository,
+              "config",
+              mode === "external-hooks-path"
+                ? "core.hooksPath"
+                : "core.worktree",
+              configuredWorktree,
+            ],
             { timeout: 10_000 },
           );
+        } else if (mode === "environment-hooks-path") {
+          // This late configuration changes Git's hook path without affecting
+          // repository setup, so it must be protected before resolving Git.
         } else if (mode === "common-directory") {
           selectedCommonDirectory = join(root, "selected-common");
           execFileSync(
@@ -1515,7 +1533,13 @@ describe("CLI", () => {
                     GIT_CONFIG_KEY_0: "core.worktree",
                     GIT_CONFIG_VALUE_0: join(root, "other-worktree"),
                   }
-                : {}),
+                : mode === "environment-hooks-path"
+                  ? {
+                      GIT_CONFIG_COUNT: "1",
+                      GIT_CONFIG_KEY_0: "core.hooksPath",
+                      GIT_CONFIG_VALUE_0: configuredWorktree,
+                    }
+                  : {}),
               PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
             },
           }),
@@ -1537,8 +1561,18 @@ describe("CLI", () => {
     async () => {
       const current = userInfo().username;
       expect(await expandGitConfigIncludePath(`~${current}/.gitconfig`)).toBe(
-        join(homedir(), ".gitconfig"),
+        join(userInfo().homedir, ".gitconfig"),
       );
+      const configuredHome = process.env["HOME"];
+      process.env["HOME"] = join(tmpdir(), "codex-security-different-home");
+      try {
+        expect(await expandGitConfigIncludePath(`~${current}/.gitconfig`)).toBe(
+          join(userInfo().homedir, ".gitconfig"),
+        );
+      } finally {
+        if (configuredHome === undefined) delete process.env["HOME"];
+        else process.env["HOME"] = configuredHome;
+      }
       const root = (await readFile("/etc/passwd", "utf8"))
         .split(/\r?\n/u)
         .map((entry) => entry.split(":"))

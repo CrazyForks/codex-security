@@ -17,7 +17,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { homedir, userInfo } from "node:os";
+import { userInfo } from "node:os";
 import {
   basename,
   delimiter,
@@ -2931,6 +2931,7 @@ async function protectedHookExecutableRoots(
   const gitDirectories = new Set<string>();
   const objectDirectories = new Set<string>();
   const configuredWorktrees = new Map<string, string>();
+  const configuredHookPaths = new Map<string, string>();
   if (selectedGitDirectory) {
     const selected = await canonicalProtectedHookRoot(
       resolve(repository, selectedGitDirectory),
@@ -3040,6 +3041,7 @@ async function protectedHookExecutableRoots(
     let configurationFiles = 0;
     let worktreeConfigEnabled = false;
     let configuredWorktree: string | undefined;
+    let configuredHookPath: string | undefined;
     const readConfiguration = async (path: string): Promise<void> => {
       try {
         const canonicalPath = await canonicalProtectedHookRoot(path);
@@ -3062,6 +3064,8 @@ async function protectedHookExecutableRoots(
           for (const entry of gitConfigEntries(await readFile(path, "utf8"))) {
             if (entry.kind === "worktree") {
               configuredWorktree = entry.value;
+            } else if (entry.kind === "hooksPath") {
+              configuredHookPath = entry.value;
             } else if (entry.kind === "worktreeConfig") {
               worktreeConfigEnabled = entry.value;
             } else if (
@@ -3093,6 +3097,9 @@ async function protectedHookExecutableRoots(
     }
     if (configuredWorktree !== undefined) {
       configuredWorktrees.set(gitDirectory, configuredWorktree);
+    }
+    if (configuredHookPath !== undefined) {
+      configuredHookPaths.set(gitDirectory, configuredHookPath);
     }
     objectDirectories.add(join(gitDirectory, "objects"));
   }
@@ -3133,6 +3140,37 @@ async function protectedHookExecutableRoots(
       "Git environment configuration exceeds the protected-worktree safety limit.",
     );
   }
+  let environmentHookPath: string | undefined;
+  for (let index = 0; index < Number(configuredCount ?? "0"); index += 1) {
+    const key = hookGitEnvironmentValue(environment, `GIT_CONFIG_KEY_${index}`);
+    const value = hookGitEnvironmentValue(
+      environment,
+      `GIT_CONFIG_VALUE_${index}`,
+    );
+    if (key === undefined || value === undefined) {
+      throw new Error(
+        "Git environment hook configuration cannot be parsed safely.",
+      );
+    }
+    if (key.toLowerCase() === "core.hookspath") environmentHookPath = value;
+  }
+  if (hookGitEnvironmentValue(environment, "GIT_CONFIG_PARAMETERS")) {
+    throw new Error(
+      "Git environment hook configuration cannot be parsed safely.",
+    );
+  }
+  for (const [gitDirectory, configured] of configuredHookPaths) {
+    const hooksPath = await expandGitConfigIncludePath(
+      environmentHookPath ?? configured,
+    );
+    for (const base of [repository, gitDirectory]) {
+      roots.add(await canonicalProtectedHookRoot(resolve(base, hooksPath)));
+    }
+  }
+  if (environmentHookPath !== undefined && configuredHookPaths.size === 0) {
+    const hooksPath = await expandGitConfigIncludePath(environmentHookPath);
+    roots.add(await canonicalProtectedHookRoot(resolve(repository, hooksPath)));
+  }
   if (!selectedWorktree) {
     for (const [gitDirectory, configured] of configuredWorktrees) {
       for (const base of [repository, gitDirectory]) {
@@ -3157,6 +3195,7 @@ function hookGitEnvironmentValue(
 
 type GitHookConfigurationEntry =
   | { kind: "worktree"; value: string }
+  | { kind: "hooksPath"; value: string }
   | { kind: "worktreeConfig"; value: boolean }
   | { kind: "include"; path: string; condition?: string };
 
@@ -3184,7 +3223,7 @@ function gitConfigEntries(contents: string): GitHookConfigurationEntry[] {
     }
     const key =
       sectionName === "core" && subsection === undefined
-        ? "worktree"
+        ? "(?:worktree|hookspath)"
         : sectionName === "extensions" && subsection === undefined
           ? "worktreeconfig"
           : (sectionName === "include" && subsection === undefined) ||
@@ -3228,7 +3267,10 @@ function gitConfigEntries(contents: string): GitHookConfigurationEntry[] {
     } else if (value.length === 0) {
       continue;
     } else if (sectionName === "core") {
-      entries.push({ kind: "worktree", value });
+      entries.push({
+        kind: /^\s*hookspath\b/iu.test(line) ? "hooksPath" : "worktree",
+        value,
+      });
     } else {
       entries.push({
         kind: "include",
@@ -3248,7 +3290,7 @@ export async function expandGitConfigIncludePath(
   const account = named[1]!;
   let home: string;
   if (account === userInfo().username) {
-    home = homedir();
+    home = userInfo().homedir;
   } else {
     const records = await readFile("/etc/passwd", "utf8");
     const entry = records
