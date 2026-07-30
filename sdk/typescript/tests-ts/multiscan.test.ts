@@ -508,6 +508,95 @@ describe("multiscan", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "resumes Git symlink entries materialized as ordinary checkout files",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "materialized-symlink-scope");
+      await symlink("src", join(source.path, "alias"));
+      git(source.path, "add", "alias");
+      git(
+        source.path,
+        "-c",
+        "user.name=Multiscan Test",
+        "-c",
+        "user.email=multiscan@example.test",
+        "commit",
+        "-qm",
+        "add scope alias",
+      );
+      const revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nscoped,${source.path},${revision},alias\n`,
+      );
+      const original = new Map(
+        ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"].map(
+          (key) => [key, process.env[key]],
+        ),
+      );
+      process.env["GIT_CONFIG_COUNT"] = "1";
+      process.env["GIT_CONFIG_KEY_0"] = "core.symlinks";
+      process.env["GIT_CONFIG_VALUE_0"] = "false";
+      try {
+        let scans = 0;
+        const security = client(async (_repository, scanOptions = {}) => {
+          scans += 1;
+          return await completedScan(scanOptions.outputDir!);
+        });
+
+        await runMultiscan(options(paths, security));
+        expect(await runMultiscan(options(paths, security))).toMatchObject({
+          completed: 1,
+          failed: 0,
+          skipped: 1,
+        });
+        expect(scans).toBe(1);
+      } finally {
+        for (const [key, value] of original) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    },
+  );
+
+  test("matches pinned scope paths using their recorded checkout casing", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "scope-casing");
+    const inventory = (scope: string): string =>
+      `id,repository,revision,scope\nscoped,${source.path},${source.revision},${scope}\n`;
+    await writeFile(paths.input, inventory("src"));
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    await runMultiscan(options(paths, security));
+
+    await writeFile(paths.input, inventory("SrC"));
+    const manifestPath = join(paths.output, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      tasks: Array<{ scope: string }>;
+    };
+    manifest.tasks[0]!.scope = "SrC";
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const ledgerPath = join(paths.output, "results.jsonl");
+    const receipts = await results(ledgerPath);
+    for (const receipt of receipts) receipt["scope"] = "SrC";
+    await writeFile(
+      ledgerPath,
+      `${receipts.map((receipt) => JSON.stringify(receipt)).join("\n")}\n`,
+    );
+
+    expect(await runMultiscan(options(paths, security))).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(scans).toBe(1);
+  });
+
   test("records each completed scan's cost in the resumable ledger", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "priced");

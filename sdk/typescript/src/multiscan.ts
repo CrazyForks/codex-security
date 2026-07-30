@@ -1151,6 +1151,22 @@ async function pinnedMultiscanScope(
   );
   if (command === null)
     throw new Error("Git is not available on a trusted PATH.");
+  const symlinkConfiguration = await execFile(
+    command.executable,
+    [
+      "--no-replace-objects",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-C",
+      repository,
+      "config",
+      "--type=bool",
+      "--default=true",
+      "core.symlinks",
+    ],
+    { env: command.environment, signal, maxBuffer: 64 * 1024 },
+  );
+  const followsSymbolicLinks = symlinkConfiguration.stdout.trim() !== "false";
   let selected = posix.normalize(scope);
   for (let followed = 0; followed <= 40; followed += 1) {
     if (selected === ".") return selected;
@@ -1158,8 +1174,8 @@ async function pinnedMultiscanScope(
     let redirected = false;
     for (let index = 0; index < segments.length; index += 1) {
       signal?.throwIfAborted();
-      const candidate = segments.slice(0, index + 1).join("/");
-      const listed = await execFile(
+      let candidate = segments.slice(0, index + 1).join("/");
+      let listed = await execFile(
         command.executable,
         [
           "--no-replace-objects",
@@ -1175,15 +1191,60 @@ async function pinnedMultiscanScope(
         ],
         { env: command.environment, signal, maxBuffer: 1024 * 1024 },
       );
-      const entry = /^(\d{6}) (blob|tree) ([a-f0-9]{40,64})\t([^\0]+)\0$/u.exec(
-        listed.stdout,
-      );
-      if (entry?.[4] !== candidate) {
+      const matched =
+        /^(\d{6}) (blob|tree) ([a-f0-9]{40,64})\t([^\0]+)\0$/u.exec(
+          listed.stdout,
+        );
+      let entry =
+        matched === null
+          ? undefined
+          : {
+              mode: matched[1]!,
+              objectId: matched[3]!,
+              path: matched[4]!,
+            };
+      if (entry?.path !== candidate) {
+        const parent = segments.slice(0, index).join("/");
+        listed = await execFile(
+          command.executable,
+          [
+            "--no-replace-objects",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            repository,
+            "ls-tree",
+            "-z",
+            parent.length === 0 ? revision : `${revision}:${parent}`,
+          ],
+          { env: command.environment, signal, maxBuffer: 1024 * 1024 },
+        );
+        const candidates = [
+          ...listed.stdout.matchAll(
+            /(\d{6}) (blob|tree) ([a-f0-9]{40,64})\t([^\0]+)\0/gu,
+          ),
+        ].filter(
+          (match) =>
+            match[4]!.toLocaleLowerCase("en-US") ===
+            segments[index]!.toLocaleLowerCase("en-US"),
+        );
+        if (candidates.length === 1) {
+          segments[index] = candidates[0]![4]!;
+          selected = segments.join("/");
+          candidate = segments.slice(0, index + 1).join("/");
+          entry = {
+            mode: candidates[0]![1]!,
+            objectId: candidates[0]![3]!,
+            path: candidate,
+          };
+        }
+      }
+      if (entry?.path !== candidate) {
         throw new Error(
           "Multiscan scope cannot be resolved at its pinned revision.",
         );
       }
-      if (entry[1] !== "120000") continue;
+      if (entry.mode !== "120000" || !followsSymbolicLinks) continue;
       const target = await execFile(
         command.executable,
         [
@@ -1194,7 +1255,7 @@ async function pinnedMultiscanScope(
           repository,
           "cat-file",
           "blob",
-          entry[3]!,
+          entry.objectId,
         ],
         { env: command.environment, signal, maxBuffer: 64 * 1024 },
       );
