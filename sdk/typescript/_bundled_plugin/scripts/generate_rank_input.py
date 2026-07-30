@@ -47,6 +47,7 @@ from rank_preview import (
     select_preview_lines,
     structural_outline,
 )
+from workbench_constants import trusted_git_executable
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -432,7 +433,17 @@ def immutable_diff_preview(
     repo: Path, path: Path, head: str, preview_bytes: int
 ) -> tuple[str, bool]:
     relative = path.relative_to(repo).as_posix()
-    command = ["git", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(repo)]
+    executable = trusted_git_executable(repo)
+    if executable is None:
+        raise SystemExit("Git is unavailable on the trusted executable path.")
+    command = [
+        executable,
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        str(repo),
+    ]
     listed = subprocess.run(
         [*command, "ls-tree", "-z", head, "--", relative],
         check=False,
@@ -695,15 +706,20 @@ def bind_repo_scopes(args: argparse.Namespace) -> None:
 
 
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+    git = trusted_git_executable(repo)
+    if git is None:
+        raise SystemExit("Git is unavailable on the trusted executable path.")
     result = subprocess.run(
         [
-            "git",
+            git,
             "--no-replace-objects",
             "-c",
             "core.fsmonitor=false",
             "-C",
             str(repo),
             "diff",
+            "--no-ext-diff",
+            "--no-textconv",
             "--name-status",
             "-z",
             "--diff-filter=ACMRDTU",

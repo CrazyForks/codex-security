@@ -152,7 +152,10 @@ async function runDiffRankInput(
         ...command,
       ]
     : ["-B", script, ...command];
-  execFileSync(interpreter, args, { stdio: "pipe" });
+  execFileSync(interpreter, args, {
+    stdio: "pipe",
+    env: { ...process.env, CODEX_SECURITY_GIT: Bun.which("git") ?? undefined },
+  });
 
   const contents = (await readFile(output, "utf8")).trim();
   return contents
