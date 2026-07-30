@@ -506,6 +506,8 @@ describe("CLI workbench", () => {
     const pairCount = 65;
     const calls: Array<readonly string[]> = [];
     let matcherCalls = 0;
+    let activeInputLoads = 0;
+    let maximumInputLoads = 0;
     const stdout = capture();
 
     expect(
@@ -514,7 +516,7 @@ describe("CLI workbench", () => {
         stdout.stream,
         capture().stream,
         dependencies({
-          onWorkbench: (args): JsonObject => {
+          onWorkbench: async (args): Promise<JsonObject> => {
             calls.push(args);
             if (args[0] === "list-unmatched-scan-pairs") {
               const offset = Number(args[4]);
@@ -535,6 +537,10 @@ describe("CLI workbench", () => {
             }
             if (args[0] !== "get-scan-matching-inputs") return {};
             const scanId = args[2]!;
+            activeInputLoads += 1;
+            maximumInputLoads = Math.max(maximumInputLoads, activeInputLoads);
+            await Promise.resolve();
+            activeInputLoads -= 1;
             return {
               scanId,
               findings: [{ occurrenceId: scanId }],
@@ -563,6 +569,7 @@ describe("CLI workbench", () => {
     ).toBe(0);
 
     expect(matcherCalls).toBe(1);
+    expect(maximumInputLoads).toBeLessThanOrEqual(8);
     expect(
       calls
         .filter(([command]) => command === "list-unmatched-scan-pairs")

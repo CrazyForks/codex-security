@@ -265,6 +265,7 @@ const MAX_MATCH_RESULT_BYTES = 1024 * 1024;
 const MAX_INLINE_MATCH_RESULT_BYTES = 16 * 1024;
 const MAX_GROUPED_MATCH_INPUT_BYTES = 512 * 1024;
 const MAX_GROUPED_MATCH_PAIRS = 1024;
+const MAX_GROUPED_MATCH_INPUT_CONCURRENCY = 8;
 
 interface SkillCommandOutput {
   readonly command: "validate" | "patch";
@@ -2094,12 +2095,34 @@ async function matchScanGroupInOneBatch(
   afterScanId: string,
 ): Promise<Map<string, ScanComparisonResult> | null> {
   const after = await matchingInputPage(dependencies, afterScanId, 0);
-  const previous = await Promise.all(
-    pairs.map(async ({ beforeScanId }) => ({
-      scanId: beforeScanId,
-      page: await matchingInputPage(dependencies, beforeScanId, 0),
-    })),
+  const previous: Array<{
+    scanId: string;
+    page: Awaited<ReturnType<typeof matchingInputPage>>;
+  }> = new Array(pairs.length);
+  let nextPair = 0;
+  let failed = false;
+  let failure: unknown;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(pairs.length, MAX_GROUPED_MATCH_INPUT_CONCURRENCY) },
+      async () => {
+        while (!failed && nextPair < pairs.length) {
+          const index = nextPair++;
+          const beforeScanId = pairs[index]!.beforeScanId;
+          try {
+            previous[index] = {
+              scanId: beforeScanId,
+              page: await matchingInputPage(dependencies, beforeScanId, 0),
+            };
+          } catch (error) {
+            failed = true;
+            failure = error;
+          }
+        }
+      },
+    ),
   );
+  if (failed) throw failure;
   if (
     after.nextOffset !== null ||
     previous.some(({ page }) => page.nextOffset !== null)
