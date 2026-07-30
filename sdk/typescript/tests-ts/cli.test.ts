@@ -674,6 +674,66 @@ describe("CLI", () => {
     }
   });
 
+  test("ignores Git shims in an environment-selected worktree", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-environment-worktree-")),
+    );
+    try {
+      const worktree = join(root, "worktree");
+      const repository = join(worktree, "packages", "service");
+      const binaries = join(worktree, "node_modules", ".bin");
+      const gitDirectory = join(root, "git-directory");
+      await Promise.all([
+        mkdir(repository, { recursive: true }),
+        mkdir(binaries, { recursive: true }),
+      ]);
+      execFileSync("git", ["init", "--bare", "-q", gitDirectory], {
+        timeout: 10_000,
+      });
+
+      const marker = join(root, "git-shim-executed");
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      const maliciousGit =
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
+      await writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 });
+      const path = Object.entries(process.env).find(
+        ([name]) => name.toUpperCase() === "PATH",
+      )?.[1];
+      const environment = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([name]) => name.toUpperCase() !== "PATH",
+        ),
+      );
+      environment["GIT_DIR"] = gitDirectory;
+      environment["GIT_WORK_TREE"] = worktree;
+      environment["GIT_CONFIG_COUNT"] = "1";
+      environment["GIT_CONFIG_KEY_0"] = "core.hooksPath";
+      environment["GIT_CONFIG_VALUE_0"] = join(gitDirectory, "hooks");
+      environment["PATH"] = [binaries, path ?? ""].join(delimiter);
+      const stdout = capture();
+      const stderr = capture();
+
+      const exitCode = await main(
+        ["install-hook", repository, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ currentDirectory: repository, environment }),
+      );
+      expect({ exitCode, stderr: stderr.text() }).toEqual({
+        exitCode: 0,
+        stderr: "",
+      });
+      expect(
+        normalize((JSON.parse(stdout.text()) as { hook: string }).hook),
+      ).toBe(join(gitDirectory, "hooks", "pre-commit"));
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {

@@ -1078,7 +1078,11 @@ export async function main(
           const git = await resolveTrustedExecutable(
             "git",
             dependencies.environment,
-            await protectedHookExecutableRoots(invocationDirectory, repository),
+            await protectedHookExecutableRoots(
+              invocationDirectory,
+              repository,
+              dependencies.environment,
+            ),
           );
           if (git === null) {
             throw new Error("Git is not available on a trusted PATH.");
@@ -2789,8 +2793,15 @@ function quoteCliPath(path: string): string {
 async function protectedHookExecutableRoots(
   invocationDirectory: string,
   repository: string,
+  environment: Readonly<Record<string, string | undefined>>,
 ): Promise<readonly string[]> {
   const roots = new Set([repository]);
+  const selectedWorktree = Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === "GIT_WORK_TREE",
+  )?.[1];
+  if (selectedWorktree) {
+    roots.add(await realpath(resolve(repository, selectedWorktree)));
+  }
 
   for (const directory of new Set([invocationDirectory, repository])) {
     let current = directory;
