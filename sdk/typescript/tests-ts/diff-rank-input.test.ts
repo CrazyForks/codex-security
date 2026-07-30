@@ -681,6 +681,124 @@ describe("diff rank input", () => {
     });
   });
 
+  test("distinguishes staged blobs even when both structural previews match", async () => {
+    const fixture = await createRepository();
+    const path = "src/handler.py";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "def handler(user):\n    return eval(user)\n",
+    );
+    git(fixture.repository, "add", path);
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "def handler(user):\n    return user\n",
+    );
+
+    const row = (await runDiffRankInput(fixture, "local-patch")).find(
+      (candidate) => candidate.path === path,
+    );
+
+    expect(row?.preview).toContain("Staged Git index:");
+    expect(row?.preview).toContain("Working tree:");
+    expect(
+      await readFile(
+        join(PLUGIN_ROOT, "skills", "security-diff-scan", "SKILL.md"),
+        "utf8",
+      ),
+    ).toContain("read every staged Git index blob in full");
+  });
+
+  test("retains reviewable staged text when the working-tree version is binary", async () => {
+    const fixture = await createRepository();
+    const path = "src/app.ts";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const staged = 'review the staged version';\n",
+    );
+    git(fixture.repository, "add", path);
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      new Uint8Array([0, 255, 0, 255]),
+    );
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview:
+        "Staged Git index (working tree is binary):\nexport const staged = 'review the staged version';",
+    });
+  });
+
+  test("retains reviewable working-tree text when the staged version is binary", async () => {
+    const fixture = await createRepository();
+    const path = "src/app.ts";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      new Uint8Array([0, 255, 0, 255]),
+    );
+    git(fixture.repository, "add", path);
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const working = 'review the working tree';\n",
+    );
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview:
+        "Working tree (staged Git index is binary):\nexport const working = 'review the working tree';",
+    });
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "inventories Git paths containing non-UTF-8 filesystem bytes",
+    async () => {
+      const fixture = await createRepository();
+      await writeRepositoryFile(
+        fixture.repository,
+        "src/normal.py",
+        "print('ordinary path')\n",
+      );
+      const python =
+        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      expect(python).not.toBeNull();
+      const probe = [
+        "from pathlib import Path",
+        "from types import SimpleNamespace",
+        "import json, sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "import generate_rank_input",
+        "generate_rank_input.subprocess.run = lambda *args, **kwargs: SimpleNamespace(stdout=b'src/\\xff.py\\x00src/normal.py\\x00')",
+        "paths = generate_rank_input.git_untracked_paths(Path(sys.argv[2]))",
+        "print(json.dumps([str(path.relative_to(sys.argv[2])) for path, _ in paths], ensure_ascii=True))",
+      ].join("\n");
+      const decoded = JSON.parse(
+        execFileSync(
+          python!,
+          ["-B", "-c", probe, join(PLUGIN_ROOT, "scripts"), fixture.repository],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_SECURITY_GIT: Bun.which("git") ?? undefined,
+            },
+          },
+        ),
+      ) as string[];
+
+      const rows = await runDiffRankInput(fixture, "local-patch");
+
+      expect(rows.some((row) => row.path === "src/normal.py")).toBe(true);
+      expect(decoded).toEqual(["src/\udcff.py", "src/normal.py"]);
+    },
+  );
+
   test("inventories untracked security-sensitive files without including ignored files", async () => {
     const fixture = await createRepository();
     const workflow = ".github/workflows/deploy.yml";

@@ -554,6 +554,39 @@ def staged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[str
     return git_blob_preview(command, environment, path, object_id, preview_bytes)
 
 
+def staged_content_differs_from_working_tree(repo: Path, path: Path) -> bool:
+    executable = trusted_git_executable(repo)
+    if executable is None:
+        raise SystemExit("Git is unavailable on the trusted executable path.")
+    environment = os.environ.copy()
+    for name in GIT_REPOSITORY_ENVIRONMENT:
+        environment.pop(name, None)
+    environment["GIT_LITERAL_PATHSPECS"] = "1"
+    result = subprocess.run(
+        [
+            executable,
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            str(repo),
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--quiet",
+            "--",
+            path.relative_to(repo).as_posix(),
+        ],
+        capture_output=True,
+        env=environment,
+    )
+    if result.returncode not in {0, 1}:
+        raise SystemExit(
+            f"Unsafe changed repository path cannot be safely reviewed: {path.relative_to(repo)}"
+        )
+    return result.returncode == 1
+
+
 def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
@@ -790,9 +823,8 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         ],
         check=True,
         capture_output=True,
-        text=True,
     )
-    fields = result.stdout.split("\0")
+    fields = [os.fsdecode(field) for field in result.stdout.split(b"\0")]
     if fields and not fields[-1]:
         fields.pop()
 
@@ -833,10 +865,13 @@ def git_untracked_paths(repo: Path) -> list[tuple[Path, str]]:
         ],
         check=True,
         capture_output=True,
-        text=True,
         env=environment,
     )
-    return [(repo / path, "A") for path in result.stdout.split("\0") if path]
+    return [
+        (repo / os.fsdecode(path), "A")
+        for path in result.stdout.split(b"\0")
+        if path
+    ]
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str, bool]]:
@@ -911,11 +946,27 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 working_preview, working_binary = confined_diff_preview(
                     repo, path, args.preview_bytes
                 )
-                is_binary = staged_binary or working_binary
-                preview = (
-                    staged_preview
-                    if staged_preview == working_preview
-                    else fit_preview_lines(
+                if staged_binary and working_binary:
+                    continue
+                is_binary = False
+                if staged_binary:
+                    preview = fit_preview_lines(
+                        [
+                            "Working tree (staged Git index is binary):",
+                            *working_preview.splitlines(),
+                        ],
+                        args.preview_bytes,
+                    )
+                elif working_binary:
+                    preview = fit_preview_lines(
+                        [
+                            "Staged Git index (working tree is binary):",
+                            *staged_preview.splitlines(),
+                        ],
+                        args.preview_bytes,
+                    )
+                elif staged_content_differs_from_working_tree(repo, path):
+                    preview = fit_preview_lines(
                         [
                             "Staged Git index:",
                             *staged_preview.splitlines(),
@@ -924,7 +975,8 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                         ],
                         args.preview_bytes,
                     )
-                )
+                else:
+                    preview = staged_preview
             else:
                 preview, is_binary = confined_diff_preview(repo, path, args.preview_bytes)
             if is_binary:
