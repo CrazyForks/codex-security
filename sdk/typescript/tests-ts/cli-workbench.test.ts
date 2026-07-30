@@ -692,6 +692,66 @@ describe("CLI workbench", () => {
     );
   });
 
+  test("caps reconciled matches instead of duplicated page-pair responses", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const reason = "same root cause ".repeat(20_000);
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                repository: "/repo",
+                scanCount: 2,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: null,
+                pairs: [{ beforeScanId: "before", afterScanId: "after" }],
+              };
+            }
+            if (args[0] !== "get-scan-matching-inputs") return {};
+            const scanId = args[2]!;
+            const offset = Number(args[4]);
+            return {
+              scanId,
+              findings: [{ occurrenceId: `${scanId}-${offset}` }],
+              nextOffset: offset === 0 ? 1 : null,
+              totalFindings: 2,
+            };
+          },
+          onMatch: async (input) => ({
+            matches: [
+              {
+                beforeOccurrenceIds: input.before.map(
+                  ({ occurrenceId }) => occurrenceId,
+                ),
+                afterOccurrenceIds: input.after.map(
+                  ({ occurrenceId }) => occurrenceId,
+                ),
+                confidence: "high",
+                reason,
+              },
+            ],
+            uncertain: [],
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(
+      calls.some(
+        (args) =>
+          args[0] === "save-scan-comparison" && args.includes("--matches-file"),
+      ),
+    ).toBe(true);
+    expect(JSON.parse(stdout.text())).toMatchObject({ matchedPairs: 1 });
+  });
+
   test("saves empty comparisons without starting Codex", async () => {
     const calls: Array<readonly string[]> = [];
     const deps = dependencies({

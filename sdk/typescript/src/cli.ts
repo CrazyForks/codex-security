@@ -2193,7 +2193,6 @@ async function matchScanPairInBatches(
     string,
     ScanComparisonResult["uncertain"][number]
   >();
-  let retainedBytes = 0;
   while (true) {
     let afterPage = firstAfterPage;
     while (true) {
@@ -2204,10 +2203,6 @@ async function matchScanPairInBatches(
         },
         { allowHistoricalUncertainty: true },
       );
-      retainedBytes += Buffer.byteLength(JSON.stringify(result));
-      if (retainedBytes > MAX_MATCH_RESULT_BYTES) {
-        throw oversizedAutomaticMatchError();
-      }
       confirmed.push(...result.matches);
       for (const candidate of result.uncertain) {
         const key = JSON.stringify([
@@ -2219,6 +2214,15 @@ async function matchScanPairInBatches(
           uncertain.set(key, candidate);
         }
       }
+      const reconciled = reconcileMatchingBatches(confirmed, [
+        ...uncertain.values(),
+      ]);
+      if (
+        Buffer.byteLength(JSON.stringify(reconciled)) > MAX_MATCH_RESULT_BYTES
+      ) {
+        throw oversizedAutomaticMatchError();
+      }
+      confirmed.splice(0, confirmed.length, ...reconciled.matches);
       if (afterPage.nextOffset === null) break;
       afterPage = await matchingInputPage(
         dependencies,
