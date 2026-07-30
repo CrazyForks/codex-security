@@ -2955,16 +2955,23 @@ async function protectedHookExecutableRoots(
       await canonicalProtectedHookRoot(resolve(repository, selectedWorktree)),
     );
   }
-  for (const name of [
+  const objectDirectories = new Set<string>();
+  const selectedObjectDirectory = hookGitEnvironmentValue(
+    environment,
     "GIT_OBJECT_DIRECTORY",
+  );
+  if (selectedObjectDirectory) {
+    objectDirectories.add(resolve(repository, selectedObjectDirectory));
+  }
+  const selectedAlternates = hookGitEnvironmentValue(
+    environment,
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  ] as const) {
-    const selected = hookGitEnvironmentValue(environment, name);
-    for (const objectDirectory of selected?.split(delimiter) ?? []) {
-      if (objectDirectory.length === 0) continue;
-      roots.add(
-        await canonicalProtectedHookRoot(resolve(repository, objectDirectory)),
-      );
+  );
+  if (selectedAlternates) {
+    for (const objectDirectory of gitAlternateObjectDirectories(
+      selectedAlternates,
+    )) {
+      objectDirectories.add(resolve(repository, objectDirectory));
     }
   }
 
@@ -3007,13 +3014,13 @@ async function protectedHookExecutableRoots(
     try {
       const commonDirectory = (
         await readFile(join(gitDirectory, "commondir"), "utf8")
-      ).trim();
+      ).replace(/\r?\n$/u, "");
       if (commonDirectory.length > 0) {
-        roots.add(
-          await canonicalProtectedHookRoot(
-            resolve(gitDirectory, commonDirectory),
-          ),
+        const canonical = await canonicalProtectedHookRoot(
+          resolve(gitDirectory, commonDirectory),
         );
+        roots.add(canonical);
+        objectDirectories.add(join(canonical, "objects"));
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -3035,6 +3042,29 @@ async function protectedHookExecutableRoots(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+    }
+    objectDirectories.add(join(gitDirectory, "objects"));
+  }
+
+  for (const objectDirectory of objectDirectories) {
+    const canonical = await canonicalProtectedHookRoot(objectDirectory);
+    roots.add(canonical);
+    let alternates: string;
+    try {
+      alternates = await readFile(
+        join(canonical, "info", "alternates"),
+        "utf8",
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    for (const alternate of alternates.split(/\r?\n/u)) {
+      if (alternate.length === 0 || alternate.startsWith("#")) continue;
+      if (objectDirectories.size >= 1_024) {
+        throw new Error("Too many Git alternate object directories.");
+      }
+      objectDirectories.add(resolve(canonical, alternate));
     }
   }
 
@@ -3094,6 +3124,18 @@ function gitConfigWorktrees(contents: string): readonly string[] {
     const matched = /^\s*worktree\s*=\s*(.+?)\s*$/iu.exec(line);
     let worktree = matched?.[1];
     if (worktree === undefined) continue;
+    let quoted = false;
+    let escaped = false;
+    let value = "";
+    for (const character of worktree) {
+      if (!escaped && character === '"') quoted = !quoted;
+      if (!quoted && !escaped && (character === "#" || character === ";")) {
+        break;
+      }
+      value += character;
+      escaped = !escaped && character === "\\";
+    }
+    worktree = value.trimEnd();
     if (worktree.startsWith('"') && worktree.endsWith('"')) {
       try {
         const decoded: unknown = JSON.parse(worktree);
@@ -3105,6 +3147,50 @@ function gitConfigWorktrees(contents: string): readonly string[] {
     if (worktree.length > 0) worktrees.push(worktree);
   }
   return worktrees;
+}
+
+function gitAlternateObjectDirectories(value: string): readonly string[] {
+  const entries: string[] = [];
+  let offset = 0;
+  while (offset < value.length) {
+    if (value[offset] === delimiter) {
+      offset += 1;
+      continue;
+    }
+    if (value[offset] === '"') {
+      let end = offset + 1;
+      let escaped = false;
+      for (; end < value.length; end += 1) {
+        const character = value[end]!;
+        if (!escaped && character === '"') break;
+        escaped = !escaped && character === "\\";
+      }
+      if (end === value.length) {
+        throw new Error("Invalid quoted Git alternate object directory.");
+      }
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(value.slice(offset, end + 1));
+      } catch (error) {
+        throw new Error("Invalid quoted Git alternate object directory.", {
+          cause: error,
+        });
+      }
+      if (typeof decoded !== "string") {
+        throw new Error("Invalid quoted Git alternate object directory.");
+      }
+      entries.push(decoded);
+      offset = end + 1;
+      if (offset < value.length && value[offset] !== delimiter) {
+        throw new Error("Invalid Git alternate object directory separator.");
+      }
+      continue;
+    }
+    const end = value.indexOf(delimiter, offset);
+    entries.push(value.slice(offset, end === -1 ? undefined : end));
+    offset = end === -1 ? value.length : end + 1;
+  }
+  return entries.filter((entry) => entry.length > 0);
 }
 
 async function canonicalProtectedHookRoot(path: string): Promise<string> {

@@ -1066,6 +1066,15 @@ describe("CLI", () => {
         ["-C", gitDirectory, "config", "core.worktree", worktree],
         { timeout: 10_000 },
       );
+      const configPath = join(gitDirectory, "config");
+      const config = await readFile(configPath, "utf8");
+      await writeFile(
+        configPath,
+        config.replace(
+          /^(\s*worktree\s*=\s*.+)$/mu,
+          "$1 ; repository owner configuration",
+        ),
+      );
       const gitName = process.platform === "win32" ? "git.cmd" : "git";
       const maliciousGit =
         process.platform === "win32"
@@ -1128,7 +1137,10 @@ describe("CLI", () => {
             currentDirectory: repository,
             environment: {
               ...process.env,
-              [name]: objectDirectory,
+              [name]:
+                name === "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                  ? JSON.stringify(objectDirectory)
+                  : objectDirectory,
               PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
             },
           }),
@@ -1143,6 +1155,142 @@ describe("CLI", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test("ignores Git shims in recursively configured alternate object stores", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-git-alternates-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      const firstAlternate = join(root, "first-alternate");
+      const secondAlternate = join(root, "second-alternate");
+      const binaries = join(secondAlternate, "node_modules", ".bin");
+      const marker = join(root, "git-shim-executed");
+      execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
+      await Promise.all([
+        mkdir(join(firstAlternate, "info"), { recursive: true }),
+        mkdir(join(firstAlternate, "pack"), { recursive: true }),
+        mkdir(join(secondAlternate, "info"), { recursive: true }),
+        mkdir(join(secondAlternate, "pack"), { recursive: true }),
+        mkdir(binaries, { recursive: true }),
+      ]);
+      await Promise.all([
+        writeFile(
+          join(repository, ".git", "objects", "info", "alternates"),
+          `${firstAlternate}\n`,
+        ),
+        writeFile(
+          join(firstAlternate, "info", "alternates"),
+          `${secondAlternate}\n`,
+        ),
+      ]);
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      const maliciousGit =
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
+      await writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 });
+      const stdout = capture();
+      const stderr = capture();
+      const exitCode = await main(
+        ["install-hook", repository, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: repository,
+          environment: {
+            ...process.env,
+            PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+          },
+        }),
+      );
+      expect([0, 2]).toContain(exitCode);
+      if (exitCode === 2) {
+        expect(stderr.text()).toContain("A pre-commit hook already exists");
+      }
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves significant whitespace in linked-worktree common Git paths",
+    async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-cli-spaced-common-git-")),
+      );
+      try {
+        const primary = join(root, "primary");
+        const linked = join(root, "linked");
+        const commonDirectory = join(root, "shared-git ");
+        execFileSync(
+          "git",
+          ["init", "-q", "--separate-git-dir", commonDirectory, primary],
+          { timeout: 10_000 },
+        );
+        execFileSync(
+          "git",
+          [
+            "-C",
+            primary,
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+          ],
+          { timeout: 10_000 },
+        );
+        execFileSync(
+          "git",
+          ["-C", primary, "worktree", "add", "-q", "--detach", linked],
+          { timeout: 10_000 },
+        );
+        const linkedGitDirectory = execFileSync(
+          "git",
+          ["-C", linked, "rev-parse", "--absolute-git-dir"],
+          { encoding: "utf8", timeout: 10_000 },
+        ).trimEnd();
+        await writeFile(
+          join(linkedGitDirectory, "commondir"),
+          `${commonDirectory}\n`,
+        );
+        const binaries = join(commonDirectory, "node_modules", ".bin");
+        const marker = join(root, "git-shim-executed");
+        await mkdir(binaries, { recursive: true });
+        await writeFile(
+          join(binaries, "git"),
+          `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`,
+          { mode: 0o755 },
+        );
+        const stdout = capture();
+        const stderr = capture();
+        const exitCode = await main(
+          ["install-hook", linked, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: linked,
+            environment: {
+              ...process.env,
+              PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+            },
+          }),
+        );
+        expect([0, 2]).toContain(exitCode);
+        if (exitCode === 2) {
+          expect(stderr.text()).toContain("A pre-commit hook already exists");
+        }
+        await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("accepts a selected Git worktree that has not been created yet", async () => {
     const root = await realpath(
