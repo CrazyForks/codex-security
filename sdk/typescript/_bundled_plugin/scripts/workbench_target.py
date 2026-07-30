@@ -354,6 +354,14 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
 
 
 def directory_snapshot_regular_file_count(target: Path) -> int:
+    return directory_snapshot_file_count(target, include_symlinks=False)
+
+
+def directory_snapshot_reviewable_file_count(target: Path) -> int:
+    return directory_snapshot_file_count(target, include_symlinks=True)
+
+
+def directory_snapshot_file_count(target: Path, *, include_symlinks: bool) -> int:
     paths = git_directory_snapshot_paths(target)
     if paths is None:
         paths = sorted(target.rglob("*"))
@@ -363,7 +371,9 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
             metadata = path.lstat()
         except OSError as exc:
             raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
-        if stat.S_ISREG(metadata.st_mode):
+        if stat.S_ISREG(metadata.st_mode) or (
+            include_symlinks and stat.S_ISLNK(metadata.st_mode)
+        ):
             count += 1
     return count
 

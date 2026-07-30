@@ -97,6 +97,7 @@ from workbench_target import (
     copy_git_worktree_files,
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    directory_snapshot_reviewable_file_count,
     git_bytes,
     git_command,
     git_output,
@@ -627,12 +628,26 @@ def authoritative_scope_file_count(
     target: Path, scope: str, diff_target: dict[str, str] | None
 ) -> int:
     if diff_target is None:
-        return directory_snapshot_regular_file_count(target if scope == "." else target / scope)
+        return directory_snapshot_reviewable_file_count(
+            target if scope == "." else target / scope
+        )
     base = diff_target["baseRevision"]
     if diff_target["kind"] == "working_tree":
         changes = [
-            git_bytes(target, "diff", "--name-only", "-z", base, "--", "."),
-            git_bytes(target, "diff", "--cached", "--name-only", "-z", base, "--", "."),
+            git_bytes(
+                target, "diff", "--ignore-submodules=none", "--name-only", "-z", base, "--", "."
+            ),
+            git_bytes(
+                target,
+                "diff",
+                "--cached",
+                "--ignore-submodules=none",
+                "--name-only",
+                "-z",
+                base,
+                "--",
+                ".",
+            ),
             git_bytes(
                 target,
                 "ls-files",
@@ -648,6 +663,7 @@ def authoritative_scope_file_count(
             git_bytes(
                 target,
                 "diff",
+                "--ignore-submodules=none",
                 "--name-only",
                 "-z",
                 base,
@@ -659,6 +675,18 @@ def authoritative_scope_file_count(
     if any(change is None for change in changes):
         raise SystemExit("Could not enumerate the selected Git diff scope.")
     return len({path for change in changes if change is not None for path in change.split(b"\0") if path})
+
+
+def verify_empty_scope_identity(
+    target: Path,
+    diff_target: dict[str, str] | None,
+    scope_file_count: int,
+    target_identity: tuple[str, str | None, int | str, int | str],
+) -> None:
+    if scope_file_count == 0 and scan_target_identity(target, diff_target) != target_identity:
+        raise SystemExit(
+            "The selected scan target changed while its empty scope was being verified."
+        )
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
@@ -1166,12 +1194,13 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         )
         if diff_target is not None and not target_summary:
             target_summary = diff_target_summary(diff_target)
-        scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
         target_identity = scan_target_identity(
             target,
             diff_target,
             metadata=target_metadata,
         )
+        scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
+        verify_empty_scope_identity(target, diff_target, scope_file_count, target_identity)
         target_root = scan_target_root(args.scan_root, target)
         target_root.mkdir(parents=True, exist_ok=True)
         if manages_transaction:
@@ -1257,9 +1286,10 @@ def start_prompt_only_scan(
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
-    scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
+    scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
+    verify_empty_scope_identity(target, diff_target, scope_file_count, target_identity)
     target_root = scan_target_root(args.scan_root, target)
 
     connection.execute("BEGIN IMMEDIATE")
@@ -1600,10 +1630,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         else sum(
             1
             if (repository / path).is_file()
-            else directory_snapshot_regular_file_count(repository / path)
+            else directory_snapshot_reviewable_file_count(repository / path)
             for path in paths
         )
     )
+    verify_empty_scope_identity(repository, diff_target, scope_file_count, target_identity)
     parent_scan_id = (
         require_uuid(args.parent_scan_id, "parent-scan-id")
         if args.parent_scan_id is not None

@@ -7,6 +7,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -118,6 +119,7 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
   emptyScope = false,
+  symlinkScope = false,
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -131,6 +133,11 @@ async function startDraftScan(
   await mkdir(join(target, "src"), { recursive: true });
   if (!emptyScope) {
     await writeFile(join(target, "src", "extract.py"), "# fixture\n");
+  }
+  if (symlinkScope) {
+    const external = join(root, "external.py");
+    await writeFile(external, "# outside the scanned repository\n");
+    await symlink(external, join(target, "src", "external.py"));
   }
   await mkdir(scanDir, { mode: 0o700 });
 
@@ -272,6 +279,81 @@ describe("malformed scan artifact recovery", () => {
     ).resolves.toMatchObject({
       export: { path: join(fixture.scanDir, "findings.json") },
     });
+  });
+
+  test("does not treat a symlink-only repository snapshot as empty", async () => {
+    const fixture = await startDraftScan("directory", true, true);
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    coverage.surfaces = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+    ]);
+
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
+  });
+
+  test("rejects an empty scope that changes during snapshot capture", async () => {
+    const fixture = await startDraftScan("directory", true);
+    const scanDir = join(fixture.stateDir, "racing-scan");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const script = [
+      "import sys",
+      "from pathlib import Path",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_db",
+      "repository = Path(sys.argv[2])",
+      "original = workbench_db.authoritative_scope_file_count",
+      "def racing_count(*args, **kwargs):",
+      "    count = original(*args, **kwargs)",
+      "    (repository / 'src' / 'new.py').write_text('# appeared\\n')",
+      "    return count",
+      "workbench_db.authoritative_scope_file_count = racing_count",
+      "sys.argv = [workbench_db.__file__, *sys.argv[3:]]",
+      "workbench_db.main()",
+    ].join("\n");
+    const recipe = JSON.stringify({
+      config: {},
+      mode: "standard",
+      repository: fixture.repository,
+      target: { kind: "repository", paths: [] },
+    });
+    const result = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        script,
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        "register-cli-scan",
+        "--repository",
+        fixture.repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        recipe,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "The selected scan target changed while its empty scope was being verified.",
+    );
   });
 
   test("rejects a self-sealed empty inventory for a nonempty running scan", async () => {
@@ -485,6 +567,61 @@ describe("malformed scan artifact recovery", () => {
     await expect(completeScan(fixture)).rejects.toThrow(
       "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
     );
+  });
+
+  test("counts changed submodules even when local Git config ignores them", async () => {
+    const fixture = await startDraftScan("clean");
+    const git = (args: string[]): string => {
+      const result = spawnSync("git", ["-C", fixture.repository, ...args], {
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    const base = git(["rev-parse", "HEAD"]);
+    git(["config", "diff.ignoreSubmodules", "all"]);
+    git(["update-index", "--add", "--cacheinfo", `160000,${base},deps/linked`]);
+    git([
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "add linked repository",
+    ]);
+    const head = git(["rev-parse", "HEAD"]);
+    const scanDir = join(fixture.stateDir, "submodule-scan");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+
+    const registration = await workbench(fixture, [
+      "register-cli-scan",
+      "--repository",
+      fixture.repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository: fixture.repository,
+        target: { kind: "refs", paths: [], base, head },
+      }),
+    ]);
+    const context = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      String(registration["scanId"]),
+    ]);
+
+    expect(
+      (
+        context["scan"] as {
+          progress: { coverage: { filesTotal: number } };
+        }
+      ).progress.coverage,
+    ).toMatchObject({ filesTotal: 1 });
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {
