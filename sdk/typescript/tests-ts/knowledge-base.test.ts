@@ -63,6 +63,7 @@ function pdf(
     encode?: (bytes: Buffer) => Buffer;
     extraStreams?: number;
     indirectLength?: boolean;
+    indirectFilter?: boolean;
     headerComment?: string;
     dictionaryPrefix?: string;
     streamComment?: string;
@@ -80,11 +81,15 @@ function pdf(
   const pageObjects = Array.from({ length: pages }, (_, index) => index + 3);
   const font = pages + 3;
   const content = pages + 4;
-  const filter = options.filter ?? (compressed ? "/FlateDecode" : undefined);
+  const directFilter =
+    options.filter ?? (compressed ? "/FlateDecode" : undefined);
   const extraStreams = options.extraStreams ?? 0;
   const length = options.indirectLength
     ? `${content + extraStreams + 1} 0 R`
     : String(streamBytes.byteLength);
+  const filter = options.indirectFilter
+    ? `${content + extraStreams + 1 + (options.indirectLength ? 1 : 0)} 0 R`
+    : directFilter;
   const streamObject = `<< ${options.dictionaryPrefix ?? ""}/Length ${length}${filter === undefined ? "" : ` /Filter ${filter}`} >>${options.streamComment === undefined ? "\n" : ` ${options.streamComment}\n`}stream\n${streamBytes.toString("latin1")}\nendstream`;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -97,6 +102,7 @@ function pdf(
     streamObject,
     ...Array.from({ length: extraStreams }, () => streamObject),
     ...(options.indirectLength ? [String(streamBytes.byteLength)] : []),
+    ...(options.indirectFilter ? [directFilter ?? "/FlateDecode"] : []),
   ];
   let output = `%PDF-1.4\n${options.headerComment === undefined ? "" : `% ${options.headerComment}\n`}`;
   const offsets = [0];
@@ -481,6 +487,7 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     const chained = join(root, "chained.pdf");
     const indirect = join(root, "indirect.pdf");
+    const indirectFilter = join(root, "indirect-filter.pdf");
     const escaped = join(root, "escaped.pdf");
     const lzw = join(root, "lzw.pdf");
     const earlyChange = join(root, "lzw-early-change.pdf");
@@ -494,6 +501,10 @@ describe("scan knowledge bases", () => {
     await writeFile(
       indirect,
       pdf("Indirect stream length", 1, true, "", { indirectLength: true }),
+    );
+    await writeFile(
+      indirectFilter,
+      pdf("Indirect stream filter", 1, true, "", { indirectFilter: true }),
     );
     await writeFile(
       escaped,
@@ -523,6 +534,7 @@ describe("scan knowledge bases", () => {
         "ASCII85 then Flate",
         "Escaped PDF filter",
         "Indirect stream length",
+        "Indirect stream filter",
         "LZW encoded text",
         earlyChangeText,
       ].sort(),
@@ -558,6 +570,26 @@ describe("scan knowledge bases", () => {
         "literal-filter-token",
         { dictionaryPrefix: "/Note (/Filter /DCTDecode) " },
       ],
+      ["literal-dictionary-close", { dictionaryPrefix: "/Note (>>) " }],
+      ["literal-dictionary-open", { dictionaryPrefix: "/Note (<<) " }],
+      [
+        "comment-dictionary-delimiters",
+        { dictionaryPrefix: "% << >> ignored\n" },
+      ],
+      [
+        "decoy-indirect-filter",
+        {
+          indirectFilter: true,
+          headerComment: "6 0 obj /DCTDecode endobj",
+        },
+      ],
+      [
+        "decoy-indirect-length",
+        {
+          indirectLength: true,
+          headerComment: "6 0 obj 0 endobj",
+        },
+      ],
     ] as const) {
       const document = join(root, `${name}.pdf`);
       await writeFile(
@@ -568,6 +600,35 @@ describe("scan knowledge bases", () => {
         "8388608-byte extracted-text limit",
       );
     }
+  });
+
+  test("counts only the final output of chained PDF compression filters", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "multi-stage-limit.pdf");
+    const noise = Buffer.allocUnsafe(5 * 1024 * 1024);
+    let state = 1;
+    for (let index = 0; index < noise.length; index += 1) {
+      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+      noise[index] = 33 + ((state >>> 16) % 90);
+    }
+    const compressed = pdf(
+      "A bounded multi-stage PDF stream",
+      1,
+      true,
+      `%${noise.toString("latin1")}\n`,
+      {
+        filter: "[/ASCII85Decode /FlateDecode]",
+        encode: encodeAscii85,
+      },
+    );
+    expect(compressed.byteLength).toBeLessThan(8 * 1024 * 1024);
+    await writeFile(document, compressed);
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "A bounded multi-stage PDF stream",
+    ]);
   });
 
   test("bounds repeated PDF LZW clear codes without allocating fresh dictionaries", async () => {
