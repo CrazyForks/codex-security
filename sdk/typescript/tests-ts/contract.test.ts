@@ -513,6 +513,49 @@ describe("canonical scan contract", () => {
     }
   });
 
+  test("rejects arbitrary sealed artifacts that do not contain a valid review receipt", async () => {
+    for (const [receipt, contents] of [
+      ["artifacts/02_discovery/notes.txt", '{"status":"reviewed"}\n'],
+      ["artifacts/02_discovery/work_ledger.jsonl", ""],
+      ["artifacts/02_discovery/work_ledger.jsonl", "not a receipt\n"],
+      ["artifacts/02_discovery/work_ledger.jsonl", '{"status":"claimed"}\n'],
+    ] as const) {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const receiptPath = join(scanDir, receipt);
+      await mkdir(dirname(receiptPath), { recursive: true });
+      await writeFile(receiptPath, contents);
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      const manifest = await readJson(manifestPath);
+      findings["findings"] = [];
+      coverage["surfaces"][0]["disposition"] = "no_issue_found";
+      coverage["surfaces"][0]["receiptRefs"] = [receipt];
+      manifest["scan"]["artifacts"].push({
+        path: receipt,
+        sha256: "",
+        mediaType: "application/octet-stream",
+      });
+      await Promise.all([
+        writeJson(findingsPath, findings),
+        writeJson(coveragePath, coverage),
+        writeJson(manifestPath, manifest),
+      ]);
+      await reseal(scanDir);
+
+      const validation = runPythonContractTool(
+        scanDir,
+        "validate_scan_contract.py",
+      );
+      expect(validation.status).toBe(2);
+      expect(validation.stderr).toContain(
+        "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+      );
+    }
+  });
+
   test("honors cancellation during contract validation", async () => {
     const scanDir = await copyExample();
     const controller = new AbortController();

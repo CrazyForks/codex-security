@@ -337,6 +337,70 @@ describe("malformed scan artifact recovery", () => {
     }
   });
 
+  test("exports trusted receiptless legacy scans to SARIF without weakening fresh validation", async () => {
+    const fixture = await startDraftScan();
+    await completeScan(fixture);
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+    surface.disposition = "no_issue_found";
+    surface.receiptRefs = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+    ]);
+    const migrateLegacyScan = [
+      "import hashlib, json, pathlib, sqlite3, sys",
+      "scan = pathlib.Path(sys.argv[1])",
+      "manifest_path = scan / 'scan-manifest.json'",
+      "manifest = json.loads(manifest_path.read_text())",
+      "for artifact in manifest['scan']['artifacts']:",
+      "    artifact['sha256'] = hashlib.sha256((scan / artifact['path']).read_bytes()).hexdigest()",
+      "encoded = (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + '\\n').encode()",
+      "manifest_path.write_bytes(encoded)",
+      "database = sqlite3.connect(sys.argv[2])",
+      "database.execute('UPDATE scans SET seal_manifest_digest = ? WHERE id = ?', ('sha256:' + hashlib.sha256(encoded).hexdigest(), sys.argv[3]))",
+      "database.commit()",
+      "database.close()",
+    ].join("\n");
+    const migrated = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        migrateLegacyScan,
+        fixture.scanDir,
+        join(fixture.stateDir, "workbench.sqlite3"),
+        fixture.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(migrated.status, migrated.stderr).toBe(0);
+
+    await expect(
+      workbench(fixture, [
+        "export-findings",
+        "--scan-id",
+        fixture.scanId,
+        "--format",
+        "sarif",
+      ]),
+    ).resolves.toMatchObject({
+      export: { path: join(fixture.scanDir, "exports", "results.sarif") },
+    });
+    expect(
+      (
+        await readJson<SarifDocument>(
+          join(fixture.scanDir, "exports", "results.sarif"),
+        )
+      ).runs[0]?.results,
+    ).toEqual([]);
+  });
+
   test("counts symlinks when a Deep Scan starts directly from a target", async () => {
     const fixture = await startDraftScan("directory", true, true);
     const started = await workbench(fixture, [

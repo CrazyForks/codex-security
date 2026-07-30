@@ -1376,7 +1376,11 @@ def _validate_coverage(
             isinstance(surface, dict)
             and surface.get("disposition") != "not_applicable"
             and isinstance(surface.get("receiptRefs"), list)
-            and bool(surface["receiptRefs"])
+            and any(
+                isinstance(reference, str)
+                and _has_verified_review_receipt(scan_dir, reference)
+                for reference in surface["receiptRefs"]
+            )
             for surface in surfaces
         )
     )
@@ -1446,6 +1450,32 @@ def _validate_coverage(
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
     _require_safe_json_value(coverage, "coverage.json")
+
+
+def _has_verified_review_receipt(scan_dir: Path, reference: str) -> bool:
+    if reference != "artifacts/02_discovery/work_ledger.jsonl":
+        return False
+    try:
+        descriptor = open_scan_local_file_descriptor(scan_dir, reference, "review receipt")
+        with os.fdopen(descriptor, "rb") as ledger:
+            if os.fstat(ledger.fileno()).st_size > SOURCE_READ_MAX_BYTES:
+                return False
+            for raw_line in ledger:
+                if len(raw_line) > JSON_DOCUMENT_READ_CHUNK_SIZE:
+                    return False
+                try:
+                    receipt = _loads_json(raw_line.decode("utf-8"))
+                except (UnicodeError, ValueError):
+                    return False
+                if isinstance(receipt, dict) and receipt.get("status") in {
+                    "reviewed",
+                    "completed",
+                    "complete",
+                }:
+                    return True
+    except (ContractError, OSError):
+        return False
+    return False
 
 
 def _validate_manifest(manifest: dict[str, Any]) -> None:
@@ -2151,7 +2181,7 @@ def _read_sealed_scan(
         coverage,
         scan_dir,
         findings,
-        enforce_complete_review=True,
+        enforce_complete_review=not trusted_sealed_scan,
         authoritative_empty_scope_inventory=(
             AUTHORITATIVE_EMPTY_SCOPE_INVENTORY if trusted_sealed_scan else None
         ),
