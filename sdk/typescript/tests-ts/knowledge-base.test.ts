@@ -157,10 +157,28 @@ function encodeRunLength(bytes: Buffer): Buffer {
   return Buffer.from(encoded);
 }
 
-function encodePdfLzwLiterals(bytes: Buffer): Buffer {
+function encodePdfLzwLiterals(bytes: Buffer, earlyChange: 0 | 1 = 1): Buffer {
   const codes = [256, ...bytes, 257];
   let bits = "";
-  for (const code of codes) bits += code.toString(2).padStart(9, "0");
+  let nextCode = 258;
+  let codeBits = 9;
+  let previous = false;
+  for (const code of codes) {
+    bits += code.toString(2).padStart(codeBits, "0");
+    if (code === 256) {
+      nextCode = 258;
+      codeBits = 9;
+      previous = false;
+    } else if (code !== 257) {
+      if (previous && nextCode < 4_096) {
+        nextCode += 1;
+        if (nextCode + earlyChange === 1 << codeBits && codeBits < 12) {
+          codeBits += 1;
+        }
+      }
+      previous = true;
+    }
+  }
   bits = bits.padEnd(Math.ceil(bits.length / 8) * 8, "0");
   return Buffer.from(
     Array.from({ length: bits.length / 8 }, (_unused, index) =>
@@ -465,6 +483,7 @@ describe("scan knowledge bases", () => {
     const indirect = join(root, "indirect.pdf");
     const escaped = join(root, "escaped.pdf");
     const lzw = join(root, "lzw.pdf");
+    const earlyChange = join(root, "lzw-early-change.pdf");
     await writeFile(
       chained,
       pdf("ASCII85 then Flate", 1, true, "", {
@@ -487,6 +506,15 @@ describe("scan knowledge bases", () => {
         encode: encodePdfLzwLiterals,
       }),
     );
+    const earlyChangeText = `LZW early change ${"x".repeat(350)}`;
+    await writeFile(
+      earlyChange,
+      pdf(earlyChangeText, 1, false, "", {
+        filter: "/LZWDecode",
+        dictionaryPrefix: "/DecodeParms << /EarlyChange 0 >> ",
+        encode: (bytes) => encodePdfLzwLiterals(bytes, 0),
+      }),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.push(knowledgeBase.path);
@@ -496,6 +524,7 @@ describe("scan knowledge bases", () => {
         "Escaped PDF filter",
         "Indirect stream length",
         "LZW encoded text",
+        earlyChangeText,
       ].sort(),
     );
   });
@@ -525,6 +554,10 @@ describe("scan knowledge bases", () => {
         "literal-length-token",
         { dictionaryPrefix: "/Note (/Length 999999999) " },
       ],
+      [
+        "literal-filter-token",
+        { dictionaryPrefix: "/Note (/Filter /DCTDecode) " },
+      ],
     ] as const) {
       const document = join(root, `${name}.pdf`);
       await writeFile(
@@ -535,6 +568,48 @@ describe("scan knowledge bases", () => {
         "8388608-byte extracted-text limit",
       );
     }
+  });
+
+  test("bounds repeated PDF LZW clear codes without allocating fresh dictionaries", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "lzw-clears.pdf");
+    const clearCodes = 1_000_001;
+    const encoded = Buffer.alloc(Math.ceil(((clearCodes + 1) * 9) / 8));
+    let offset = 0;
+    for (let index = 0; index <= clearCodes; index += 1) {
+      const code = index === clearCodes ? 257 : 256;
+      for (let bit = 8; bit >= 0; bit -= 1) {
+        encoded[Math.floor(offset / 8)]! |=
+          ((code >> bit) & 1) << (7 - (offset % 8));
+        offset += 1;
+      }
+    }
+    await writeFile(
+      document,
+      pdf("reviewable", 1, false, "", {
+        filter: "/LZWDecode",
+        encode: () => encoded,
+      }),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+  });
+
+  test("bounds adversarial backward PDF stream-dictionary scans", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "dictionary-work.pdf");
+    await writeFile(
+      document,
+      pdf("reviewable", 1, false, "", {
+        headerComment: ">>stream\n".repeat(6_000),
+      }),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "dictionary scan limit",
+    );
   });
 
   test("rejects duplicate DOCX document entries before repeated inflation", async () => {

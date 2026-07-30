@@ -37,6 +37,9 @@ const MAX_INPUT_BYTES = 32 * 1024 * 1024;
 const MAX_EXTRACTED_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 32 * 1024 * 1024;
 const MAX_PDF_PAGES = 512;
+const MAX_PDF_DICTIONARY_SCAN_BYTES = 256 * 1024;
+const MAX_PDF_DICTIONARY_WORK_BYTES = 2 * MAX_DOCUMENT_BYTES;
+const MAX_PDF_LZW_CODES = 1_000_000;
 const READ_CHUNK_BYTES = 64 * 1024;
 
 interface DiscoveryState {
@@ -373,9 +376,15 @@ function boundCompressedPdfStreams(
   const streams =
     />>(?:(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*)stream(?:\r\n|\r|\n)/gu;
   let inflatedBytes = 0;
+  const dictionaryWork = { remaining: MAX_PDF_DICTIONARY_WORK_BYTES };
   for (const marker of contents.matchAll(streams)) {
     signal?.throwIfAborted();
-    const dictionary = pdfStreamDictionary(contents, marker.index + 2);
+    const dictionary = pdfStreamDictionary(
+      contents,
+      marker.index + 2,
+      dictionaryWork,
+      path,
+    );
     if (dictionary === null) continue;
     const filters = pdfStreamFilters(contents, dictionary);
     if (filters.length === 0) continue;
@@ -397,7 +406,7 @@ function boundCompressedPdfStreams(
     if (streamEnd < streamStart || streamEnd > source.byteLength) continue;
 
     let decoded = source.subarray(streamStart, streamEnd);
-    for (const filter of filters) {
+    for (const [filterIndex, filter] of filters.entries()) {
       signal?.throwIfAborted();
       const remaining = MAX_EXTRACTED_DOCUMENT_BYTES - inflatedBytes;
       if (remaining <= 0) throw oversizedPdfStream(path);
@@ -417,7 +426,11 @@ function boundCompressedPdfStreams(
             break;
           case "LZWDecode":
           case "LZW":
-            decoded = decodePdfLzw(decoded, remaining);
+            decoded = decodePdfLzw(
+              decoded,
+              remaining,
+              pdfLzwEarlyChange(dictionary, filterIndex),
+            );
             break;
           case "FlateDecode":
           case "Fl":
@@ -457,9 +470,20 @@ function boundCompressedPdfStreams(
   }
 }
 
-function pdfStreamDictionary(contents: string, end: number): string | null {
+function pdfStreamDictionary(
+  contents: string,
+  end: number,
+  work: { remaining: number },
+  path: string,
+): string | null {
   let depth = 1;
-  for (let index = end - 3; index >= 0; index -= 1) {
+  const minimum = Math.max(0, end - MAX_PDF_DICTIONARY_SCAN_BYTES);
+  for (let index = end - 3; index >= minimum; index -= 1) {
+    if (--work.remaining < 0) {
+      throw new KnowledgeBaseLimitError(
+        `Knowledge base PDF exceeds the ${MAX_PDF_DICTIONARY_WORK_BYTES}-byte dictionary scan limit: ${path}`,
+      );
+    }
     const token = contents.slice(index, index + 2);
     if (token === ">>") {
       depth += 1;
@@ -479,6 +503,11 @@ function pdfStreamDictionary(contents: string, end: number): string | null {
       }
       index -= 1;
     }
+  }
+  if (minimum !== 0) {
+    throw new KnowledgeBaseLimitError(
+      `Knowledge base PDF exceeds the ${MAX_PDF_DICTIONARY_SCAN_BYTES}-byte dictionary limit: ${path}`,
+    );
   }
   return null;
 }
@@ -536,6 +565,9 @@ function pdfDictionaryLexicalValues(dictionary: string): string {
     } else if (character === "(") {
       literalDepth = 1;
       output += " ";
+    } else if (character === "<" && dictionary[index + 1] === "<") {
+      output += "<<";
+      index += 1;
     } else if (character === "<" && dictionary[index + 1] !== "<") {
       hex = true;
       output += " ";
@@ -549,7 +581,7 @@ function pdfDictionaryLexicalValues(dictionary: string): string {
 function pdfStreamFilters(contents: string, dictionary: string): string[] {
   const match =
     /\/(?:Filter|F)\s+(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+\s+\d+\s+R)(?=[\s/>])/u.exec(
-      dictionary,
+      pdfDictionaryLexicalValues(dictionary),
     );
   if (match?.[1] === undefined) return [];
   let value = match[1];
@@ -566,6 +598,20 @@ function pdfStreamFilters(contents: string, dictionary: string): string[] {
       String.fromCharCode(Number.parseInt(encoded, 16)),
     ),
   );
+}
+
+function pdfLzwEarlyChange(dictionary: string, filterIndex: number): 0 | 1 {
+  const lexical = pdfDictionaryLexicalValues(dictionary);
+  const parameters = /\/(?:DecodeParms|DP)\s+(\[[\s\S]*?\]|<<[\s\S]*?>>)/u.exec(
+    lexical,
+  )?.[1];
+  if (parameters === undefined) return 1;
+  const selected = parameters.startsWith("[")
+    ? [...parameters.matchAll(/null|<<[\s\S]*?>>/gu)][filterIndex]?.[0]
+    : parameters;
+  if (selected === undefined || selected === "null") return 1;
+  const value = /\/EarlyChange\s+([01])(?=[\s/>])/u.exec(selected)?.[1];
+  return value === "0" ? 0 : 1;
 }
 
 function oversizedPdfStream(path: string): KnowledgeBaseLimitError {
@@ -661,8 +707,12 @@ function decodePdfRunLength(value: Buffer, maximum: number): Buffer {
   return output.subarray(0, written);
 }
 
-function decodePdfLzw(value: Buffer, maximum: number): Buffer {
-  let dictionary = Array.from({ length: 256 }, (_unused, code) =>
+function decodePdfLzw(
+  value: Buffer,
+  maximum: number,
+  earlyChange: 0 | 1,
+): Buffer {
+  const dictionary = Array.from({ length: 256 }, (_unused, code) =>
     Buffer.from([code]),
   );
   let nextCode = 258;
@@ -671,7 +721,13 @@ function decodePdfLzw(value: Buffer, maximum: number): Buffer {
   let previous: Buffer | undefined;
   const chunks: Buffer[] = [];
   let outputBytes = 0;
+  let decodedCodes = 0;
   while (bitOffset + codeBits <= value.byteLength * 8) {
+    if (++decodedCodes > MAX_PDF_LZW_CODES) {
+      throw Object.assign(new Error("PDF LZW stream requires too much work."), {
+        code: "ERR_BUFFER_TOO_LARGE",
+      });
+    }
     let code = 0;
     for (let bit = 0; bit < codeBits; bit += 1) {
       const offset = bitOffset + bit;
@@ -681,9 +737,7 @@ function decodePdfLzw(value: Buffer, maximum: number): Buffer {
     }
     bitOffset += codeBits;
     if (code === 256) {
-      dictionary = Array.from({ length: 256 }, (_unused, item) =>
-        Buffer.from([item]),
-      );
+      dictionary.length = 256;
       nextCode = 258;
       codeBits = 9;
       previous = undefined;
@@ -705,7 +759,9 @@ function decodePdfLzw(value: Buffer, maximum: number): Buffer {
     outputBytes += entry.byteLength;
     if (previous !== undefined && nextCode < 4_096) {
       dictionary[nextCode++] = Buffer.concat([previous, entry.subarray(0, 1)]);
-      if (nextCode + 1 === 1 << codeBits && codeBits < 12) codeBits += 1;
+      if (nextCode + earlyChange === 1 << codeBits && codeBits < 12) {
+        codeBits += 1;
+      }
     }
     previous = entry;
   }
