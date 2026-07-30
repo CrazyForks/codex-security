@@ -710,6 +710,43 @@ describe("diff rank input", () => {
     ).toContain("read every staged Git index blob in full");
   });
 
+  test("reviews every available stage of an unresolved Git merge conflict", async () => {
+    const fixture = await createRepository();
+    const path = "src/app.ts";
+    git(fixture.repository, "branch", "conflicting");
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const ours = 'review our side';\n",
+    );
+    git(fixture.repository, "add", path);
+    git(fixture.repository, "commit", "-qm", "ours");
+    git(fixture.repository, "checkout", "-q", "conflicting");
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const theirs = 'review their side';\n",
+    );
+    git(fixture.repository, "add", path);
+    git(fixture.repository, "commit", "-qm", "theirs");
+    git(fixture.repository, "checkout", "-q", "main");
+    expect(
+      spawnSync("git", ["merge", "--no-edit", "conflicting"], {
+        cwd: fixture.repository,
+        encoding: "utf8",
+      }).status,
+    ).toBe(1);
+
+    const row = (await runDiffRankInput(fixture, "local-patch")).find(
+      (candidate) => candidate.path === path,
+    );
+
+    expect(row?.preview).toContain("Merge base (stage 1):");
+    expect(row?.preview).toContain("Ours (stage 2):");
+    expect(row?.preview).toContain("Theirs (stage 3):");
+    expect(row?.preview).toContain("Working tree:");
+  });
+
   test("retains reviewable staged text when the working-tree version is binary", async () => {
     const fixture = await createRepository();
     const path = "src/app.ts";

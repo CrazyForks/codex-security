@@ -536,22 +536,41 @@ def staged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[str
         env=environment,
     )
     entries = [entry for entry in listed.stdout.split(b"\0") if entry]
-    if listed.returncode != 0 or len(entries) != 1:
+    if listed.returncode != 0 or not entries:
         raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
-    try:
-        metadata, staged_path = entries[0].split(b"\t", 1)
-        mode, object_id, stage = metadata.split(b" ", 2)
-    except ValueError as error:
-        raise SystemExit(
-            f"Unsafe changed repository path cannot be safely reviewed: {relative}"
-        ) from error
-    if (
-        mode not in {b"100644", b"100755"}
-        or stage != b"0"
-        or staged_path != os.fsencode(relative)
-    ):
+    previews: list[str] = []
+    seen_stages: set[bytes] = set()
+    for entry in entries:
+        try:
+            metadata, staged_path = entry.split(b"\t", 1)
+            mode, object_id, stage = metadata.split(b" ", 2)
+        except ValueError as error:
+            raise SystemExit(
+                f"Unsafe changed repository path cannot be safely reviewed: {relative}"
+            ) from error
+        if (
+            mode not in {b"100644", b"100755"}
+            or stage not in {b"0", b"1", b"2", b"3"}
+            or stage in seen_stages
+            or staged_path != os.fsencode(relative)
+        ):
+            raise SystemExit(
+                f"Unsafe changed repository path cannot be safely reviewed: {relative}"
+            )
+        seen_stages.add(stage)
+        preview, binary = git_blob_preview(command, environment, path, object_id, preview_bytes)
+        if binary:
+            continue
+        if stage == b"0":
+            previews.append(preview)
+        else:
+            label = {b"1": "Merge base", b"2": "Ours", b"3": "Theirs"}[stage]
+            previews.extend([f"{label} (stage {stage.decode('ascii')}):", *preview.splitlines()])
+    if b"0" in seen_stages and len(seen_stages) != 1:
         raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
-    return git_blob_preview(command, environment, path, object_id, preview_bytes)
+    if not previews:
+        return "", True
+    return fit_preview_lines(previews, preview_bytes), False
 
 
 def staged_content_differs_from_working_tree(repo: Path, path: Path) -> bool:
@@ -927,7 +946,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         if not diff_path_is_included(rel) and gitlink_revision is None:
             continue
 
-        if status in {"D", "U"}:
+        if status == "D":
             preview = ""
         else:
             if args.mode == "revisions":
