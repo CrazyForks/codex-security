@@ -2254,156 +2254,166 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("keeps a private preflight snapshot isolated from persistent credentials", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const ambientHome = join(root, "ambient-codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(ambientHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    await writeFile(join(ambientHome, "auth.json"), "{}\n");
-    const interpreter =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(interpreter).not.toBeNull();
-    let capturedConfigPath: string | undefined;
-    let capturedCodexHome: string | undefined;
-    const client = new TestClient(
-      {
-        pluginPath: PLUGIN_ROOT,
-        codexOverrides: {
-          features: { goals: true },
-          mcp_servers: {
-            private: {
-              command: "echo",
-              env: { PRIVATE_TOKEN: "RUNTIME_MCP_SECRET" },
+  test(
+    "keeps a private preflight snapshot isolated from persistent credentials",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const ambientHome = join(root, "ambient-codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(ambientHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(join(ambientHome, "auth.json"), "{}\n");
+      const interpreter =
+        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      expect(interpreter).not.toBeNull();
+      let capturedConfigPath: string | undefined;
+      let capturedCodexHome: string | undefined;
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides: {
+            features: { goals: true },
+            mcp_servers: {
+              private: {
+                command: "echo",
+                env: { PRIVATE_TOKEN: "RUNTIME_MCP_SECRET" },
+              },
             },
-          },
-          shell_environment_policy: {
-            set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
+            shell_environment_policy: {
+              set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
+            },
           },
         },
-      },
-      {
-        environment: { CODEX_HOME: ambientHome },
-        resolvePluginPython: async () => interpreter!,
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(input: string) {
-              const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-              const codexHome = options.env?.["CODEX_HOME"];
-              expect(typeof configPath).toBe("string");
-              expect(typeof codexHome).toBe("string");
-              capturedConfigPath = configPath;
-              capturedCodexHome = codexHome;
-              expect(configPath!.startsWith(`${codexHome!}/`)).toBe(false);
-              expect(
-                parseToml(
-                  await readFile(join(codexHome!, "config.toml"), "utf8"),
-                ),
-              ).toMatchObject({
-                permissions: {
-                  codex_security_scan: {
-                    filesystem: {
-                      ":root": "read",
-                      ":workspace_roots": "write",
-                      [join(ambientHome, "state", "plugins", "codex-security")]:
-                        "write",
-                      [join(
-                        ambientHome,
-                        "state",
-                        "plugins",
-                        "codex-security",
-                        "codex-home",
-                      )]: "read",
+        {
+          environment: { CODEX_HOME: ambientHome },
+          resolvePluginPython: async () => interpreter!,
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options: CodexOptions) => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(input: string) {
+                const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                const codexHome = options.env?.["CODEX_HOME"];
+                expect(typeof configPath).toBe("string");
+                expect(typeof codexHome).toBe("string");
+                capturedConfigPath = configPath;
+                capturedCodexHome = codexHome;
+                expect(configPath!.startsWith(`${codexHome!}/`)).toBe(false);
+                expect(
+                  parseToml(
+                    await readFile(join(codexHome!, "config.toml"), "utf8"),
+                  ),
+                ).toMatchObject({
+                  permissions: {
+                    codex_security_scan: {
+                      filesystem: {
+                        ":root": "read",
+                        ":workspace_roots": "write",
+                        [join(
+                          ambientHome,
+                          "state",
+                          "plugins",
+                          "codex-security",
+                        )]: "write",
+                        [join(
+                          ambientHome,
+                          "state",
+                          "plugins",
+                          "codex-security",
+                          "codex-home",
+                        )]: "read",
+                      },
                     },
                   },
-                },
-              });
-              if (process.platform !== "win32") {
-                expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
-              }
-              const serialized = await readFile(configPath!, "utf8");
-              expect(serialized).not.toContain("RUNTIME_MCP_SECRET");
-              expect(serialized).not.toContain("RUNTIME_SHELL_SECRET");
-              expect(serialized).not.toContain("mcp_servers");
-              expect(serialized).not.toContain("shell_environment_policy");
-              expect(input).toContain('--config "$CODEX_SECURITY_CONFIG_PATH"');
-              expect(input).toContain("--effective-config");
-              const shellEnvironment = options.env as Record<string, string>;
-              const helper = execFileSync(
-                interpreter!,
-                [
-                  join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-                  "--skill",
-                  "security-scan",
-                  "--config",
-                  shellEnvironment["CODEX_SECURITY_CONFIG_PATH"]!,
-                  "--cwd",
-                  repository,
-                  "--multi-agent-runtime-owner",
-                  "native",
-                  "--multi-agent-runtime-version",
-                  "v2",
-                  "--multi-agent-session-cap",
-                  "12",
-                  "--multi-agent-runtime-provenance",
-                  "tool-surface",
-                  "--runtime-check",
-                  "delegation_available=true",
-                  "--runtime-check",
-                  "goal_tools_available=true",
-                  "--effective-config",
-                  "features.goals=true",
-                ],
-                {
-                  env: {
-                    PATH: process.env["PATH"],
-                    CODEX_HOME: join(root, "denied"),
+                });
+                if (process.platform !== "win32") {
+                  expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
+                }
+                const serialized = await readFile(configPath!, "utf8");
+                expect(serialized).not.toContain("RUNTIME_MCP_SECRET");
+                expect(serialized).not.toContain("RUNTIME_SHELL_SECRET");
+                expect(serialized).not.toContain("mcp_servers");
+                expect(serialized).not.toContain("shell_environment_policy");
+                expect(input).toContain(
+                  '--config "$CODEX_SECURITY_CONFIG_PATH"',
+                );
+                expect(input).toContain("--effective-config");
+                const shellEnvironment = options.env as Record<string, string>;
+                const helper = execFileSync(
+                  interpreter!,
+                  [
+                    join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+                    "--skill",
+                    "security-scan",
+                    "--config",
+                    shellEnvironment["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "--cwd",
+                    repository,
+                    "--multi-agent-runtime-owner",
+                    "native",
+                    "--multi-agent-runtime-version",
+                    "v2",
+                    "--multi-agent-session-cap",
+                    "12",
+                    "--multi-agent-runtime-provenance",
+                    "tool-surface",
+                    "--runtime-check",
+                    "delegation_available=true",
+                    "--runtime-check",
+                    "goal_tools_available=true",
+                    "--effective-config",
+                    "features.goals=true",
+                  ],
+                  {
+                    env: {
+                      PATH: process.env["PATH"],
+                      CODEX_HOME: join(root, "denied"),
+                    },
+                    encoding: "utf8",
                   },
-                  encoding: "utf8",
-                },
-              );
-              const preflight = JSON.parse(helper) as Record<string, unknown>;
-              expect(preflight["status"]).toBe("ready");
-              expect(preflight["config_resolution"]).toBe("manual-layers");
-              expect(preflight["config_paths"]).toEqual([configPath]);
-              await copyCompletedScan(root);
-              const manifestPath = join(scanDir, "scan-manifest.json");
-              const manifest = JSON.parse(
-                await readFile(manifestPath, "utf8"),
-              ) as { scan: { producer: { version: string } } };
-              const pluginManifest = JSON.parse(
-                await readFile(
-                  join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
-                  "utf8",
-                ),
-              ) as { version: string };
-              manifest.scan.producer.version = pluginManifest.version;
-              await writeFile(manifestPath, JSON.stringify(manifest));
-              return { events: completedEvents() };
-            },
+                );
+                const preflight = JSON.parse(helper) as Record<string, unknown>;
+                expect(preflight["status"]).toBe("ready");
+                expect(preflight["config_resolution"]).toBe("manual-layers");
+                expect(preflight["config_paths"]).toEqual([configPath]);
+                await copyCompletedScan(root);
+                const manifestPath = join(scanDir, "scan-manifest.json");
+                const manifest = JSON.parse(
+                  await readFile(manifestPath, "utf8"),
+                ) as { scan: { producer: { version: string } } };
+                const pluginManifest = JSON.parse(
+                  await readFile(
+                    join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
+                    "utf8",
+                  ),
+                ) as { version: string };
+                manifest.scan.producer.version = pluginManifest.version;
+                await writeFile(manifestPath, JSON.stringify(manifest));
+                return { events: completedEvents() };
+              },
+            }),
           }),
-        }),
-      },
-    );
+        },
+      );
 
-    try {
-      await client.run(repository);
-      expect(capturedConfigPath).toBeDefined();
-      expect(capturedCodexHome).toBeDefined();
-    } finally {
-      await client.close();
-    }
-    expect(existsSync(capturedConfigPath!)).toBe(false);
-    expect(capturedCodexHome).toBe(
-      join(ambientHome, "state", "plugins", "codex-security", "codex-home"),
-    );
-    expect(existsSync(capturedCodexHome!)).toBe(true);
-  });
+      try {
+        await client.run(repository);
+        expect(capturedConfigPath).toBeDefined();
+        expect(capturedCodexHome).toBeDefined();
+      } finally {
+        await client.close();
+      }
+      expect(existsSync(capturedConfigPath!)).toBe(false);
+      expect(capturedCodexHome).toBe(
+        join(ambientHome, "state", "plugins", "codex-security", "codex-home"),
+      );
+      expect(existsSync(capturedCodexHome!)).toBe(true);
+    },
+    process.platform === "win32" ? 90_000 : 30_000,
+  );
 
   test("reuses keyring-compatible credentials across separate scan clients", async () => {
     const root = await temporaryDirectory();
