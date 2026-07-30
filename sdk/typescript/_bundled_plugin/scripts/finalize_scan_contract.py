@@ -797,6 +797,14 @@ def _recover_unsealed_findings(
     writeup_schema = _require_dict(
         finding_properties, "writeup", "findings.schema.properties.findings.items.properties"
     )
+    remediation_schemas = {
+        name: _require_dict(
+            finding_properties,
+            name,
+            "findings.schema.properties.findings.items.properties",
+        )
+        for name in ("remediationTests", "preventiveControls")
+    }
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
     if findings.get("scanId") != scan_id:
@@ -855,6 +863,14 @@ def _recover_unsealed_findings(
                 except ContractError as exc:
                     finding.pop("writeup")
                     warnings.append(f"Skipped malformed writeup for finding {index + 1}: {exc}.")
+            for name, remediation_schema in remediation_schemas.items():
+                if name not in finding:
+                    continue
+                try:
+                    _validate_schema_node(finding[name], remediation_schema, f"{context}.{name}")
+                except ContractError as exc:
+                    finding.pop(name)
+                    warnings.append(f"Skipped malformed {name} for finding {index + 1}: {exc}.")
             _validate_schema_node(finding, finding_schema, context)
         except ContractError as exc:
             warning = f"Skipped malformed finding {index + 1}: {exc}."
