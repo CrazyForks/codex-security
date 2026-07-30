@@ -1625,6 +1625,57 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   testPosix(
+    "preserves a sanitized executable path when Git is unavailable",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const protectedBinaries = join(repository, "node_modules", ".bin");
+      const safeBinaries = join(root, "trusted-binaries");
+      const pluginRoot = join(root, "plugin");
+      await Promise.all([
+        mkdir(protectedBinaries, { recursive: true }),
+        mkdir(safeBinaries, { recursive: true }),
+        mkdir(join(pluginRoot, "scripts"), { recursive: true }),
+      ]);
+      await writeFile(
+        join(safeBinaries, "rg"),
+        "#!/bin/sh\nprintf '%s\\n' trusted-ripgrep\n",
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, subprocess",
+          "assert os.environ.get('GIT_CONFIG_COUNT') is None",
+          "assert os.environ['CODEX_SECURITY_GIT'] == ''",
+          "result = subprocess.run(['rg'], check=True, capture_output=True, text=True)",
+          "print(json.dumps({'path': os.environ['PATH'], 'output': result.stdout.strip()}))",
+        ].join("\n"),
+      );
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const result = await runWorkbench(
+        {
+          python: python!,
+          pluginRoot,
+          protectedRoot: repository,
+          environment: {
+            PATH: `${protectedBinaries}${delimiter}${safeBinaries}`,
+            GIT_CONFIG_COUNT: "1",
+          },
+        },
+        ["test-command"],
+      );
+
+      expect(result).toEqual({
+        path: await realpath(safeBinaries),
+        output: "trusted-ripgrep",
+      });
+    },
+  );
+
+  testPosix(
     "does not let diff ranking fall back to a repository-local Git shim",
     async () => {
       const root = await temporaryDirectory();
@@ -2041,6 +2092,19 @@ describe("runtime directories and plugin Python boundary", () => {
       PATH: "/trusted/bin",
       TEST: "1",
       CODEX_SECURITY_GIT: "/trusted/bin/git",
+      PYTHON: managed,
+    });
+    expect(
+      pluginExecutionEnvironment(
+        managed,
+        { Path: "/repository/bin", GIT_CONFIG_COUNT: "1", TEST: "1" },
+        null,
+        "/trusted/bin",
+      ),
+    ).toEqual({
+      PATH: "/trusted/bin",
+      TEST: "1",
+      CODEX_SECURITY_GIT: "",
       PYTHON: managed,
     });
     expect(

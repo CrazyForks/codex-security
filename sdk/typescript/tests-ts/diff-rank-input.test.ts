@@ -369,6 +369,54 @@ describe("diff rank input", () => {
     });
   });
 
+  test("includes staged deletions of ignored Git submodules", async () => {
+    const fixture = await createRepository();
+    const path = "vendor/dep";
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},${path}`,
+    );
+    git(fixture.repository, "commit", "-qm", "add gitlink dependency");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "rm", "--cached", "--quiet", path);
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview: "",
+    });
+  });
+
+  test("includes ignored Git submodules staged as regular files", async () => {
+    const fixture = await createRepository();
+    const path = "vendor/dep";
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},${path}`,
+    );
+    git(fixture.repository, "commit", "-qm", "add gitlink dependency");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "rm", "--cached", "--quiet", path);
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "replacement dependency\n",
+    );
+    git(fixture.repository, "add", "--force", path);
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview: "replacement dependency",
+    });
+  });
+
   test("previews local dirty Git submodules from their pinned index commit", async () => {
     const fixture = await createRepository();
     const submodule = join(fixture.repository, ".github", "actions", "sub");
@@ -809,6 +857,7 @@ describe("diff rank input", () => {
         python!,
         [
           "-I",
+          "-B",
           "-c",
           "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from workbench_target import worktree_content_digest; print(worktree_content_digest(Path(sys.argv[2])))",
           join(PLUGIN_ROOT, "scripts"),
@@ -830,6 +879,57 @@ describe("diff rank input", () => {
     );
 
     expect(digest()).not.toBe(previous);
+  });
+
+  test("preserves legacy working-tree snapshots while binding new index digests", async () => {
+    const fixture = await createRepository();
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/app.ts",
+      "export const value = 2;\n",
+    );
+    git(fixture.repository, "add", "src/app.ts");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_db import require_diff_target",
+          "from workbench_target import scan_target_warning, worktree_content_digest",
+          "target = Path(sys.argv[2])",
+          "revision = sys.argv[3]",
+          "modern = worktree_content_digest(target)",
+          "legacy = worktree_content_digest(target, legacy=True)",
+          "selected = require_diff_target(target, 'working_tree', revision, revision, legacy)",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "metadata = target.stat()",
+          "scan = connection.execute('SELECT ? AS diff_target_kind, ? AS target_snapshot_digest, ? AS target_path, ? AS target_device, ? AS target_inode, ? AS target_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS scan_dir', ('working_tree', legacy, str(target), metadata.st_dev, metadata.st_ino, revision, revision, legacy, str(target.parent / 'scan'))).fetchone()",
+          "print(json.dumps({'modern': modern, 'legacy': legacy, 'selected': selected['contentDigest'], 'warning': scan_target_warning(scan)}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        fixture.base,
+      ],
+      { encoding: "utf8" },
+    );
+    const snapshot = JSON.parse(result) as {
+      modern: string;
+      legacy: string;
+      selected: string;
+      warning: string | null;
+    };
+
+    expect(snapshot.modern).not.toBe(snapshot.legacy);
+    expect(snapshot.selected).toBe(snapshot.legacy);
+    expect(snapshot.warning).toBeNull();
   });
 
   test("continues to exclude binary files and ignored dependency directories", async () => {

@@ -114,10 +114,10 @@ def git_diff_content_digest(target: Path, base_revision: str, head_revision: str
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def worktree_content_digest(target: Path) -> str:
+def worktree_content_digest(target: Path, *, legacy: bool = False) -> str:
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
-    return worktree_content_digest_for_context(repository, pathspec)
+    return worktree_content_digest_for_context(repository, pathspec, legacy=legacy)
 
 
 def worktree_content_digest_for_context(
@@ -126,6 +126,7 @@ def worktree_content_digest_for_context(
     *,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    legacy: bool = False,
 ) -> str:
     tracked = git_bytes(
         repository,
@@ -141,34 +142,38 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    staged = git_bytes(
-        repository,
-        "diff",
-        "--cached",
-        "--binary",
-        "--full-index",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--ignore-submodules=none",
-        "HEAD",
-        "--",
-        pathspec,
-        git_dir=git_dir,
-        work_tree=work_tree,
-    )
-    unstaged = git_bytes(
-        repository,
-        "diff",
-        "--binary",
-        "--full-index",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--ignore-submodules=none",
-        "--",
-        pathspec,
-        git_dir=git_dir,
-        work_tree=work_tree,
-    )
+    if legacy:
+        staged = b""
+        unstaged = b""
+    else:
+        staged = git_bytes(
+            repository,
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            "HEAD",
+            "--",
+            pathspec,
+            git_dir=git_dir,
+            work_tree=work_tree,
+        )
+        unstaged = git_bytes(
+            repository,
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            "--",
+            pathspec,
+            git_dir=git_dir,
+            work_tree=work_tree,
+        )
     untracked = git_bytes(
         repository,
         "ls-files",
@@ -621,7 +626,10 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
         expected_digest = (
             scan["diff_content_digest"] if working_tree else scan["target_snapshot_digest"]
         )
-        if worktree_content_digest(target) != expected_digest:
+        if (
+            worktree_content_digest(target) != expected_digest
+            and worktree_content_digest(target, legacy=True) != expected_digest
+        ):
             return (
                 "Working-tree contents changed while the scan was running; "
                 "results were saved for the original snapshot."

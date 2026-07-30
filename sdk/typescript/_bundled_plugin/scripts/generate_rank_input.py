@@ -832,6 +832,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
         rel = path.relative_to(repo)
         gitlink_revision = None
+        index_is_gitlink = False
         if args.mode == "revisions":
             revisions = (
                 (args.base, args.head)
@@ -844,6 +845,13 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     break
         else:
             gitlink_revision = index_gitlink_revision(repo, rel)
+            index_is_gitlink = gitlink_revision is not None
+            if (
+                gitlink_revision is None
+                and status in {"D", "T"}
+                and is_immutable_gitlink(repo, args.base, rel)
+            ):
+                gitlink_revision = args.base
         if not diff_path_is_included(rel) and gitlink_revision is None:
             continue
 
@@ -854,7 +862,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 preview, is_binary = immutable_diff_preview(
                     repo, path, args.head, args.preview_bytes
                 )
-            elif gitlink_revision is not None:
+            elif index_is_gitlink:
                 preview, is_binary = (
                     f"Git submodule pinned to commit {gitlink_revision}",
                     False,

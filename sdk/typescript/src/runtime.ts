@@ -471,6 +471,15 @@ export async function runWorkbench(
     options.python,
     options.environment,
     git,
+    git === null
+      ? (
+          await resolveTrustedExecutable(
+            options.python,
+            options.environment,
+            options.protectedRoot ?? process.cwd(),
+          )
+        )?.environment["PATH"]
+      : undefined,
   );
   let stdout: string;
   try {
@@ -1549,6 +1558,7 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
   git?: TrustedExecutable | null,
+  sanitizedPath?: string,
 ): ProcessEnvironment {
   const result = { ...environment };
   if (git !== undefined) {
@@ -1558,7 +1568,7 @@ export function pluginExecutionEnvironment(
         delete result[name];
       }
     }
-    result["PATH"] = git?.environment["PATH"] ?? "";
+    result["PATH"] = git?.environment["PATH"] ?? sanitizedPath ?? "";
     result["CODEX_SECURITY_GIT"] = git?.executable ?? "";
   }
   result["PYTHON"] = python;

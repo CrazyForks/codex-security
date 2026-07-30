@@ -475,6 +475,16 @@ export class CodexSecurity {
         pluginEnvironment,
         protectedRoot,
       );
+      const sanitizedPath =
+        git === null
+          ? (
+              await resolveTrustedExecutable(
+                python,
+                pluginEnvironment,
+                protectedRoot,
+              )
+            )?.environment["PATH"]
+          : undefined;
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
@@ -743,6 +753,7 @@ export class CodexSecurity {
           python,
           withoutCodexHome(pluginEnvironment),
           git,
+          sanitizedPath,
         ),
         CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
