@@ -411,12 +411,16 @@ function boundCompressedPdfStreams(
     signal?.throwIfAborted();
     if (marker.index < streamBodyEnd) continue;
     const object = pdfObjectBeforeOffset(objectOffsets, marker.index);
+    const lexicalStart =
+      object?.[1] ?? Math.max(0, marker.index - MAX_PDF_DICTIONARY_SCAN_BYTES);
+    dictionaryWork.remaining -= marker.index + 2 - lexicalStart;
+    if (dictionaryWork.remaining < 0) {
+      throw new KnowledgeBaseLimitError(
+        `Knowledge base PDF exceeds the ${MAX_PDF_DICTIONARY_WORK_BYTES}-byte dictionary scan limit: ${path}`,
+      );
+    }
     const lexicalPrefix = pdfDictionaryLexicalValues(
-      contents.slice(
-        object?.[1] ??
-          Math.max(0, marker.index - MAX_PDF_DICTIONARY_SCAN_BYTES),
-        marker.index + 2,
-      ),
+      contents.slice(lexicalStart, marker.index + 2),
       false,
     );
     if (!lexicalPrefix.endsWith(">>")) continue;
@@ -644,14 +648,42 @@ function pdfIndirectValue(
   const offset = offsets?.get(`${object}:${generation}`);
   if (offset === null || offset === undefined) return undefined;
   if (typeof offset === "number") {
-    const value = new RegExp(
-      `^${object}\\s+${generation}\\s+obj(?:\\s+|%[^\\r\\n]*(?:\\r\\n|\\r|\\n))*(<<[\\s\\S]*?>>|\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)`,
+    const header = new RegExp(
+      `^${object}\\s+${generation}\\s+obj(?:\\s+|%[^\\r\\n]*(?:\\r\\n|\\r|\\n))*`,
       "u",
     ).exec(contents.slice(offset));
-    if (value?.[1] === undefined) return undefined;
-    const remainder = contents.slice(offset + value[0].length);
+    if (header === null) return undefined;
+    const valueStart = offset + header[0].length;
+    let value: string | undefined;
+    if (contents.startsWith("<<", valueStart)) {
+      const lexical = pdfDictionaryLexicalValues(
+        contents.slice(valueStart, valueStart + MAX_PDF_DICTIONARY_SCAN_BYTES),
+        false,
+      );
+      let depth = 0;
+      for (let index = 0; index < lexical.length - 1; index += 1) {
+        const token = lexical.slice(index, index + 2);
+        if (token === "<<") {
+          depth += 1;
+          index += 1;
+        } else if (token === ">>") {
+          depth -= 1;
+          index += 1;
+          if (depth === 0) {
+            value = contents.slice(valueStart, valueStart + index + 1);
+            break;
+          }
+        }
+      }
+    } else {
+      value = /^(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)/u.exec(
+        contents.slice(valueStart),
+      )?.[1];
+    }
+    if (value === undefined) return undefined;
+    const remainder = contents.slice(valueStart + value.length);
     return /^(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*endobj(?=\s|$)/u.test(remainder)
-      ? value[1]
+      ? value
       : undefined;
   }
   if (offsets === null || generation !== "0") return undefined;
@@ -1419,24 +1451,35 @@ function pdfFilterDecodeParameters(
       lexical,
     )?.[1];
   if (parameters === undefined) return undefined;
-  const selected = parameters.startsWith("[")
+  let selected = parameters.startsWith("[")
     ? [...parameters.matchAll(/null|<<[\s\S]*?>>|\d+\s+\d+\s+R/gu)][
         filterIndex
       ]?.[0]
     : parameters;
-  if (selected === undefined || selected === "null") return undefined;
-  const reference = /^(\d+)\s+(\d+)\s+R$/u.exec(selected);
-  if (reference === null) return selected;
-  const resolved = pdfIndirectValue(
-    contents,
-    reference[1]!,
-    reference[2]!,
-    offsets,
-    path,
-  );
-  return resolved?.startsWith("<<") && resolved.endsWith(">>")
-    ? resolved
-    : undefined;
+  for (let references = 0; references < 8; references += 1) {
+    if (selected === undefined || selected === "null") return undefined;
+    const reference = /^(\d+)\s+(\d+)\s+R$/u.exec(selected);
+    if (reference === null) {
+      return selected.startsWith("<<") && selected.endsWith(">>")
+        ? selected
+        : undefined;
+    }
+    const resolved = pdfIndirectValue(
+      contents,
+      reference[1]!,
+      reference[2]!,
+      offsets,
+      path,
+    );
+    if (resolved?.startsWith("[") && resolved.endsWith("]")) {
+      selected = [...resolved.matchAll(/null|<<[\s\S]*?>>|\d+\s+\d+\s+R/gu)][
+        filterIndex
+      ]?.[0];
+    } else {
+      selected = resolved;
+    }
+  }
+  return undefined;
 }
 
 function oversizedPdfStream(path: string): KnowledgeBaseLimitError {

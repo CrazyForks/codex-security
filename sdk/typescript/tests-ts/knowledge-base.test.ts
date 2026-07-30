@@ -1093,10 +1093,27 @@ describe("scan knowledge bases", () => {
   });
 
   test("applies an LZW predictor before the next compressed object-stream filter", async () => {
-    for (const [name, parameter, indirect] of [
-      ["explicit columns", "<< /Predictor 12 /Columns 1 >>", false],
-      ["default columns", "<< /Predictor 12 >>", false],
-      ["indirect parameters", "@DECODE_PARAMETERS@", true],
+    for (const [name, parameter, indirectValue, indirectArray] of [
+      ["explicit columns", "<< /Predictor 12 /Columns 1 >>", undefined, false],
+      ["default columns", "<< /Predictor 12 >>", undefined, false],
+      [
+        "indirect parameters",
+        "@DECODE_PARAMETERS@",
+        "<< /Predictor 12 >>",
+        false,
+      ],
+      [
+        "nested indirect parameters",
+        "@DECODE_PARAMETERS@",
+        "<< /Metadata << /Label (>> literal) >> /Predictor 12 >>",
+        false,
+      ],
+      [
+        "indirect parameter array",
+        "@DECODE_PARAMETERS@",
+        "[<< /Predictor 12 >> null]",
+        true,
+      ],
     ] as const) {
       const root = await temporaryDirectory();
       const document = join(root, `${name}.pdf`);
@@ -1104,11 +1121,11 @@ describe("scan knowledge bases", () => {
         document,
         xrefStreamPdf(pdf("Predicted compressed page", 1, true), true, 0, {
           compressPageObjects: true,
-          ...(indirect
-            ? { objectStreamDecodeParametersObject: "<< /Predictor 12 >>" }
+          ...(indirectValue !== undefined
+            ? { objectStreamDecodeParametersObject: indirectValue }
             : {}),
           objectStreamFilter: {
-            name: `[/LZWDecode /ASCII85Decode] /DecodeParms [${parameter} null]`,
+            name: `[/LZWDecode /ASCII85Decode] /DecodeParms ${indirectArray ? parameter : `[${parameter} null]`}`,
             encode: (contents) =>
               encodePdfLzwLiterals(
                 Buffer.from(
@@ -1161,6 +1178,21 @@ describe("scan knowledge bases", () => {
 
     await expect(prepareKnowledgeBase([document])).rejects.toThrow(
       "8388608-byte extracted-text limit",
+    );
+  });
+
+  test("bounds lexical work across repeated stream-shaped literal data", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "many-literal-stream-markers.pdf");
+    await writeFile(
+      document,
+      pdf("reviewable", 1, true, "", {
+        catalogPrefix: `/Decoy (${">>\nstream\n".repeat(3_000)}) `,
+      }),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "dictionary scan limit",
     );
   });
 
