@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import {
   access,
   appendFile,
@@ -503,6 +504,55 @@ describe("multiscan", () => {
     ).toBe(false);
   });
 
+  test("never overwrites a supervisor lock published during stale-lock recovery", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-replacement");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlock-replacement,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    await writeFile(lock, JSON.stringify({ pid: process.pid, token: "moved" }));
+    const originalKill = process.kill;
+    let checks = 0;
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid !== process.pid) return originalKill.call(process, pid, signal);
+      checks += 1;
+      if (checks === 1) {
+        const error = new Error(
+          "simulated stale owner",
+        ) as NodeJS.ErrnoException;
+        error.code = "ESRCH";
+        throw error;
+      }
+      if (checks === 2) {
+        writeFileSync(lock, JSON.stringify({ pid, token: "replacement" }));
+      }
+      return true;
+    }) as typeof process.kill;
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) =>
+              completedScan(scanOptions.outputDir!),
+            ),
+          ),
+        ),
+      ).rejects.toThrow("A multiscan supervisor is already running.");
+      expect(JSON.parse(await readFile(lock, "utf8"))).toMatchObject({
+        pid: process.pid,
+        token: "replacement",
+      });
+    } finally {
+      process.kill = originalKill;
+      await rm(lock, { force: true });
+    }
+  });
+
   test("retries a failed attempt and records both durable receipts", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
@@ -909,7 +959,8 @@ describe("multiscan", () => {
       calls += 1;
       return await completedScan(scanOptions.outputDir!);
     });
-    const run = async () => await runMultiscan(options(paths, security));
+    const run = async () =>
+      await runMultiscan(options(paths, security, { maxAttempts: 4 }));
     const latestOutput = async (): Promise<string> =>
       (await results(join(paths.output, "results.jsonl"))).at(-1)?.[
         "outputDir"
@@ -946,6 +997,10 @@ describe("multiscan", () => {
     expect(await latestOutput()).toBe(
       join(paths.output, "artifacts", "resume-integrity", "attempt-4"),
     );
+
+    await writeFile(join(await latestOutput(), "findings.json"), "");
+    expect(await run()).toMatchObject({ completed: 0, failed: 1, skipped: 0 });
+    expect(calls).toBe(4);
   });
 
   test("ignores repository-local Git shims while preserving credential configuration", async () => {

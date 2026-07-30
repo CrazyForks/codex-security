@@ -416,9 +416,24 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
       const moved = await readLockOwner(stale);
       if (moved !== null && processIsRunning(moved.pid)) {
         try {
-          await rename(stale, path);
+          const metadata = await lstat(stale);
+          if (metadata.isDirectory()) {
+            await rename(stale, path);
+          } else {
+            await link(stale, path);
+          }
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const code = (error as NodeJS.ErrnoException).code;
+          if (
+            code !== "EEXIST" &&
+            code !== "EISDIR" &&
+            code !== "ENOTDIR" &&
+            code !== "ENOTEMPTY"
+          ) {
+            throw error;
+          }
+        } finally {
+          await rm(stale, { recursive: true, force: true });
         }
         throw new Error("A multiscan supervisor is already running.");
       }
