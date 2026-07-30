@@ -1216,7 +1216,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ].join("\n");
     const digest = (): string => {
       const result = Bun.spawnSync(
-        [python!, "-I", "-c", source, scripts, repository, base, head],
+        [python!, "-I", "-B", "-c", source, scripts, repository, base, head],
         { cwd: repository },
       );
       expect(result.exitCode).toBe(0);
