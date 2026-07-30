@@ -84,6 +84,7 @@ from workbench_scan_start import (
     archive_scan,
     compact_timestamp,
     insert_running_scan,
+    registered_standard_review_inventory,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -616,8 +617,22 @@ def workbench_completion_binding(
     if scan["mode"] == "standard":
         captured_inventory = progress_row["standard_review_inventory_json"]
         if captured_inventory is None:
-            raise SystemExit("Standard scan is missing its authoritative registered inventory.")
-        standard_review_inventory = json.loads(captured_inventory)
+            if scan_target_warning(scan) is not None:
+                raise SystemExit(
+                    "Standard scan is missing its authoritative registered inventory."
+                )
+            standard_review_inventory = list(
+                registered_standard_review_inventory(
+                    Path(scan["target_path"]),
+                    tuple(requested_scan_paths(scan)),
+                )
+            )
+            if scan_target_warning(scan) is not None:
+                raise SystemExit(
+                    "Standard scan target changed while its legacy inventory was recovered."
+                )
+        else:
+            standard_review_inventory = json.loads(captured_inventory)
         if not isinstance(standard_review_inventory, list) or any(
             not isinstance(path, str) for path in standard_review_inventory
         ):

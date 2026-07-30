@@ -362,6 +362,10 @@ def registered_standard_review_inventory(target: Path, scopes: tuple[str, ...]) 
     for raw in (path for path in listed.stdout.split(b"\0") if path):
         try:
             decoded = raw.decode("utf-8")
+            if "\n" in decoded or "\r" in decoded:
+                raise SystemExit(
+                    "Standard scan inventory paths must not contain newline characters."
+                )
             relative = PurePosixPath(decoded)
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError("unsafe repository-relative path")

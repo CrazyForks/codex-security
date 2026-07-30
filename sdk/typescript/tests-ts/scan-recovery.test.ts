@@ -334,6 +334,62 @@ describe("malformed scan artifact recovery", () => {
     ).resolves.toContain('"version": "2.1.0"');
   });
 
+  test("seals an authoritative empty inventory beside not-applicable surfaces", async () => {
+    const fixture = await startDraftScan("directory", true);
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+    surface.disposition = "not_applicable";
+    surface.receiptRefs = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+    ]);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+    const manifest = await readJson<{
+      scan: { artifacts: Array<{ path: string }> };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(manifest.scan.artifacts.map((artifact) => artifact.path)).toContain(
+      "artifacts/02_discovery/scope_inventory.jsonl",
+    );
+  });
+
+  test("safely completes standard scans that were running before inventory migration", async () => {
+    const fixture = await startDraftScan();
+    const migrated = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scan_progress SET standard_review_inventory_json = NULL WHERE scan_id = ?', (sys.argv[2],)); c.commit()",
+        join(fixture.stateDir, "workbench.sqlite3"),
+        fixture.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(migrated.status, migrated.stderr).toBe(0);
+    await prepareStandardNoFindingReview(fixture, ["src/extract.py"]);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+  });
+
+  test("rejects standard scan filenames that cannot fit the line inventory", async () => {
+    await expect(
+      startDraftScan("directory", false, false, async (repository) => {
+        await writeFile(
+          join(repository, "src", "line\nbreak.py"),
+          "# newline\n",
+        );
+      }),
+    ).rejects.toThrow("inventory paths must not contain newline characters");
+  });
+
   test("does not treat a symlink-only repository snapshot as empty", async () => {
     const fixture = await startDraftScan("directory", true, true);
     const findingsPath = join(fixture.scanDir, "findings.json");

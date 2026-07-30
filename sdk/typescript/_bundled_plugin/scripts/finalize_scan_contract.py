@@ -2741,7 +2741,6 @@ def _prepare_scan_finalization(
                     *(
                         [authoritative_empty_scope_inventory]
                         if coverage.get("completeness") == "complete"
-                        and not coverage.get("surfaces")
                         and authoritative_empty_scope_inventory is not None
                         else []
                     ),
