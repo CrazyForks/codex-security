@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import {
   type FileHandle,
   link,
@@ -11,12 +11,20 @@ import {
   realpath,
   rename,
   rm,
+  stat,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { Transform } from "node:stream";
 import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
+import {
+  bulkScanRepositoryLimitError,
+  MAX_BULK_SCAN_INVENTORY_BYTES,
+  MAX_BULK_SCAN_REPOSITORIES,
+} from "./bulk-scan-limits.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
@@ -92,10 +100,11 @@ export async function runMultiscan(
   if (!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts < 1) {
     throw new Error("Multiscan max attempts must be a positive integer.");
   }
-  const tasks = parseInventory(
-    await readFile(options.inputPath, "utf8"),
+  const tasks = await parseInventory(
+    options.inputPath,
     dirname(resolve(options.inputPath)),
     options.mode,
+    options.signal,
   );
   const output = resolve(options.outputDir);
   await ensureOutputDirectory(output);
@@ -624,19 +633,106 @@ async function mkdirTemporaryPluginWorkspace(output: string): Promise<string> {
   }
 }
 
-function parseInventory(
-  source: string,
+async function parseInventory(
+  inputPath: string,
   directory: string,
   defaultMode: ScanMode,
-): MultiscanTask[] {
-  const { data: rows, errors } = Papa.parse<string[]>(source, {
-    delimiter: ",",
-    skipEmptyLines: "greedy",
-  });
-  if (errors.length > 0) {
-    throw new Error(`Multiscan CSV could not be parsed: ${errors[0]!.message}`);
+  signal?: AbortSignal,
+): Promise<MultiscanTask[]> {
+  signal?.throwIfAborted();
+  const metadata = await stat(inputPath);
+  signal?.throwIfAborted();
+  if (!metadata.isFile()) {
+    throw new Error("Multiscan inventory must be a regular CSV file.");
   }
-  const headers = rows.shift();
+  if (metadata.size > MAX_BULK_SCAN_INVENTORY_BYTES) {
+    throw new Error("Multiscan CSV must not exceed 8 MiB.");
+  }
+
+  const tasks: MultiscanTask[] = [];
+  const seen = new Set<string>();
+  let headers: string[] | undefined;
+  let bytesRead = 0;
+  const input = createReadStream(inputPath, {
+    highWaterMark: 64 * 1_024,
+    ...(signal === undefined ? {} : { signal }),
+  });
+  const bounded = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytesRead += chunk.length;
+      callback(
+        bytesRead > MAX_BULK_SCAN_INVENTORY_BYTES
+          ? new Error("Multiscan CSV must not exceed 8 MiB.")
+          : null,
+        chunk,
+      );
+    },
+  });
+  input.pipe(bounded);
+
+  return await new Promise<MultiscanTask[]>((resolveTasks, rejectTasks) => {
+    let settled = false;
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      const failure = error instanceof Error ? error : new Error(String(error));
+      input.destroy();
+      bounded.destroy();
+      rejectTasks(failure);
+    };
+    input.once("error", fail);
+    bounded.once("error", fail);
+
+    Papa.parse<string[]>(bounded as unknown as Papa.LocalFile, {
+      delimiter: ",",
+      skipEmptyLines: "greedy",
+      beforeFirstChunk: (chunk) =>
+        chunk.charCodeAt(0) === 0xfeff ? chunk.slice(1) : chunk,
+      step: ({ data: fields, errors }) => {
+        try {
+          signal?.throwIfAborted();
+          if (errors.length > 0) {
+            throw new Error(
+              `Multiscan CSV could not be parsed: ${errors[0]!.message}`,
+            );
+          }
+          if (headers === undefined) {
+            headers = fields;
+            validateInventoryHeaders(headers);
+            return;
+          }
+          if (tasks.length >= MAX_BULK_SCAN_REPOSITORIES) {
+            throw bulkScanRepositoryLimitError();
+          }
+          tasks.push(
+            parseInventoryRow(fields, headers, directory, defaultMode, seen),
+          );
+        } catch (error) {
+          fail(error);
+        }
+      },
+      complete: () => {
+        if (settled) return;
+        try {
+          signal?.throwIfAborted();
+          if (headers === undefined) validateInventoryHeaders(undefined);
+          if (tasks.length === 0) {
+            throw new Error(
+              "Multiscan CSV must contain at least one repository.",
+            );
+          }
+          settled = true;
+          resolveTasks(tasks);
+        } catch (error) {
+          fail(error);
+        }
+      },
+      error: fail,
+    });
+  });
+}
+
+function validateInventoryHeaders(headers: string[] | undefined): void {
   if (
     headers === undefined ||
     !["id", "repository", "revision"].every((name) => headers.includes(name)) ||
@@ -646,48 +742,52 @@ function parseInventory(
       "Multiscan CSV requires id, repository, and revision columns.",
     );
   }
-  if (rows.length === 0)
-    throw new Error("Multiscan CSV must contain at least one repository.");
-  const seen = new Set<string>();
-  return rows.map((fields) => {
-    if (fields.length !== headers.length) {
-      throw new Error("Multiscan CSV rows must match their header columns.");
-    }
-    const get = (name: string): string =>
-      fields[headers.indexOf(name)]?.trim() ?? "";
-    const id = get("id");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id)) {
-      throw new Error("Multiscan task IDs must be safe, unique path names.");
-    }
-    if (seen.has(id.toLowerCase()))
-      throw new Error("Multiscan task IDs must be unique.");
-    seen.add(id.toLowerCase());
-    const revision = get("revision").toLowerCase();
-    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(revision)) {
-      throw new Error("Multiscan revisions must be full immutable Git SHAs.");
-    }
-    const mode = get("mode") || defaultMode;
-    if (mode !== "standard" && mode !== "deep") {
-      throw new Error("Multiscan mode must be standard or deep.");
-    }
-    const scope = get("scope");
-    if (
-      scope &&
-      (isAbsolute(scope) ||
-        scope.includes("\\") ||
-        scope.split("/").includes("..") ||
-        scope.includes("\0"))
-    ) {
-      throw new Error("Multiscan scope must stay inside its repository.");
-    }
-    return {
-      id,
-      repository: normalizeRepository(get("repository"), directory),
-      revision,
-      mode,
-      ...(scope ? { scope } : {}),
-    };
-  });
+}
+
+function parseInventoryRow(
+  fields: string[],
+  headers: string[],
+  directory: string,
+  defaultMode: ScanMode,
+  seen: Set<string>,
+): MultiscanTask {
+  if (fields.length !== headers.length) {
+    throw new Error("Multiscan CSV rows must match their header columns.");
+  }
+  const get = (name: string): string =>
+    fields[headers.indexOf(name)]?.trim() ?? "";
+  const id = get("id");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id)) {
+    throw new Error("Multiscan task IDs must be safe, unique path names.");
+  }
+  if (seen.has(id.toLowerCase()))
+    throw new Error("Multiscan task IDs must be unique.");
+  seen.add(id.toLowerCase());
+  const revision = get("revision").toLowerCase();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(revision)) {
+    throw new Error("Multiscan revisions must be full immutable Git SHAs.");
+  }
+  const mode = get("mode") || defaultMode;
+  if (mode !== "standard" && mode !== "deep") {
+    throw new Error("Multiscan mode must be standard or deep.");
+  }
+  const scope = get("scope");
+  if (
+    scope &&
+    (isAbsolute(scope) ||
+      scope.includes("\\") ||
+      scope.split("/").includes("..") ||
+      scope.includes("\0"))
+  ) {
+    throw new Error("Multiscan scope must stay inside its repository.");
+  }
+  return {
+    id,
+    repository: normalizeRepository(get("repository"), directory),
+    revision,
+    mode,
+    ...(scope ? { scope } : {}),
+  };
 }
 
 function normalizeRepository(repository: string, directory: string): string {

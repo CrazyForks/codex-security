@@ -8,6 +8,10 @@ import { promisify } from "node:util";
 import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
+import {
+  bulkScanRepositoryLimitError,
+  MAX_BULK_SCAN_REPOSITORIES,
+} from "./bulk-scan-limits.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -297,6 +301,9 @@ async function discoverGitHubRepositories(
         url: `https://${host}/${repository.nameWithOwner}.git`,
         revision: repository.defaultBranchRef.target.oid.toLowerCase(),
       });
+      if (repositories.length > MAX_BULK_SCAN_REPOSITORIES) {
+        throw bulkScanRepositoryLimitError();
+      }
     }
     cursor = connection.pageInfo.hasNextPage
       ? connection.pageInfo.endCursor

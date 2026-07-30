@@ -15,6 +15,7 @@ import {
   type BulkScanDiscoveryDependencies,
   type BulkScanPrompt,
 } from "../src/bulk-scan-discovery.js";
+import { MAX_BULK_SCAN_REPOSITORIES } from "../src/bulk-scan-limits.js";
 
 const temporaryDirectories: string[] = [];
 const NOW = Date.parse("2026-07-22T12:00:00.000Z");
@@ -273,6 +274,42 @@ describe("bulk scan repository discovery", () => {
     const csv = await readFile(result!.inputPath, "utf8");
     expect(csv).toContain("acme--service-100");
     expect(csv).not.toContain("acme--old");
+  });
+
+  test("enforces the discovery repository limit before creating an inventory", async () => {
+    const atLimit = Array.from(
+      { length: MAX_BULK_SCAN_REPOSITORIES },
+      (_value, index) => ({ fullName: `acme/service-${index}` }),
+    );
+    const acceptedRoot = await temporaryDirectory();
+    const accepted = discoveryDependencies(acceptedRoot, {
+      repositories: atLimit,
+    });
+    accepted.prompt.confirms = [false];
+    expect(await runBulkScanWizard(accepted.dependencies)).toBeNull();
+    expect(accepted.prompt.messages.join("")).toContain(
+      `Found ${MAX_BULK_SCAN_REPOSITORIES} repositories`,
+    );
+    expect(
+      accepted.requests.filter(({ path }) => path === "/graphql"),
+    ).toHaveLength(10);
+
+    const overflowRoot = await temporaryDirectory();
+    const overflow = discoveryDependencies(overflowRoot, {
+      repositories: [
+        ...atLimit,
+        { fullName: `acme/service-${MAX_BULK_SCAN_REPOSITORIES}` },
+      ],
+    });
+    await expect(runBulkScanWizard(overflow.dependencies)).rejects.toThrow(
+      "at most 1,000 repositories",
+    );
+    expect(
+      overflow.requests.filter(({ path }) => path === "/graphql"),
+    ).toHaveLength(11);
+    await expect(
+      lstat(join(overflowRoot, "security-scans")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("shows all repositories and scans only the selected ones", async () => {

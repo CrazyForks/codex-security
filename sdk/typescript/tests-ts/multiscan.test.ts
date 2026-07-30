@@ -14,6 +14,7 @@ import {
   readdir,
   rm,
   symlink,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,6 +22,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import type { ScanResult } from "../src/result.js";
+import {
+  MAX_BULK_SCAN_INVENTORY_BYTES,
+  MAX_BULK_SCAN_REPOSITORIES,
+} from "../src/bulk-scan-limits.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -279,6 +284,47 @@ describe("multiscan", () => {
     }
 
     expect(scans).toBe(0);
+  });
+
+  test("rejects oversized and excessive inventories before creating campaign state", async () => {
+    for (const prepare of [
+      async (path: string) => {
+        await writeFile(path, "id,repository,revision\n");
+        await truncate(path, MAX_BULK_SCAN_INVENTORY_BYTES + 1);
+      },
+      async (path: string) => {
+        const rows = Array.from(
+          { length: MAX_BULK_SCAN_REPOSITORIES + 1 },
+          (_value, index) =>
+            `repository-${index},.,0123456789abcdef0123456789abcdef01234567`,
+        );
+        await writeFile(path, `id,repository,revision\n${rows.join("\n")}\n`);
+      },
+    ]) {
+      const paths = await fixture();
+      await prepare(paths.input);
+      let clients = 0;
+      await expect(
+        runMultiscan({
+          ...options(
+            paths,
+            client(async () => {
+              throw new Error("scan must not start");
+            }),
+          ),
+          createSecurity: () => {
+            clients += 1;
+            return client(async () => {
+              throw new Error("scan must not start");
+            });
+          },
+        }),
+      ).rejects.toThrow(/8 MiB|at most 1,000 repositories/u);
+      expect(clients).toBe(0);
+      await expect(lstat(paths.output)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
   });
 
   test("materializes the pinned commit, applies row options, and removes its checkout", async () => {
