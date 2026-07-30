@@ -70,6 +70,7 @@ function pdf(
     indirectValuePrefix?: string;
     indirectValueComment?: string;
     imageBytes?: Buffer;
+    uncompressedImage?: boolean;
     formBytes?: Buffer;
     headerComment?: string;
     dictionaryPrefix?: string;
@@ -143,7 +144,12 @@ function pdf(
     ...(options.imageBytes === undefined
       ? []
       : [
-          `<< /Type /XObject /Subtype /Image /Width 1024 /Height ${Math.ceil(options.imageBytes.byteLength / 1024)} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${deflateSync(options.imageBytes).byteLength} /Filter /FlateDecode >>\nstream\n${deflateSync(options.imageBytes).toString("latin1")}\nendstream`,
+          (() => {
+            const image = options.uncompressedImage
+              ? options.imageBytes!
+              : deflateSync(options.imageBytes!);
+            return `<< /Type /XObject /Subtype /Image /Width 1024 /Height ${Math.ceil(options.imageBytes!.byteLength / 1024)} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${image.byteLength}${options.uncompressedImage ? "" : " /Filter /FlateDecode"} >>\nstream\n${image.toString("latin1")}\nendstream`;
+          })(),
         ]),
     ...(options.formBytes === undefined
       ? []
@@ -176,7 +182,9 @@ function xrefStreamPdf(
     compressPageObjects?: boolean;
     compressedPagePrefix?: string;
     compressedPageSuffix?: string;
+    compressedPageDictionaryPrefix?: string;
     escapedCompressedPageContents?: boolean;
+    compressedPageContentsArray?: boolean;
     objectStreamFilter?: {
       name: string;
       encode: (bytes: Buffer) => Buffer;
@@ -225,6 +233,15 @@ function xrefStreamPdf(
       let value = match[1];
       if (page && options.escapedCompressedPageContents === true) {
         value = value.replace("/Contents ", "/Cont#65nts ");
+      }
+      if (page && options.compressedPageContentsArray === true) {
+        value = value.replace(/\/Contents (\d+ \d+ R)/u, "/Contents[$1]");
+      }
+      if (page && options.compressedPageDictionaryPrefix !== undefined) {
+        value = value.replace(
+          /^<</u,
+          `<< ${options.compressedPageDictionaryPrefix} `,
+        );
       }
       if (page) {
         value = `${options.compressedPagePrefix ?? ""}${value}${options.compressedPageSuffix ?? ""}`;
@@ -1008,6 +1025,11 @@ describe("scan knowledge bases", () => {
         },
       ],
       ["escaped-contents", { escapedCompressedPageContents: true }],
+      [
+        "escaped-structural-name",
+        { compressedPageDictionaryPrefix: "/Foo /#3C#3C" },
+      ],
+      ["delimiter-adjacent-array", { compressedPageContentsArray: true }],
     ] as const) {
       const root = await temporaryDirectory();
       const document = join(root, `${name}.pdf`);
@@ -1055,6 +1077,55 @@ describe("scan knowledge bases", () => {
         "8388608-byte extracted-text limit",
       );
     }
+  });
+
+  test("applies an LZW predictor before the next compressed object-stream filter", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "predicted-lzw-object-stream.pdf");
+    await writeFile(
+      document,
+      xrefStreamPdf(pdf("Predicted compressed page", 1, true), true, 0, {
+        compressPageObjects: true,
+        objectStreamFilter: {
+          name: "[/LZWDecode /ASCII85Decode] /DecodeParms [<< /Predictor 12 /Columns 1 >> null]",
+          encode: (contents) =>
+            encodePdfLzwLiterals(
+              Buffer.from(
+                [...encodeAscii85(contents)].flatMap((byte) => [0, byte]),
+              ),
+            ),
+        },
+      }),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Predicted compressed page",
+    ]);
+  });
+
+  test("ignores stream-shaped bytes inside declared uncompressed image data", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "stream-shaped-image-data.pdf");
+    const pixels = Buffer.alloc(1024);
+    pixels.write(
+      "<< /Length 1 /Filter /FlateDecode >>\nstream\nX\nendstream\n",
+      "latin1",
+    );
+    await writeFile(
+      document,
+      pdf("Image payload remains data", 1, false, "", {
+        imageBytes: pixels,
+        uncompressedImage: true,
+      }),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Image payload remains data",
+    ]);
   });
 
   test("rejects negative cross-reference stream field widths", async () => {

@@ -405,9 +405,11 @@ function boundCompressedPdfStreams(
   );
   let inflatedBytes = 0;
   let decodingWorkBytes = 0;
+  let streamBodyEnd = 0;
   const dictionaryWork = { remaining: MAX_PDF_DICTIONARY_WORK_BYTES };
   for (const marker of contents.matchAll(streams)) {
     signal?.throwIfAborted();
+    if (marker.index < streamBodyEnd) continue;
     const object = pdfObjectBeforeOffset(objectOffsets, marker.index);
     const dictionary = pdfStreamDictionary(
       contents,
@@ -417,20 +419,6 @@ function boundCompressedPdfStreams(
       object?.[1],
     );
     if (dictionary === null) continue;
-    const lexicalDictionary = pdfDictionaryLexicalValues(dictionary, false);
-    if (pdfTopLevelDictionaryName(lexicalDictionary, "Subtype") === "Image") {
-      const pageContent =
-        object !== undefined && pageContentReferences.has(object[0]);
-      if (!pageContent) continue;
-    }
-    const filters = pdfStreamFilters(
-      contents,
-      dictionary,
-      indirectObjects,
-      path,
-    );
-    if (filters.length === 0) continue;
-
     const streamStart = marker.index + marker[0].length;
     const declared = /\/Length\s+(\d+)(?:\s+(\d+)\s+R)?(?=[\s/>])/u.exec(
       pdfDictionaryLexicalValues(dictionary),
@@ -457,6 +445,20 @@ function boundCompressedPdfStreams(
     if (streamEnd === -1)
       streamEnd = contents.indexOf("\rendstream", streamStart);
     if (streamEnd < streamStart || streamEnd > source.byteLength) continue;
+    streamBodyEnd = streamEnd;
+    const lexicalDictionary = pdfDictionaryLexicalValues(dictionary, false);
+    if (pdfTopLevelDictionaryName(lexicalDictionary, "Subtype") === "Image") {
+      const pageContent =
+        object !== undefined && pageContentReferences.has(object[0]);
+      if (!pageContent) continue;
+    }
+    const filters = pdfStreamFilters(
+      contents,
+      dictionary,
+      indirectObjects,
+      path,
+    );
+    if (filters.length === 0) continue;
 
     let decoded = source.subarray(streamStart, streamEnd);
     for (const [filterIndex, filter] of filters.entries()) {
@@ -525,6 +527,23 @@ function boundCompressedPdfStreams(
           { cause: error },
         );
       }
+      const predictorWork = {
+        remaining: MAX_PDF_DECODE_WORK_BYTES - decodingWorkBytes,
+      };
+      const predicted = pdfApplyPredictor(
+        dictionary,
+        decoded,
+        predictorWork,
+        filterIndex,
+      );
+      if (predicted === null) {
+        throw new Error(
+          `Knowledge base PDF compressed stream cannot be safely bounded: ${path}`,
+        );
+      }
+      decodingWorkBytes +=
+        MAX_PDF_DECODE_WORK_BYTES - decodingWorkBytes - predictorWork.remaining;
+      decoded = predicted;
       decodingWorkBytes += decoded.byteLength;
       if (decodingWorkBytes > MAX_PDF_DECODE_WORK_BYTES) {
         throw oversizedPdfStream(path);
@@ -933,126 +952,132 @@ function pdfCrossReferenceStream(
     }
     work.remaining -= decoded.byteLength;
     if (work.remaining < 0) return null;
-  }
-  const predictor = Number(
-    /\/Predictor\s+(\d+)(?=[\s/>])/u.exec(
-      pdfDictionaryLexicalValues(dictionary),
-    )?.[1] ?? "1",
-  );
-  if (predictor !== 1) {
-    const columns = Number(
-      /\/Columns\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1],
-    );
-    const colors = Number(
-      /\/Colors\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1] ?? "1",
-    );
-    const bits = Number(
-      /\/BitsPerComponent\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1] ?? "8",
-    );
-    if (
-      (predictor !== 2 && (predictor < 10 || predictor > 15)) ||
-      !Number.isSafeInteger(columns) ||
-      !Number.isSafeInteger(colors) ||
-      !Number.isSafeInteger(bits) ||
-      columns <= 0 ||
-      colors <= 0 ||
-      bits <= 0
-    ) {
-      return null;
-    }
-    const rowBytes = Math.ceil((columns * colors * bits) / 8);
-    const encodedRowBytes = rowBytes + (predictor === 2 ? 0 : 1);
-    if (
-      !Number.isSafeInteger(rowBytes) ||
-      rowBytes <= 0 ||
-      decoded.byteLength % encodedRowBytes !== 0 ||
-      (predictor === 2 && ![1, 2, 4, 8, 16].includes(bits))
-    ) {
-      return null;
-    }
-    const reconstructed =
-      predictor === 2
-        ? Buffer.from(decoded)
-        : Buffer.alloc((decoded.byteLength / encodedRowBytes) * rowBytes);
-    const pixelBytes = Math.max(1, Math.ceil((colors * bits) / 8));
-    let input = 0;
-    let output = 0;
-    if (predictor === 2) {
-      const samples = columns * colors;
-      const rows = decoded.byteLength / rowBytes;
-      const reconstructionWork = rows * Math.max(0, samples - colors);
-      if (
-        !Number.isSafeInteger(reconstructionWork) ||
-        reconstructionWork > work.remaining
-      ) {
-        return null;
-      }
-      work.remaining -= reconstructionWork;
-      const sampleMask = 2 ** bits - 1;
-      for (let row = 0; row < reconstructed.byteLength; row += rowBytes) {
-        for (let sample = colors; sample < samples; sample += 1) {
-          if (bits === 16) {
-            const current = row + sample * 2;
-            const previous = row + (sample - colors) * 2;
-            reconstructed.writeUInt16BE(
-              (reconstructed.readUInt16BE(current) +
-                reconstructed.readUInt16BE(previous)) &
-                sampleMask,
-              current,
-            );
-          } else {
-            const bit = sample * bits;
-            const previousBit = (sample - colors) * bits;
-            const current = row + Math.floor(bit / 8);
-            const previous = row + Math.floor(previousBit / 8);
-            const shift = 8 - bits - (bit % 8);
-            const previousShift = 8 - bits - (previousBit % 8);
-            const next =
-              (((reconstructed[current]! >> shift) & sampleMask) +
-                ((reconstructed[previous]! >> previousShift) & sampleMask)) &
-              sampleMask;
-            reconstructed[current] =
-              (reconstructed[current]! & ~(sampleMask << shift)) |
-              (next << shift);
-          }
-        }
-      }
-      decoded = reconstructed;
-      return { dictionary, contents: decoded };
-    }
-    while (input < decoded.byteLength) {
-      const filter = decoded[input++]!;
-      if (filter > 4) return null;
-      for (let column = 0; column < rowBytes; column += 1) {
-        const left =
-          column < pixelBytes ? 0 : reconstructed[output - pixelBytes]!;
-        const above = output < rowBytes ? 0 : reconstructed[output - rowBytes]!;
-        const upperLeft =
-          output < rowBytes || column < pixelBytes
-            ? 0
-            : reconstructed[output - rowBytes - pixelBytes]!;
-        let prediction = 0;
-        if (filter === 1) prediction = left;
-        else if (filter === 2) prediction = above;
-        else if (filter === 3) prediction = Math.floor((left + above) / 2);
-        else if (filter === 4) {
-          const estimate = left + above - upperLeft;
-          const leftDistance = Math.abs(estimate - left);
-          const aboveDistance = Math.abs(estimate - above);
-          const diagonalDistance = Math.abs(estimate - upperLeft);
-          prediction =
-            leftDistance <= aboveDistance && leftDistance <= diagonalDistance
-              ? left
-              : aboveDistance <= diagonalDistance
-                ? above
-                : upperLeft;
-        }
-        reconstructed[output++] = (decoded[input++]! + prediction) & 255;
-      }
-    }
-    decoded = reconstructed;
+    const predicted = pdfApplyPredictor(dictionary, decoded, work, filterIndex);
+    if (predicted === null) return null;
+    decoded = predicted;
   }
   return { dictionary, contents: decoded };
+}
+
+function pdfApplyPredictor(
+  dictionary: string,
+  decoded: Buffer,
+  work: { remaining: number },
+  filterIndex: number,
+): Buffer | null {
+  const parameters = pdfFilterDecodeParameters(dictionary, filterIndex);
+  const predictor = Number(
+    /\/Predictor\s+(\d+)(?=[\s/>])/u.exec(parameters ?? "")?.[1] ?? "1",
+  );
+  if (predictor === 1) return decoded;
+  const columns = Number(/\/Columns\s+(\d+)(?=[\s/>])/u.exec(parameters!)?.[1]);
+  const colors = Number(
+    /\/Colors\s+(\d+)(?=[\s/>])/u.exec(parameters!)?.[1] ?? "1",
+  );
+  const bits = Number(
+    /\/BitsPerComponent\s+(\d+)(?=[\s/>])/u.exec(parameters!)?.[1] ?? "8",
+  );
+  if (
+    (predictor !== 2 && (predictor < 10 || predictor > 15)) ||
+    !Number.isSafeInteger(columns) ||
+    !Number.isSafeInteger(colors) ||
+    !Number.isSafeInteger(bits) ||
+    columns <= 0 ||
+    colors <= 0 ||
+    bits <= 0
+  ) {
+    return null;
+  }
+  const rowBytes = Math.ceil((columns * colors * bits) / 8);
+  const encodedRowBytes = rowBytes + (predictor === 2 ? 0 : 1);
+  if (
+    !Number.isSafeInteger(rowBytes) ||
+    rowBytes <= 0 ||
+    decoded.byteLength % encodedRowBytes !== 0 ||
+    (predictor === 2 && ![1, 2, 4, 8, 16].includes(bits))
+  ) {
+    return null;
+  }
+  const reconstructed =
+    predictor === 2
+      ? Buffer.from(decoded)
+      : Buffer.alloc((decoded.byteLength / encodedRowBytes) * rowBytes);
+  const pixelBytes = Math.max(1, Math.ceil((colors * bits) / 8));
+  let input = 0;
+  let output = 0;
+  if (predictor === 2) {
+    const samples = columns * colors;
+    const rows = decoded.byteLength / rowBytes;
+    const reconstructionWork = rows * Math.max(0, samples - colors);
+    if (
+      !Number.isSafeInteger(reconstructionWork) ||
+      reconstructionWork > work.remaining
+    ) {
+      return null;
+    }
+    work.remaining -= reconstructionWork;
+    const sampleMask = 2 ** bits - 1;
+    for (let row = 0; row < reconstructed.byteLength; row += rowBytes) {
+      for (let sample = colors; sample < samples; sample += 1) {
+        if (bits === 16) {
+          const current = row + sample * 2;
+          const previous = row + (sample - colors) * 2;
+          reconstructed.writeUInt16BE(
+            (reconstructed.readUInt16BE(current) +
+              reconstructed.readUInt16BE(previous)) &
+              sampleMask,
+            current,
+          );
+        } else {
+          const bit = sample * bits;
+          const previousBit = (sample - colors) * bits;
+          const current = row + Math.floor(bit / 8);
+          const previous = row + Math.floor(previousBit / 8);
+          const shift = 8 - bits - (bit % 8);
+          const previousShift = 8 - bits - (previousBit % 8);
+          const next =
+            (((reconstructed[current]! >> shift) & sampleMask) +
+              ((reconstructed[previous]! >> previousShift) & sampleMask)) &
+            sampleMask;
+          reconstructed[current] =
+            (reconstructed[current]! & ~(sampleMask << shift)) |
+            (next << shift);
+        }
+      }
+    }
+    return reconstructed;
+  }
+  while (input < decoded.byteLength) {
+    const filter = decoded[input++]!;
+    if (filter > 4) return null;
+    for (let column = 0; column < rowBytes; column += 1) {
+      const left =
+        column < pixelBytes ? 0 : reconstructed[output - pixelBytes]!;
+      const above = output < rowBytes ? 0 : reconstructed[output - rowBytes]!;
+      const upperLeft =
+        output < rowBytes || column < pixelBytes
+          ? 0
+          : reconstructed[output - rowBytes - pixelBytes]!;
+      let prediction = 0;
+      if (filter === 1) prediction = left;
+      else if (filter === 2) prediction = above;
+      else if (filter === 3) prediction = Math.floor((left + above) / 2);
+      else if (filter === 4) {
+        const estimate = left + above - upperLeft;
+        const leftDistance = Math.abs(estimate - left);
+        const aboveDistance = Math.abs(estimate - above);
+        const diagonalDistance = Math.abs(estimate - upperLeft);
+        prediction =
+          leftDistance <= aboveDistance && leftDistance <= diagonalDistance
+            ? left
+            : aboveDistance <= diagonalDistance
+              ? above
+              : upperLeft;
+      }
+      reconstructed[output++] = (decoded[input++]! + prediction) & 255;
+    }
+  }
+  return reconstructed;
 }
 
 function pdfDictionaryLexicalValues(
@@ -1195,7 +1220,7 @@ function pdfPageContentReferences(
       path,
     );
     if (dictionary === undefined || !dictionary.startsWith("<<")) continue;
-    const lexical = pdfDictionaryLexicalValues(dictionary);
+    const lexical = pdfDictionaryLexicalValues(dictionary, false);
     if (pdfTopLevelDictionaryName(lexical, "Type") !== "Page") continue;
     const contentsValue = pdfTopLevelDictionaryReference(lexical, "Contents");
     if (contentsValue !== undefined) pending.push(contentsValue);
@@ -1257,7 +1282,7 @@ function pdfTopLevelDictionaryReference(
       continue;
     }
     const value =
-      /^\/([^\s<>[\]()%/]+)\s+(\[[^\]]*\]|\d+\s+\d+\s+R)(?=[\s/>])/u.exec(
+      /^\/([^\s<>[\]()%/]+)\s*(\[[^\]]*\]|\d+\s+\d+\s+R)(?=[\s/>])/u.exec(
         dictionary.slice(index),
       );
     if (value?.[1] !== undefined && pdfDecodedName(value[1]) === key) {
@@ -1320,17 +1345,25 @@ function pdfStreamFilters(
 }
 
 function pdfLzwEarlyChange(dictionary: string, filterIndex: number): 0 | 1 {
+  const selected = pdfFilterDecodeParameters(dictionary, filterIndex);
+  if (selected === undefined) return 1;
+  const value = /\/EarlyChange\s+([01])(?=[\s/>])/u.exec(selected)?.[1];
+  return value === "0" ? 0 : 1;
+}
+
+function pdfFilterDecodeParameters(
+  dictionary: string,
+  filterIndex: number,
+): string | undefined {
   const lexical = pdfDictionaryLexicalValues(dictionary);
   const parameters = /\/(?:DecodeParms|DP)\s+(\[[\s\S]*?\]|<<[\s\S]*?>>)/u.exec(
     lexical,
   )?.[1];
-  if (parameters === undefined) return 1;
+  if (parameters === undefined) return undefined;
   const selected = parameters.startsWith("[")
     ? [...parameters.matchAll(/null|<<[\s\S]*?>>/gu)][filterIndex]?.[0]
     : parameters;
-  if (selected === undefined || selected === "null") return 1;
-  const value = /\/EarlyChange\s+([01])(?=[\s/>])/u.exec(selected)?.[1];
-  return value === "0" ? 0 : 1;
+  return selected === "null" ? undefined : selected;
 }
 
 function oversizedPdfStream(path: string): KnowledgeBaseLimitError {
