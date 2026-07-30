@@ -174,6 +174,13 @@ function xrefStreamPdf(
     objectHeaderComments?: boolean;
     tiffPredictor?: boolean;
     compressPageObjects?: boolean;
+    compressedPagePrefix?: string;
+    compressedPageSuffix?: string;
+    escapedCompressedPageContents?: boolean;
+    objectStreamFilter?: {
+      name: string;
+      encode: (bytes: Buffer) => Buffer;
+    };
   } = {},
 ): Buffer {
   const original = Buffer.from(document).toString("latin1");
@@ -214,7 +221,15 @@ function xrefStreamPdf(
         throw new Error("Indirect PDF fixture object is missing.");
       }
       compressed.set(number, { stream: streamObject, index: values.length });
-      values.push(match[1]);
+      const page = /<<\s*\/Type\s+\/Page(?=[\s/>])/u.test(match[1]);
+      let value = match[1];
+      if (page && options.escapedCompressedPageContents === true) {
+        value = value.replace("/Contents ", "/Cont#65nts ");
+      }
+      if (page) {
+        value = `${options.compressedPagePrefix ?? ""}${value}${options.compressedPageSuffix ?? ""}`;
+      }
+      values.push(value);
       body =
         body.slice(0, match.index + 1) +
         body.slice(match.index + match[0].length);
@@ -226,8 +241,14 @@ function xrefStreamPdf(
       objectBody += `${values[index]} `;
     }
     header += " ".repeat(objectHeaderPadding);
-    const encoded = deflateSync(Buffer.from(header + objectBody, "latin1"));
-    body += `${streamObject} 0 obj\n<< /Type /ObjStm /N ${references.length} /First ${header.length} /Length ${encoded.byteLength} /Filter /FlateDecode >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\n`;
+    const objectStreamFilter = options.objectStreamFilter ?? {
+      name: "/FlateDecode",
+      encode: deflateSync,
+    };
+    const encoded = objectStreamFilter.encode(
+      Buffer.from(header + objectBody, "latin1"),
+    );
+    body += `${streamObject} 0 obj\n<< /Type /ObjStm /N ${references.length} /First ${header.length} /Length ${encoded.byteLength} /Filter ${objectStreamFilter.name} >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\n`;
   }
   const xrefObject = ++maximumObject;
   const xrefOffset = Buffer.byteLength(body, "latin1");
@@ -975,6 +996,65 @@ describe("scan knowledge bases", () => {
     await expect(prepareKnowledgeBase([document])).rejects.toThrow(
       "8388608-byte extracted-text limit",
     );
+  });
+
+  test("bounds compressed page contents behind PDF comments and escaped dictionary names", async () => {
+    for (const [name, options] of [
+      [
+        "comments",
+        {
+          compressedPagePrefix: "% valid leading page comment\n",
+          compressedPageSuffix: " % valid trailing page comment\n",
+        },
+      ],
+      ["escaped-contents", { escapedCompressedPageContents: true }],
+    ] as const) {
+      const root = await temporaryDirectory();
+      const document = join(root, `${name}.pdf`);
+      await writeFile(
+        document,
+        xrefStreamPdf(
+          pdf("reviewable", 1, true, " ".repeat(9 * 1024 * 1024), {
+            dictionaryPrefix: "/Subtype /Image ",
+          }),
+          true,
+          0,
+          { compressPageObjects: true, ...options },
+        ),
+      );
+
+      await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+        "8388608-byte extracted-text limit",
+      );
+    }
+  });
+
+  test("bounds page contents in LZW- and run-length-compressed object streams", async () => {
+    for (const [name, encode] of [
+      ["/LZWDecode", encodePdfLzwLiterals],
+      ["/RunLengthDecode", encodeRunLength],
+    ] as const) {
+      const root = await temporaryDirectory();
+      const document = join(root, `${name.slice(1)}.pdf`);
+      await writeFile(
+        document,
+        xrefStreamPdf(
+          pdf("reviewable", 1, true, " ".repeat(9 * 1024 * 1024), {
+            dictionaryPrefix: "/Subtype /Image ",
+          }),
+          true,
+          0,
+          {
+            compressPageObjects: true,
+            objectStreamFilter: { name, encode },
+          },
+        ),
+      );
+
+      await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+        "8388608-byte extracted-text limit",
+      );
+    }
   });
 
   test("rejects negative cross-reference stream field widths", async () => {

@@ -676,12 +676,17 @@ function pdfIndirectValue(
         .subarray(first + start, first + next)
         .toString("latin1")
         .trim();
-      const primitive = /^(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)$/u.exec(raw)?.[1];
+      const lexical = pdfDictionaryLexicalValues(raw, false).trim();
+      const primitive = /^(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)$/u.exec(
+        lexical,
+      )?.[1];
       parsed.push({
         number,
         value:
           primitive ??
-          (raw.startsWith("<<") && raw.endsWith(">>") ? raw : undefined),
+          (lexical.startsWith("<<") && lexical.endsWith(">>")
+            ? lexical
+            : undefined),
       });
     }
     objects = parsed;
@@ -882,7 +887,12 @@ function pdfCrossReferenceStream(
     contents.slice(streamOffset, streamOffset + length),
     "latin1",
   );
-  for (const filter of pdfStreamFilters(contents, dictionary, offsets, path)) {
+  for (const [filterIndex, filter] of pdfStreamFilters(
+    contents,
+    dictionary,
+    offsets,
+    path,
+  ).entries()) {
     try {
       switch (filter) {
         case "FlateDecode":
@@ -902,10 +912,23 @@ function pdfCrossReferenceStream(
         case "A85":
           decoded = decodePdfAscii85(decoded, work.remaining);
           break;
+        case "RunLengthDecode":
+        case "RL":
+          decoded = decodePdfRunLength(decoded, work.remaining);
+          break;
+        case "LZWDecode":
+        case "LZW":
+          decoded = decodePdfLzw(
+            decoded,
+            work.remaining,
+            pdfLzwEarlyChange(dictionary, filterIndex),
+          );
+          break;
         default:
           return null;
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof KnowledgeBaseLimitError) throw error;
       return null;
     }
     work.remaining -= decoded.byteLength;
@@ -1172,11 +1195,9 @@ function pdfPageContentReferences(
       path,
     );
     if (dictionary === undefined || !dictionary.startsWith("<<")) continue;
-    const lexical = pdfDictionaryLexicalValues(dictionary, false);
+    const lexical = pdfDictionaryLexicalValues(dictionary);
     if (pdfTopLevelDictionaryName(lexical, "Type") !== "Page") continue;
-    const contentsValue = /\/Contents\s+(\[[^\]]*\]|\d+\s+\d+\s+R)/u.exec(
-      lexical,
-    )?.[1];
+    const contentsValue = pdfTopLevelDictionaryReference(lexical, "Contents");
     if (contentsValue !== undefined) pending.push(contentsValue);
   }
   const selected = new Set<string>();
@@ -1201,6 +1222,49 @@ function pdfPageContentReferences(
     }
   }
   return selected;
+}
+
+function pdfTopLevelDictionaryReference(
+  dictionary: string,
+  key: string,
+): string | undefined {
+  let dictionaryDepth = 0;
+  let arrayDepth = 0;
+  for (let index = 0; index < dictionary.length; index += 1) {
+    if (dictionary.startsWith("<<", index)) {
+      dictionaryDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (dictionary.startsWith(">>", index)) {
+      dictionaryDepth -= 1;
+      index += 1;
+      continue;
+    }
+    if (dictionary[index] === "[") {
+      arrayDepth += 1;
+      continue;
+    }
+    if (dictionary[index] === "]") {
+      arrayDepth -= 1;
+      continue;
+    }
+    if (
+      dictionaryDepth !== 1 ||
+      arrayDepth !== 0 ||
+      dictionary[index] !== "/"
+    ) {
+      continue;
+    }
+    const value =
+      /^\/([^\s<>[\]()%/]+)\s+(\[[^\]]*\]|\d+\s+\d+\s+R)(?=[\s/>])/u.exec(
+        dictionary.slice(index),
+      );
+    if (value?.[1] !== undefined && pdfDecodedName(value[1]) === key) {
+      return value[2];
+    }
+  }
+  return undefined;
 }
 
 function pdfStreamFilters(
