@@ -747,6 +747,67 @@ describe("diff rank input", () => {
     expect(row?.preview).toContain("Working tree:");
   });
 
+  test("reviews immutable symlink targets across all unresolved merge stages", async () => {
+    const fixture = await createRepository();
+    const path = "src/app.ts";
+    const hashes = ["base-target.ts", "ours-target.ts", "theirs-target.ts"].map(
+      (target) => {
+        const hashed = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+          cwd: fixture.repository,
+          encoding: "utf8",
+          input: target,
+        });
+        expect(hashed.status, hashed.stderr).toBe(0);
+        return hashed.stdout.trim();
+      },
+    );
+    const index = [
+      `0 ${"0".repeat(40)}\t${path}`,
+      ...hashes.map((hash, index) => `120000 ${hash} ${index + 1}\t${path}`),
+    ].join("\n");
+    const updated = spawnSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+      input: `${index}\n`,
+    });
+    expect(updated.status, updated.stderr).toBe(0);
+
+    const row = (await runDiffRankInput(fixture, "local-patch")).find(
+      (candidate) => candidate.path === path,
+    );
+
+    expect(row?.preview).toContain("Merge base (stage 1):");
+    expect(row?.preview).toContain("Symlink target: base-target.ts");
+    expect(row?.preview).toContain("Symlink target: ours-target.ts");
+    expect(row?.preview).toContain("Symlink target: theirs-target.ts");
+  });
+
+  test("preserves pinned submodule revisions across unresolved merge stages", async () => {
+    const fixture = await createRepository();
+    const path = ".github/actions/security";
+    const index = [
+      `0 ${"0".repeat(40)}\t${path}`,
+      ...[1, 2, 3].map((stage) => `160000 ${fixture.base} ${stage}\t${path}`),
+    ].join("\n");
+    const updated = spawnSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+      input: `${index}\n`,
+    });
+    expect(updated.status, updated.stderr).toBe(0);
+
+    const row = (await runDiffRankInput(fixture, "local-patch")).find(
+      (candidate) => candidate.path === path,
+    );
+
+    expect(row?.preview).toContain("Merge base (stage 1):");
+    expect(row?.preview).toContain("Ours (stage 2):");
+    expect(row?.preview).toContain("Theirs (stage 3):");
+    expect(row?.preview).toContain(
+      `Git submodule pinned to commit ${fixture.base}`,
+    );
+  });
+
   test("retains reviewable staged text when the working-tree version is binary", async () => {
     const fixture = await createRepository();
     const path = "src/app.ts";

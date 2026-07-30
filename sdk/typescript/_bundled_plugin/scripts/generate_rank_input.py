@@ -549,16 +549,28 @@ def staged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[str
                 f"Unsafe changed repository path cannot be safely reviewed: {relative}"
             ) from error
         if (
-            mode not in {b"100644", b"100755"}
+            mode not in {b"100644", b"100755", b"120000", b"160000"}
             or stage not in {b"0", b"1", b"2", b"3"}
             or stage in seen_stages
             or staged_path != os.fsencode(relative)
+            or stage == b"0" and mode in {b"120000", b"160000"}
         ):
             raise SystemExit(
                 f"Unsafe changed repository path cannot be safely reviewed: {relative}"
             )
         seen_stages.add(stage)
-        preview, binary = git_blob_preview(command, environment, path, object_id, preview_bytes)
+        if mode == b"160000":
+            try:
+                preview = f"Git submodule pinned to commit {object_id.decode('ascii')}"
+            except UnicodeDecodeError as error:
+                raise SystemExit(
+                    f"Unsafe changed repository path cannot be safely reviewed: {relative}"
+                ) from error
+            binary = False
+        else:
+            preview, binary = git_blob_preview(command, environment, path, object_id, preview_bytes)
+            if mode == b"120000":
+                preview = f"Symlink target: {preview}"
         if binary:
             continue
         if stage == b"0":
@@ -958,6 +970,8 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     f"Git submodule pinned to commit {gitlink_revision}",
                     False,
                 )
+            elif is_staged and status == "U" and path.is_symlink():
+                preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
             elif is_staged and not path.exists() and not path.is_symlink():
                 preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
             elif is_staged:
