@@ -245,7 +245,7 @@ async function runCampaign(
             ) {
               throw new Error("Multiscan scope escapes its repository.");
             }
-            canonicalScope = outside.split(sep).join("/");
+            canonicalScope = outside.split(sep).join("/") || ".";
           }
           const result = await security.run(checkout, {
             ...(task.scope === undefined ? {} : { target: [task.scope] }),
@@ -256,6 +256,13 @@ async function runCampaign(
           cost = result.cost;
           if (result.coverage.completeness !== "complete") {
             throw new Error("Multiscan repository coverage is incomplete.");
+          }
+          if (canonicalScope !== undefined && canonicalScope !== task.scope) {
+            await writeFile(
+              join(scanDir, ".multiscan-scope.json"),
+              `${JSON.stringify({ scope: task.scope, canonicalScope })}\n`,
+              { flag: "wx", mode: 0o600 },
+            );
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
@@ -1089,9 +1096,26 @@ async function hasArtifacts(
         ) {
           return false;
         }
-        canonicalScope = relativeScope.split(sep).join("/");
+        canonicalScope = relativeScope.split(sep).join("/") || ".";
       } catch {
         if (recordedCanonicalScope !== undefined) {
+          if (recordedCanonicalScope !== canonicalScope) {
+            const bindingPath = join(path, ".multiscan-scope.json");
+            const bindingMetadata = await lstat(bindingPath);
+            if (!bindingMetadata.isFile() || bindingMetadata.nlink !== 1) {
+              return false;
+            }
+            const binding = JSON.parse(await readFile(bindingPath, "utf8")) as {
+              scope?: unknown;
+              canonicalScope?: unknown;
+            };
+            if (
+              binding.scope !== task.scope ||
+              binding.canonicalScope !== recordedCanonicalScope
+            ) {
+              return false;
+            }
+          }
           canonicalScope = recordedCanonicalScope;
         }
       }

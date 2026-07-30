@@ -377,7 +377,7 @@ describe("multiscan", () => {
       });
       expect(scans).toBe(1);
 
-      const remote = "https://example.invalid/symlinked-scope.git";
+      const remote = "ssh://127.0.0.1:1/symlinked-scope.git";
       await writeFile(
         paths.input,
         `id,repository,revision,scope\nscoped,${remote},${revision},alias\n`,
@@ -400,6 +400,97 @@ describe("multiscan", () => {
         completed: 1,
         failed: 0,
         skipped: 1,
+      });
+      expect(scans).toBe(1);
+
+      const manipulated = await results(ledgerPath);
+      manipulated[manipulated.length - 1]!["canonicalScope"] = "another";
+      await writeFile(
+        ledgerPath,
+        `${manipulated.map((receipt) => JSON.stringify(receipt)).join("\n")}\n`,
+      );
+      const scanManifestPath = join(
+        paths.output,
+        "artifacts",
+        "scoped",
+        "attempt-1",
+        "scan-manifest.json",
+      );
+      const scanManifest = JSON.parse(
+        await readFile(scanManifestPath, "utf8"),
+      ) as { scan: { scope: { includePaths: string[] } } };
+      scanManifest.scan.scope.includePaths = ["another"];
+      await writeFile(
+        scanManifestPath,
+        `${JSON.stringify(scanManifest, null, 2)}\n`,
+      );
+      const coveragePath = join(dirname(scanManifestPath), "coverage.json");
+      const coverage = JSON.parse(await readFile(coveragePath, "utf8")) as {
+        includePaths: string[];
+      };
+      coverage.includePaths = ["another"];
+      await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
+      await reseal(dirname(scanManifestPath));
+
+      const resumed = await runMultiscan(options(paths, security));
+      expect(resumed.skipped).toBe(0);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "normalizes a symlinked repository-root scope for resumable scans",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "repository-root-alias");
+      await symlink(".", join(source.path, "root-alias"));
+      git(source.path, "add", "root-alias");
+      git(
+        source.path,
+        "-c",
+        "user.name=Multiscan Test",
+        "-c",
+        "user.email=multiscan@example.test",
+        "commit",
+        "-qm",
+        "add repository-root alias",
+      );
+      const revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nroot,${source.path},${revision},root-alias\n`,
+      );
+      let scans = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        scans += 1;
+        const result = await completedScan(scanOptions.outputDir!);
+        for (const artifact of ["scan-manifest.json", "coverage.json"]) {
+          const artifactPath = join(scanOptions.outputDir!, artifact);
+          const document = JSON.parse(await readFile(artifactPath, "utf8")) as {
+            scan?: { scope: { includePaths: string[] } };
+            includePaths?: string[];
+          };
+          if (document.scan === undefined) document.includePaths = ["."];
+          else document.scan.scope.includePaths = ["."];
+          await writeFile(
+            artifactPath,
+            `${JSON.stringify(document, null, 2)}\n`,
+          );
+        }
+        await reseal(scanOptions.outputDir!);
+        return result;
+      });
+
+      await runMultiscan(options(paths, security));
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(
+        (await results(join(paths.output, "results.jsonl")))[0],
+      ).toMatchObject({
+        scope: "root-alias",
+        canonicalScope: ".",
       });
       expect(scans).toBe(1);
     },
