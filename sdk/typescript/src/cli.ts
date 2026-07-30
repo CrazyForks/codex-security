@@ -2025,7 +2025,9 @@ async function matchAllScans(
         if (group.length > 1 && !groupedMatching.has(afterScanId)) {
           groupedMatching.set(
             afterScanId,
-            matchScanGroupInOneBatch(dependencies, group, afterScanId),
+            matchScanGroupInOneBatch(dependencies, group, afterScanId).catch(
+              () => null,
+            ),
           );
         }
         const matching =

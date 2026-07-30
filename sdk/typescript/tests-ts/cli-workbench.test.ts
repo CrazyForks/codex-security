@@ -856,6 +856,72 @@ describe("CLI workbench", () => {
     );
   });
 
+  test("falls back per scan pair when a grouped optimization rejects", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                repository: "/repo",
+                scanCount: 3,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: null,
+                pairs: [
+                  { beforeScanId: "before-broken", afterScanId: "after" },
+                  { beforeScanId: "before-valid", afterScanId: "after" },
+                ],
+              };
+            }
+            if (args[0] !== "get-scan-matching-inputs") return {};
+            const scanId = args[2]!;
+            if (scanId === "before-broken") {
+              throw new Error("finding exceeds the page size limit");
+            }
+            return {
+              scanId,
+              findings: [{ occurrenceId: scanId }],
+              nextOffset: null,
+              totalFindings: 1,
+            };
+          },
+          onMatch: async (input) => ({
+            matches: [
+              {
+                beforeOccurrenceIds: input.before.map(
+                  ({ occurrenceId }) => occurrenceId,
+                ),
+                afterOccurrenceIds: input.after.map(
+                  ({ occurrenceId }) => occurrenceId,
+                ),
+                confidence: "high",
+                reason: "Same root cause.",
+              },
+            ],
+            uncertain: [],
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      matchedPairs: 1,
+      unmatchedBatches: 1,
+    });
+    expect(stderr.text()).toContain("finding exceeds the page size limit");
+    expect(
+      calls.filter(([command]) => command === "save-scan-comparison"),
+    ).toHaveLength(1);
+  });
+
   test("keeps matching later scans after one batch conflicts", async () => {
     const calls: Array<readonly string[]> = [];
     const stderr = capture();
