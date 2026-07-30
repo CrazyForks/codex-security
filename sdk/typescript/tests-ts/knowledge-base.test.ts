@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -13,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
@@ -50,9 +53,15 @@ function docx(text: string): Uint8Array {
   });
 }
 
-function pdf(text: string, pages = 1): Uint8Array {
+function pdf(text: string, pages = 1, compressed = false): Uint8Array {
   const escaped = text.replace(/[\\()]/gu, "\\$&");
-  const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  const chunks = escaped.match(/.{1,512}/gu) ?? [""];
+  const stream = `BT /F1 12 Tf 72 720 Td ${chunks
+    .map((chunk) => `(${chunk}) Tj`)
+    .join(" ")} ET`;
+  const streamBytes = compressed
+    ? deflateSync(Buffer.from(stream))
+    : Buffer.from(stream);
   const pageObjects = Array.from({ length: pages }, (_, index) => index + 3);
   const font = pages + 3;
   const content = pages + 4;
@@ -61,24 +70,24 @@ function pdf(text: string, pages = 1): Uint8Array {
     `<< /Type /Pages /Kids [${pageObjects.map((number) => `${number} 0 R`).join(" ")}] /Count ${pages} >>`,
     ...pageObjects.map(
       () =>
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`,
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 2000000 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`,
     ),
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+    `<< /Length ${streamBytes.byteLength}${compressed ? " /Filter /FlateDecode" : ""} >>\nstream\n${streamBytes.toString("latin1")}\nendstream`,
   ];
   let output = "%PDF-1.4\n";
   const offsets = [0];
   for (const [index, object] of objects.entries()) {
-    offsets.push(Buffer.byteLength(output));
+    offsets.push(Buffer.byteLength(output, "latin1"));
     output += `${index + 1} 0 obj\n${object}\nendobj\n`;
   }
-  const xref = Buffer.byteLength(output);
+  const xref = Buffer.byteLength(output, "latin1");
   output += `xref\n0 ${offsets.length}\n0000000000 65535 f \n`;
   for (const offset of offsets.slice(1)) {
     output += `${String(offset).padStart(10, "0")} 00000 n \n`;
   }
   output += `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-  return new TextEncoder().encode(output);
+  return Buffer.from(output, "latin1");
 }
 
 describe("scan knowledge bases", () => {
@@ -264,6 +273,18 @@ describe("scan knowledge bases", () => {
     );
   });
 
+  test("bounds streamed text from a compressed PDF page", async () => {
+    const root = await temporaryDirectory();
+    const oversized = join(root, "compressed.pdf");
+    const compressed = pdf("x".repeat(300 * 1024), 32, true);
+    expect(compressed.byteLength).toBeLessThan(8 * 1024 * 1024);
+    await writeFile(oversized, compressed);
+
+    await expect(prepareKnowledgeBase([oversized])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+  });
+
   test("observes cancellation while discovering directories", async () => {
     const root = await temporaryDirectory();
     const nested = join(root, "one", "two");
@@ -303,6 +324,59 @@ describe("scan knowledge bases", () => {
       "cannot be symbolic links",
     );
   });
+
+  testPosix(
+    "rejects a directory replaced with an escaping symbolic link",
+    async () => {
+      const source = await temporaryDirectory();
+      const nested = join(source, "nested");
+      const outside = await temporaryDirectory();
+      await mkdir(nested);
+      await writeFile(join(nested, "scope.md"), "Internal scope");
+      await writeFile(
+        join(outside, "external.md"),
+        "Never ingest this document",
+      );
+      const controller = new AbortController();
+      let checks = 0;
+      controller.signal.throwIfAborted = (): void => {
+        checks += 1;
+        if (checks === 5) {
+          renameSync(nested, join(source, "replaced"));
+          symlinkSync(outside, nested);
+        }
+      };
+
+      await expect(
+        prepareKnowledgeBase([source], controller.signal),
+      ).rejects.toThrow(
+        /escaped the requested source|changed during discovery/u,
+      );
+    },
+  );
+
+  testPosix(
+    "does not block when a discovered document becomes a FIFO",
+    async () => {
+      const root = await temporaryDirectory();
+      const document = join(root, "scope.md");
+      await writeFile(document, "Internal scope");
+      const controller = new AbortController();
+      let checks = 0;
+      controller.signal.throwIfAborted = (): void => {
+        checks += 1;
+        if (checks === 6) {
+          renameSync(document, join(root, "replaced.md"));
+          const result = spawnSync("mkfifo", [document], { encoding: "utf8" });
+          expect(result.status, result.stderr).toBe(0);
+        }
+      };
+
+      await expect(
+        prepareKnowledgeBase([document], controller.signal),
+      ).rejects.toThrow("not a file");
+    },
+  );
 
   testPosix("rejects unreadable source documents", async () => {
     const root = await temporaryDirectory();

@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, extname, join, resolve, sep } from "node:path";
 import { unzipSync } from "fflate";
 
 const SUPPORTED_EXTENSIONS = new Set([
@@ -30,7 +30,7 @@ const MAX_PDF_PAGES = 512;
 const READ_CHUNK_BYTES = 64 * 1024;
 
 interface DiscoveryState {
-  documents: Set<string>;
+  documents: Map<string, string>;
   entries: number;
   inputBytes: number;
 }
@@ -49,7 +49,7 @@ export async function prepareKnowledgeBase(
 ): Promise<PreparedKnowledgeBase> {
   const sources = new Set<string>();
   const discovery: DiscoveryState = {
-    documents: new Set(),
+    documents: new Map(),
     entries: 0,
     inputBytes: 0,
   };
@@ -74,12 +74,12 @@ export async function prepareKnowledgeBase(
     if (sources.has(source)) continue;
     let selected = false;
     if (metadata.isDirectory()) {
-      selected = await discover(source, 0, discovery, signal);
+      selected = await discover(source, source, 0, discovery, signal);
     } else {
       if (!SUPPORTED_EXTENSIONS.has(extname(source).toLowerCase())) {
         throw new Error(`Unsupported knowledge base document: ${source}`);
       }
-      await addDocument(source, await lstat(source), discovery, signal);
+      await addDocument(source, source, await lstat(source), discovery, signal);
       selected = true;
     }
     if (!selected) {
@@ -96,9 +96,14 @@ export async function prepareKnowledgeBase(
     let index = 0;
     let inputBytes = 0;
     let extractedBytes = 0;
-    for (const document of discovery.documents) {
+    for (const [document, sourceRoot] of discovery.documents) {
       signal?.throwIfAborted();
-      const bytes = await readDocument(document, inputBytes, signal);
+      const bytes = await readDocument(
+        document,
+        sourceRoot,
+        inputBytes,
+        signal,
+      );
       inputBytes += bytes.byteLength;
       const extension = extname(document).toLowerCase();
       const text =
@@ -149,6 +154,7 @@ export async function prepareKnowledgeBase(
 
 async function discover(
   directory: string,
+  sourceRoot: string,
   depth: number,
   state: DiscoveryState,
   signal?: AbortSignal,
@@ -160,9 +166,33 @@ async function discover(
     );
   }
   let selected = false;
+  const initial = await lstat(directory);
+  const canonicalDirectory = await requireContainedSource(
+    directory,
+    sourceRoot,
+  );
+  if (!initial.isDirectory() || initial.isSymbolicLink()) {
+    throw new Error(
+      `Knowledge base directory changed during discovery: ${directory}`,
+    );
+  }
   const entries = await opendir(directory);
   for await (const entry of entries) {
     signal?.throwIfAborted();
+    const currentDirectory = await requireContainedSource(
+      directory,
+      sourceRoot,
+    );
+    const current = await lstat(currentDirectory);
+    if (
+      currentDirectory !== canonicalDirectory ||
+      current.dev !== initial.dev ||
+      current.ino !== initial.ino
+    ) {
+      throw new Error(
+        `Knowledge base directory changed during discovery: ${directory}`,
+      );
+    }
     state.entries += 1;
     if (state.entries > MAX_DISCOVERY_ENTRIES) {
       throw new KnowledgeBaseLimitError(
@@ -172,7 +202,9 @@ async function discover(
     const path = join(directory, entry.name);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      if (await discover(path, depth + 1, state, signal)) selected = true;
+      if (await discover(path, sourceRoot, depth + 1, state, signal)) {
+        selected = true;
+      }
     } else if (
       entry.isFile() &&
       SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase())
@@ -181,7 +213,7 @@ async function discover(
       signal?.throwIfAborted();
       if (metadata.isSymbolicLink() || !metadata.isFile()) continue;
       selected = true;
-      await addDocument(path, metadata, state, signal);
+      await addDocument(path, sourceRoot, metadata, state, signal);
     }
   }
   signal?.throwIfAborted();
@@ -190,6 +222,7 @@ async function discover(
 
 async function addDocument(
   path: string,
+  sourceRoot: string,
   metadata: { size: number },
   state: DiscoveryState,
   signal?: AbortSignal,
@@ -211,19 +244,40 @@ async function addDocument(
       `Knowledge base input exceeds the ${MAX_INPUT_BYTES}-byte aggregate limit.`,
     );
   }
-  state.documents.add(path);
+  await requireContainedSource(path, sourceRoot);
+  state.documents.set(path, sourceRoot);
   state.inputBytes += metadata.size;
+}
+
+async function requireContainedSource(
+  path: string,
+  sourceRoot: string,
+): Promise<string> {
+  const canonical = await realpath(path);
+  if (
+    canonical !== sourceRoot &&
+    !canonical.startsWith(`${sourceRoot}${sep}`)
+  ) {
+    throw new Error(
+      `Knowledge base path escaped the requested source: ${path}`,
+    );
+  }
+  return canonical;
 }
 
 async function readDocument(
   path: string,
+  sourceRoot: string,
   consumedBytes: number,
   signal?: AbortSignal,
 ): Promise<Buffer> {
   signal?.throwIfAborted();
+  const initialPath = await requireContainedSource(path, sourceRoot);
   const file = await open(
     path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (process.platform === "win32" ? 0 : constants.O_NONBLOCK ?? 0),
   );
   try {
     const metadata = await file.stat();
@@ -233,6 +287,15 @@ async function readDocument(
     }
     if (process.platform !== "win32" && (metadata.mode & 0o444) === 0) {
       throw new Error(`Knowledge base document is not readable: ${path}`);
+    }
+    const currentPath = await requireContainedSource(path, sourceRoot);
+    const current = await lstat(currentPath);
+    if (
+      currentPath !== initialPath ||
+      current.dev !== metadata.dev ||
+      current.ino !== metadata.ino
+    ) {
+      throw new Error(`Knowledge base document changed while opening: ${path}`);
     }
     if (metadata.size > MAX_DOCUMENT_BYTES) {
       throw new KnowledgeBaseLimitError(
@@ -326,20 +389,43 @@ async function extractPdf(
       let extractedBytes = 0;
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
-        const content = await (await document.getPage(number)).getTextContent();
-        signal?.throwIfAborted();
-        const page = content.items
-          .map((item) => ("str" in item ? item.str : ""))
-          .join(" ");
-        const pageBytes =
-          Buffer.byteLength(page, "utf8") + (pages.length === 0 ? 0 : 1);
-        if (extractedBytes + pageBytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
-          throw new KnowledgeBaseLimitError(
-            `Knowledge base document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte extracted-text limit: ${path}`,
-          );
+        const reader = (await document.getPage(number))
+          .streamTextContent()
+          .getReader();
+        const pieces: string[] = [];
+        try {
+          while (true) {
+            signal?.throwIfAborted();
+            const chunk = await reader.read();
+            signal?.throwIfAborted();
+            if (chunk.done) break;
+            for (const item of chunk.value.items as Array<{ str?: string }>) {
+              const piece = item.str ?? "";
+              const separator = pieces.length === 0 ? 0 : 1;
+              const pageBreak = pages.length === 0 || pieces.length > 0 ? 0 : 1;
+              const pieceBytes =
+                Buffer.byteLength(piece, "utf8") + separator + pageBreak;
+              if (extractedBytes + pieceBytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
+                throw new KnowledgeBaseLimitError(
+                  `Knowledge base document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte extracted-text limit: ${path}`,
+                );
+              }
+              pieces.push(piece);
+              extractedBytes += pieceBytes;
+            }
+          }
+        } finally {
+          reader.releaseLock();
         }
-        pages.push(page);
-        extractedBytes += pageBytes;
+        if (pieces.length === 0 && pages.length > 0) {
+          extractedBytes += 1;
+          if (extractedBytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
+            throw new KnowledgeBaseLimitError(
+              `Knowledge base document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte extracted-text limit: ${path}`,
+            );
+          }
+        }
+        pages.push(pieces.join(" "));
       }
       return pages.join("\n");
     } finally {
