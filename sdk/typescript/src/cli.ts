@@ -2929,9 +2929,21 @@ async function protectedHookExecutableRoots(
   environment: Readonly<Record<string, string | undefined>>,
 ): Promise<readonly string[]> {
   const roots = new Set([repository]);
-  const selectedWorktree = Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === "GIT_WORK_TREE",
-  )?.[1];
+  const selectedGitDirectory =
+    process.platform === "win32"
+      ? Object.entries(environment).find(
+          ([name]) => name.toUpperCase() === "GIT_DIR",
+        )?.[1]
+      : environment["GIT_DIR"];
+  if (selectedGitDirectory) {
+    roots.add(await realpath(resolve(repository, selectedGitDirectory)));
+  }
+  const selectedWorktree =
+    process.platform === "win32"
+      ? Object.entries(environment).find(
+          ([name]) => name.toUpperCase() === "GIT_WORK_TREE",
+        )?.[1]
+      : environment["GIT_WORK_TREE"];
   if (selectedWorktree) {
     roots.add(await realpath(resolve(repository, selectedWorktree)));
   }

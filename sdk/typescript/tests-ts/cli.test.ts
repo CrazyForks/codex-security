@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, normalize, parse } from "node:path";
+import { delimiter, join, normalize, parse, relative } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -859,6 +859,7 @@ describe("CLI", () => {
       const repository = join(worktree, "packages", "service");
       const binaries = join(worktree, "node_modules", ".bin");
       const gitDirectory = join(root, "git-directory");
+      const gitBinaries = join(gitDirectory, "node_modules", ".bin");
       await Promise.all([
         mkdir(repository, { recursive: true }),
         mkdir(binaries, { recursive: true }),
@@ -866,6 +867,7 @@ describe("CLI", () => {
       execFileSync("git", ["init", "--bare", "-q", gitDirectory], {
         timeout: 10_000,
       });
+      await mkdir(gitBinaries, { recursive: true });
 
       const marker = join(root, "git-shim-executed");
       const gitName = process.platform === "win32" ? "git.cmd" : "git";
@@ -873,7 +875,10 @@ describe("CLI", () => {
         process.platform === "win32"
           ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
           : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
-      await writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 });
+      await Promise.all([
+        writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 }),
+        writeFile(join(gitBinaries, gitName), maliciousGit, { mode: 0o755 }),
+      ]);
       const path = Object.entries(process.env).find(
         ([name]) => name.toUpperCase() === "PATH",
       )?.[1];
@@ -882,12 +887,12 @@ describe("CLI", () => {
           ([name]) => name.toUpperCase() !== "PATH",
         ),
       );
-      environment["GIT_DIR"] = gitDirectory;
+      environment["GIT_DIR"] = relative(repository, gitDirectory);
       environment["GIT_WORK_TREE"] = worktree;
       environment["GIT_CONFIG_COUNT"] = "1";
       environment["GIT_CONFIG_KEY_0"] = "core.hooksPath";
       environment["GIT_CONFIG_VALUE_0"] = join(gitDirectory, "hooks");
-      environment["PATH"] = [binaries, path ?? ""].join(delimiter);
+      environment["PATH"] = [gitBinaries, binaries, path ?? ""].join(delimiter);
       const stdout = capture();
       const stderr = capture();
 

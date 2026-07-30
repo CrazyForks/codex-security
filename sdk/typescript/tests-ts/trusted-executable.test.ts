@@ -110,6 +110,28 @@ describe("trusted executable resolution", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "uses only the exact POSIX PATH environment variable",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const ignored = join(root, "ignored");
+      const trusted = await realpath(dirname(process.execPath));
+      await mkdir(repository);
+
+      expect(
+        await resolveTrustedExecutable(
+          basename(process.execPath),
+          { Path: ignored, PATH: trusted, KEEP: "ok" },
+          repository,
+        ),
+      ).toEqual({
+        executable: await realpath(process.execPath),
+        environment: { Path: ignored, PATH: trusted, KEEP: "ok" },
+      });
+    },
+  );
+
   test("selects runnable Windows executables ahead of extensionless and batch files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

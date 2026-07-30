@@ -17,9 +17,12 @@ export async function resolveTrustedExecutable(
       async (root) => await realpath(root).catch(() => resolve(root)),
     ),
   );
-  const path = Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === "PATH",
-  )?.[1];
+  const path =
+    process.platform === "win32"
+      ? Object.entries(environment).find(
+          ([name]) => name.toUpperCase() === "PATH",
+        )?.[1]
+      : environment["PATH"];
   const entries: string[] = [];
   for (const entry of path?.split(delimiter) ?? []) {
     if (entry.length === 0 || !isAbsolute(entry)) continue;
@@ -81,7 +84,13 @@ export async function resolveTrustedExecutable(
 
   const sanitizedEnvironment = { ...environment };
   for (const name of Object.keys(sanitizedEnvironment)) {
-    if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
+    if (
+      process.platform === "win32"
+        ? name.toUpperCase() === "PATH"
+        : name === "PATH"
+    ) {
+      delete sanitizedEnvironment[name];
+    }
   }
   sanitizedEnvironment["PATH"] = entries
     .filter((entry) => !unsafeEntries.has(entry))
