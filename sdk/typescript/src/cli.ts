@@ -647,7 +647,7 @@ export async function main(
         "--include-matching-status",
       ],
       async ({ matchingCached, matchingInputs, ...comparison }) => {
-        if (matchingCached && !force) return comparison;
+        if (matchingCached !== false && !force) return comparison;
         const matching =
           matchingInputs === undefined
             ? await matchScanPairInBatches(dependencies, beforeId, afterId)
