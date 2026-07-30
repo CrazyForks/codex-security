@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
@@ -79,6 +80,7 @@ describe("report projection severity gate", () => {
       );
       expect(text).toContain("(informational: 1)");
       expect(text).toContain("`findings.json`");
+      expect(text).not.toContain("Finding 0");
     },
   );
 
@@ -111,20 +113,28 @@ describe("report projection severity gate", () => {
   test.skipIf(python === null)(
     "keeps the rendered report valid for the format validator",
     () => {
-      for (const levels of [["informational"], ["high", "informational"]]) {
-        const text = renderReport(python!, levels);
-        const validation = spawnSync(
-          python!,
-          [
-            "-I",
-            "-B",
-            join(pluginRoot, "scripts", "validate_report_format.py"),
-            "--report-md",
-            "/dev/stdin",
-          ],
-          { encoding: "utf8", input: text },
-        );
-        expect(validation.status).toBe(0);
+      const reportDirectory = mkdtempSync(
+        join(tmpdir(), "codex-security-report-projection-"),
+      );
+      const reportPath = join(reportDirectory, "report.md");
+      try {
+        for (const levels of [["informational"], ["high", "informational"]]) {
+          writeFileSync(reportPath, renderReport(python!, levels), "utf8");
+          const validation = spawnSync(
+            python!,
+            [
+              "-I",
+              "-B",
+              join(pluginRoot, "scripts", "validate_report_format.py"),
+              "--report-md",
+              reportPath,
+            ],
+            { encoding: "utf8" },
+          );
+          expect(validation.status).toBe(0);
+        }
+      } finally {
+        rmSync(reportDirectory, { recursive: true, force: true });
       }
     },
   );
