@@ -126,6 +126,7 @@ FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 SCAN_RECIPE_MAX_BYTES = 256 * 1024
+STANDARD_SCOPE_EXCLUSIONS_MAX_BYTES = 1024 * 1024
 
 
 def now() -> str:
@@ -1511,6 +1512,7 @@ def complete_scan_locked(
         warning = scan_target_warning(scan)
         if warning is not None and warning not in warnings:
             warnings.append(warning)
+        verify_standard_scope_completion(scan, scan_dir, prepared=prepared)
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1594,18 +1596,49 @@ def complete_scan_locked(
     return scan_context(connection, scan["id"])
 
 
-def verify_standard_scope_completion(scan: sqlite3.Row, scan_dir: Path) -> None:
+def verify_standard_scope_completion(
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    *,
+    prepared: tuple[Any, ...] | None = None,
+) -> None:
     if scan["mode"] != "standard":
         return
+    protected_scope_paths = os.environ.get("CODEX_SECURITY_SCOPE_PATHS_FILE")
+    if protected_scope_paths:
+        try:
+            expected_scope_paths = json.loads(
+                Path(protected_scope_paths).read_text(encoding="utf-8"),
+                parse_constant=reject_non_finite_json,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise SystemExit("Protected standard scan scope paths are invalid.") from exc
+        if not isinstance(expected_scope_paths, list) or any(
+            not isinstance(path, str) or not path for path in expected_scope_paths
+        ):
+            raise SystemExit("Protected standard scan scope paths are invalid.")
+        if requested_scan_paths(scan) != expected_scope_paths:
+            raise SystemExit(
+                "Stored standard scan scope paths do not match their protected snapshot."
+            )
+
     durable = scan_dir / "artifacts" / "02_discovery" / "scope_inventory.jsonl"
+    protected_inventory = os.environ.get("CODEX_SECURITY_SCOPE_INVENTORY_FILE")
     if not durable.exists():
+        if protected_inventory:
+            raise SystemExit("Durable standard scope inventory is missing.")
         return
-    inventory = Path(os.environ.get("CODEX_SECURITY_SCOPE_INVENTORY_FILE", durable))
+    inventory = Path(protected_inventory or durable)
     verify_scope_coverage(
         argparse.Namespace(
             repo=scan["target_path"],
             inventory=str(inventory),
             scan_dir=str(scan_dir),
+            **(
+                {"findings": prepared[3], "coverage": prepared[4]}
+                if prepared is not None
+                else {}
+            ),
         )
     )
 
@@ -1643,6 +1676,15 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         if mode == "standard"
         else None
     )
+    if scope_exclusions is not None and len(
+        json.dumps(scope_exclusions, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) > STANDARD_SCOPE_EXCLUSIONS_MAX_BYTES:
+        raise SystemExit(
+            "Standard scan scope exclusions exceed the 1 MiB registration limit; "
+            "select a narrower scan scope."
+        )
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
         directory_snapshot_regular_file_count(repository)

@@ -745,7 +745,8 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                         candidate_path
                     ):
                         raise SystemExit(
-                            "Standard scan scope exclusions changed during inventory preparation"
+                            "Standard scan scope exclusions changed during inventory preparation: "
+                            + candidate_path
                         )
                     continue
                 relative = path.resolve(strict=True).relative_to(repo)
@@ -754,12 +755,32 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     if scoped_exclusions
                     else relative
                 )
-                if any(part in STANDARD_SCOPE_EXCLUDED_DIRS for part in excluded_path.parts):
+                requested_carve_out = any(
+                    selected != scope_abs
+                    and selected.is_relative_to(scope_abs)
+                    and (selected == path or path.is_relative_to(selected))
+                    and not any(
+                        part in STANDARD_SCOPE_EXCLUDED_DIRS
+                        for part in path.relative_to(selected).parts
+                    )
+                    for selected in resolved_scopes
+                )
+                if (
+                    any(part in STANDARD_SCOPE_EXCLUDED_DIRS for part in excluded_path.parts)
+                    and not requested_carve_out
+                ):
+                    if path.is_dir() and any(
+                        selected != path and selected.is_relative_to(path)
+                        for selected in resolved_scopes
+                    ):
+                        pending.append((path, path.iterdir()))
+                        continue
                     if expected_exclusions is not None and not excluded_from_registered_scope(
                         relative.as_posix()
                     ):
                         raise SystemExit(
-                            "Standard scan scope exclusions changed during inventory preparation"
+                            "Standard scan scope exclusions changed during inventory preparation: "
+                            + relative.as_posix()
                         )
                     continue
                 if path.is_dir():
@@ -768,7 +789,8 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     relative_path = relative.as_posix()
                     if excluded_from_registered_scope(relative_path):
                         raise SystemExit(
-                            "Standard scan scope exclusions changed during inventory preparation"
+                            "Standard scan scope exclusions changed during inventory preparation: "
+                            + relative_path
                         )
                     if relative_path in paths:
                         continue
@@ -1076,12 +1098,29 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
             "Scope-review ledger contains paths outside the authoritative scope inventory: "
             + ", ".join(repr(path) for path in unexpected[:10])
         )
+    unavailable_reviewed = sorted(
+        str(row["path"])
+        for row in reviews
+        if row["disposition"] == "reviewed"
+        and not (repository / str(row["path"])).is_file()
+    )
+    if unavailable_reviewed:
+        raise SystemExit(
+            "Scope-review ledger marks unavailable inventory paths as reviewed: "
+            + ", ".join(repr(path) for path in unavailable_reviewed[:10])
+        )
 
     coverage_path = require_standard_scope_artifact(scan_dir, "coverage.json", "Scan coverage")
     findings_path = require_standard_scope_artifact(scan_dir, "findings.json", "Scan findings")
     try:
-        coverage: object = json.loads(coverage_path.read_text(encoding="utf-8"))
-        findings: object = json.loads(findings_path.read_text(encoding="utf-8"))
+        prepared_coverage = getattr(args, "coverage", None)
+        prepared_findings = getattr(args, "findings", None)
+        if prepared_coverage is None and prepared_findings is None:
+            coverage: object = json.loads(coverage_path.read_text(encoding="utf-8"))
+            findings: object = json.loads(findings_path.read_text(encoding="utf-8"))
+        else:
+            coverage = prepared_coverage
+            findings = prepared_findings
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise SystemExit(f"Unable to verify standard scan scope coverage: {error}") from error
     if not isinstance(coverage, dict) or not isinstance(findings, dict):

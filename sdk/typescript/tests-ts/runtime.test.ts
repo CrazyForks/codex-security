@@ -2494,6 +2494,10 @@ describe("runtime directories and plugin Python boundary", () => {
     const restore = async () => {
       await Promise.all([
         writeFile(
+          join(repository, "hidden.ts"),
+          "export const hidden = true;\n",
+        ),
+        writeFile(
           reviewLedger,
           ["hidden.ts", "safe.ts"]
             .map((path) => JSON.stringify({ path, disposition: "reviewed" }))
@@ -2687,6 +2691,8 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ]);
     await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+    await rm(join(repository, "hidden.ts"));
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
 
     await restore();
     const proofGap =
@@ -2803,6 +2809,10 @@ describe("runtime directories and plugin Python boundary", () => {
       mutate: () => Promise<unknown>;
       message: RegExp;
     }> = [
+      {
+        mutate: () => rm(join(repository, "hidden.ts")),
+        message: /marks unavailable inventory paths as reviewed/iu,
+      },
       {
         mutate: () =>
           writeFile(

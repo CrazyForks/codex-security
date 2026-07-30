@@ -327,6 +327,7 @@ export class CodexSecurity {
     let scopeInventoryDirectory: string | null = null;
     let scopeInventoryFile: string | null = null;
     let scopeExclusionsFile: string | null = null;
+    let scopePathsFile: string | null = null;
     let standardScopeInventory: ScopeInventorySnapshot | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
@@ -640,6 +641,19 @@ export class CodexSecurity {
       const registeredExplicitScopeExclusions = isRecord(contractScope)
         ? contractScope["requiredExplicitExclusions"]
         : undefined;
+      const registeredScopePaths = isRecord(contractScope)
+        ? contractScope["requiredIncludePaths"]
+        : undefined;
+      const requestedScopePaths =
+        normalized.kind === "paths" ? normalized.paths : ["."];
+      const expectedScopePaths =
+        Array.isArray(registeredScopePaths) &&
+        registeredScopePaths.length === requestedScopePaths.length &&
+        registeredScopePaths.every(
+          (path, index) => path === requestedScopePaths[index],
+        )
+          ? registeredScopePaths
+          : undefined;
       const expectedScopeExclusions =
         Array.isArray(registeredScopeExclusions) &&
         registeredScopeExclusions.every(
@@ -703,6 +717,8 @@ export class CodexSecurity {
           expectedScopeExclusions === undefined) ||
         (registeredExplicitScopeExclusions !== undefined &&
           expectedExplicitScopeExclusions === undefined) ||
+        (registeredScopePaths !== undefined &&
+          expectedScopePaths === undefined) ||
         typeof registeredRevision !== "string"
       ) {
         throw new CodexSecurityError(
@@ -829,6 +845,15 @@ export class CodexSecurity {
         await chmod(scopeExclusionsFile, 0o400);
         workbenchOptions.environment["CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE"] =
           scopeExclusionsFile;
+        scopePathsFile = join(scopeInventoryDirectory, "scope_paths.json");
+        await writeFile(
+          scopePathsFile,
+          `${JSON.stringify(expectedScopePaths ?? requestedScopePaths)}\n`,
+          { flag: "wx", mode: 0o400, signal },
+        );
+        await chmod(scopePathsFile, 0o400);
+        workbenchOptions.environment["CODEX_SECURITY_SCOPE_PATHS_FILE"] =
+          scopePathsFile;
         scopeInventoryFile = join(
           scopeInventoryDirectory,
           "scope_inventory.jsonl",
@@ -839,6 +864,8 @@ export class CodexSecurity {
           { flag: "wx", mode: 0o400, signal },
         );
         await chmod(scopeInventoryFile, 0o400);
+        workbenchOptions.environment["CODEX_SECURITY_SCOPE_INVENTORY_FILE"] =
+          scopeInventoryFile;
         await verifyScopeInventory(
           { ...standardScopeInventory, path: scopeInventoryFile },
           signal,

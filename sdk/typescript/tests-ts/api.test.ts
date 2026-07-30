@@ -3444,6 +3444,7 @@ describe("CodexSecurity orchestration", () => {
     const coverage = join(root, "coverage.json");
     const scopes = join(root, "target-paths.json");
     const inventory = join(root, "scope_inventory.jsonl");
+    const exclusionSnapshot = join(root, "scope_exclusions.json");
 
     await Promise.all([
       mkdir(join(packageDirectory, ".git"), { recursive: true }),
@@ -3485,6 +3486,7 @@ describe("CodexSecurity orchestration", () => {
       ];
       await Promise.all([
         writeFile(scopes, JSON.stringify(requestedPaths)),
+        writeFile(exclusionSnapshot, JSON.stringify(expectedExclusions)),
         writeFile(
           manifest,
           JSON.stringify({
@@ -3514,6 +3516,8 @@ describe("CodexSecurity orchestration", () => {
           repository,
           "--scopes-file",
           scopes,
+          "--expected-exclusions-file",
+          exclusionSnapshot,
           "--out",
           inventory,
         ],
@@ -4194,6 +4198,7 @@ describe("CodexSecurity orchestration", () => {
       let protectedInventory: string | null = null;
       let protectedInventoryDirectory: string | null = null;
       let protectedExclusions: string | null = null;
+      let protectedPaths: string | null = null;
       const client = new TestClient(
         {},
         {
@@ -4212,6 +4217,13 @@ describe("CodexSecurity orchestration", () => {
             }
             protectedInventory = immutable;
             protectedInventoryDirectory = dirname(immutable);
+            protectedPaths = join(
+              protectedInventoryDirectory,
+              "scope_paths.json",
+            );
+            expect(options.env).not.toHaveProperty(
+              "CODEX_SECURITY_SCOPE_PATHS_FILE",
+            );
             const exclusions =
               options.env?.["CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE"];
             if (typeof exclusions !== "string") {
@@ -4239,9 +4251,15 @@ describe("CodexSecurity orchestration", () => {
                     expect(
                       JSON.parse(await readFile(exclusions, "utf8")),
                     ).toEqual([]);
+                    expect(
+                      JSON.parse(await readFile(protectedPaths!, "utf8")),
+                    ).toEqual(target ?? ["."]);
                     if (process.platform !== "win32") {
                       expect((await stat(immutable)).mode & 0o777).toBe(0o400);
                       expect((await stat(exclusions)).mode & 0o777).toBe(0o400);
+                      expect((await stat(protectedPaths!)).mode & 0o777).toBe(
+                        0o400,
+                      );
                       expect(
                         (await stat(protectedInventoryDirectory!)).mode & 0o777,
                       ).toBe(0o700);
@@ -4280,8 +4298,10 @@ describe("CodexSecurity orchestration", () => {
       expect(protectedInventory).not.toBeNull();
       expect(protectedInventoryDirectory).not.toBeNull();
       expect(protectedExclusions).not.toBeNull();
+      expect(protectedPaths).not.toBeNull();
       expect(existsSync(protectedInventory!)).toBe(false);
       expect(existsSync(protectedExclusions!)).toBe(false);
+      expect(existsSync(protectedPaths!)).toBe(false);
       expect(existsSync(protectedInventoryDirectory!)).toBe(false);
       await client.close();
     }
