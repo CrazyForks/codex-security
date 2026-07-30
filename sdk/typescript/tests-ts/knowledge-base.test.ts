@@ -64,7 +64,10 @@ function pdf(
     extraStreams?: number;
     indirectLength?: boolean;
     indirectFilter?: boolean;
+    indirectFilterArray?: boolean;
+    indirectValuePrefix?: string;
     indirectValueComment?: string;
+    imageBytes?: Buffer;
     headerComment?: string;
     dictionaryPrefix?: string;
     streamComment?: string;
@@ -88,28 +91,45 @@ function pdf(
   const length = options.indirectLength
     ? `${content + extraStreams + 1} 0 R`
     : String(streamBytes.byteLength);
-  const filter = options.indirectFilter
-    ? `${content + extraStreams + 1 + (options.indirectLength ? 1 : 0)} 0 R`
-    : directFilter;
+  const indirectFilter = options.indirectFilter || options.indirectFilterArray;
+  const filterReference = `${content + extraStreams + 1 + (options.indirectLength ? 1 : 0)} 0 R`;
+  const filter = options.indirectFilterArray
+    ? `[${filterReference}]`
+    : options.indirectFilter
+      ? filterReference
+      : directFilter;
+  const imageObject =
+    content +
+    extraStreams +
+    1 +
+    (options.indirectLength ? 1 : 0) +
+    (indirectFilter ? 1 : 0);
   const streamObject = `<< ${options.dictionaryPrefix ?? ""}/Length ${length}${filter === undefined ? "" : ` /Filter ${filter}`} >>${options.streamComment === undefined ? "\n" : ` ${options.streamComment}\n`}stream\n${streamBytes.toString("latin1")}\nendstream`;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     `<< /Type /Pages /Kids [${pageObjects.map((number) => `${number} 0 R`).join(" ")}] /Count ${pages} >>`,
     ...pageObjects.map(
       () =>
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 2000000 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`,
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 2000000 792] /Resources << /Font << /F1 ${font} 0 R >>${options.imageBytes === undefined ? "" : ` /XObject << /Im1 ${imageObject} 0 R >>`} >> /Contents ${content} 0 R >>`,
     ),
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     streamObject,
     ...Array.from({ length: extraStreams }, () => streamObject),
     ...(options.indirectLength
-      ? [`${streamBytes.byteLength}${options.indirectValueComment ?? ""}`]
-      : []),
-    ...(options.indirectFilter
       ? [
-          `${directFilter ?? "/FlateDecode"}${options.indirectValueComment ?? ""}`,
+          `${options.indirectValuePrefix ?? ""}${streamBytes.byteLength}${options.indirectValueComment ?? ""}`,
         ]
       : []),
+    ...(indirectFilter
+      ? [
+          `${options.indirectValuePrefix ?? ""}${directFilter ?? "/FlateDecode"}${options.indirectValueComment ?? ""}`,
+        ]
+      : []),
+    ...(options.imageBytes === undefined
+      ? []
+      : [
+          `<< /Type /XObject /Subtype /Image /Width 1024 /Height ${Math.ceil(options.imageBytes.byteLength / 1024)} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${deflateSync(options.imageBytes).byteLength} /Filter /FlateDecode >>\nstream\n${deflateSync(options.imageBytes).toString("latin1")}\nendstream`,
+        ]),
   ];
   let output = `%PDF-1.4\n${options.headerComment === undefined ? "" : `% ${options.headerComment}\n`}`;
   const offsets = [0];
@@ -130,6 +150,7 @@ function xrefStreamPdf(
   document: Uint8Array,
   compressIndirectObjects = false,
   objectHeaderPadding = 0,
+  options: { objectHeaderComments?: boolean; tiffPredictor?: boolean } = {},
 ): Buffer {
   const original = Buffer.from(document).toString("latin1");
   const table = original.lastIndexOf("\nxref\n");
@@ -170,7 +191,7 @@ function xrefStreamPdf(
     let objectBody = "";
     let header = "";
     for (const [index, number] of references.entries()) {
-      header += `${number} ${objectBody.length} `;
+      header += `${number} ${objectBody.length}${options.objectHeaderComments ? " % compressed object\n" : " "}`;
       objectBody += `${values[index]} `;
     }
     header += " ".repeat(objectHeaderPadding);
@@ -199,8 +220,17 @@ function xrefStreamPdf(
       records.writeUInt16BE(65535, position + 5);
     }
   }
-  const encoded = deflateSync(records);
-  body += `${xrefObject} 0 obj\n<< /Type /XRef /Size ${xrefObject + 1} /Root 1 0 R /W [1 4 2] /Length ${encoded.byteLength} /Filter /FlateDecode >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  const predicted = Buffer.from(records);
+  if (options.tiffPredictor) {
+    for (let position = 0; position < predicted.byteLength; position += 7) {
+      for (let column = 6; column >= 1; column -= 1) {
+        predicted[position + column] =
+          (records[position + column]! - records[position + column - 1]!) & 255;
+      }
+    }
+  }
+  const encoded = deflateSync(predicted);
+  body += `${xrefObject} 0 obj\n<< /Type /XRef /Size ${xrefObject + 1} /Root 1 0 R /W [1 4 2] /Length ${encoded.byteLength} /Filter /FlateDecode${options.tiffPredictor ? " /DecodeParms << /Predictor 2 /Columns 7 /Colors 1 /BitsPerComponent 8 >>" : ""} >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\nstartxref\n${xrefOffset}\n%%EOF\n`;
   return Buffer.from(body, "latin1");
 }
 
@@ -608,7 +638,9 @@ describe("scan knowledge bases", () => {
     const chained = join(root, "chained.pdf");
     const indirect = join(root, "indirect.pdf");
     const indirectFilter = join(root, "indirect-filter.pdf");
+    const indirectFilterArray = join(root, "indirect-filter-array.pdf");
     const commentedIndirect = join(root, "commented-indirect.pdf");
+    const leadingCommentedIndirect = join(root, "leading-comment-indirect.pdf");
     const escaped = join(root, "escaped.pdf");
     const lzw = join(root, "lzw.pdf");
     const earlyChange = join(root, "lzw-early-change.pdf");
@@ -628,11 +660,25 @@ describe("scan knowledge bases", () => {
       pdf("Indirect stream filter", 1, true, "", { indirectFilter: true }),
     );
     await writeFile(
+      indirectFilterArray,
+      pdf("Indirect array stream filter", 1, true, "", {
+        indirectFilterArray: true,
+      }),
+    );
+    await writeFile(
       commentedIndirect,
       pdf("Commented indirect values", 1, true, "", {
         indirectLength: true,
         indirectFilter: true,
         indirectValueComment: " % valid comment\n",
+      }),
+    );
+    await writeFile(
+      leadingCommentedIndirect,
+      pdf("Leading commented indirect values", 1, true, "", {
+        indirectLength: true,
+        indirectFilter: true,
+        indirectValuePrefix: "% valid leading comment\n",
       }),
     );
     await writeFile(
@@ -663,8 +709,10 @@ describe("scan knowledge bases", () => {
         "ASCII85 then Flate",
         "Commented indirect values",
         "Escaped PDF filter",
+        "Indirect array stream filter",
         "Indirect stream length",
         "Indirect stream filter",
+        "Leading commented indirect values",
         "LZW encoded text",
         earlyChangeText,
       ].sort(),
@@ -717,6 +765,69 @@ describe("scan knowledge bases", () => {
     temporaryDirectories.push(knowledgeBase.path);
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
       "Cached object stream header",
+    ]);
+  });
+
+  test("parses comments inside compressed PDF object-stream headers", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "commented-object-header.pdf");
+    await writeFile(
+      document,
+      xrefStreamPdf(
+        pdf("Commented object-stream header", 1, true, "", {
+          indirectLength: true,
+          indirectFilter: true,
+        }),
+        true,
+        0,
+        { objectHeaderComments: true },
+      ),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Commented object-stream header",
+    ]);
+  });
+
+  test("decodes TIFF-predicted PDF cross-reference streams", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "tiff-predicted-cross-reference.pdf");
+    await writeFile(
+      document,
+      xrefStreamPdf(
+        pdf("TIFF-predicted cross reference", 1, true, "", {
+          indirectLength: true,
+          indirectFilter: true,
+        }),
+        false,
+        0,
+        { tiffPredictor: true },
+      ),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "TIFF-predicted cross reference",
+    ]);
+  });
+
+  test("excludes compressed image pixels from the extracted-text budget", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "large-image.pdf");
+    await writeFile(
+      document,
+      pdf("Small document text", 1, true, "/Im1 Do ", {
+        imageBytes: Buffer.alloc(9 * 1024 * 1024, 1),
+      }),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Small document text",
     ]);
   });
 
@@ -810,6 +921,11 @@ describe("scan knowledge bases", () => {
           indirectLength: true,
           headerComment: "6 0 obj 0 endobj",
         },
+      ],
+      ["indirect-filter-array", { indirectFilterArray: true }],
+      [
+        "page-content-marked-as-image",
+        { dictionaryPrefix: "/Subtype /Image " },
       ],
     ] as const) {
       const document = join(root, `${name}.pdf`);

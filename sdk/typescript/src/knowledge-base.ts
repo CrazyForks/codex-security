@@ -394,6 +394,9 @@ function boundCompressedPdfStreams(
   const streams =
     />>(?:(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*)stream(?:\r\n|\r|\n)/gu;
   const indirectObjects = pdfCrossReferenceOffsets(contents, path, signal);
+  const objectOffsets = [...(indirectObjects?.entries() ?? [])]
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+    .sort((left, right) => left[1] - right[1]);
   let inflatedBytes = 0;
   let decodingWorkBytes = 0;
   const dictionaryWork = { remaining: MAX_PDF_DICTIONARY_WORK_BYTES };
@@ -407,6 +410,26 @@ function boundCompressedPdfStreams(
       indirectObjects,
     );
     if (dictionary === null) continue;
+    const lexicalDictionary = pdfDictionaryLexicalValues(dictionary);
+    if (/\/Subtype\s*\/Image(?=[\s/>])/u.test(lexicalDictionary)) {
+      let low = 0;
+      let high = objectOffsets.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (objectOffsets[middle]![1] < marker.index) low = middle + 1;
+        else high = middle;
+      }
+      const entry = objectOffsets[low - 1];
+      const [number, generation] = entry?.[0].split(":") ?? [];
+      const pageContent =
+        number !== undefined &&
+        generation !== undefined &&
+        new RegExp(
+          `/Contents\\s+(?:${number}\\s+${generation}\\s+R|\\[[^\\]]*\\b${number}\\s+${generation}\\s+R)`,
+          "u",
+        ).test(contents);
+      if (!pageContent) continue;
+    }
     const filters = pdfStreamFilters(
       contents,
       dictionary,
@@ -576,7 +599,7 @@ function pdfIndirectValue(
   if (offset === null || offset === undefined) return undefined;
   if (typeof offset === "number") {
     const value = new RegExp(
-      `^${object}\\s+${generation}\\s+obj\\s*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)`,
+      `^${object}\\s+${generation}\\s+obj(?:\\s+|%[^\\r\\n]*(?:\\r\\n|\\r|\\n))*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)`,
       "u",
     ).exec(contents.slice(offset));
     if (value?.[1] === undefined) return undefined;
@@ -620,6 +643,7 @@ function pdfIndirectValue(
     const header = stream
       .subarray(0, first)
       .toString("latin1")
+      .replace(/%[^\r\n]*/gu, " ")
       .trim()
       .split(/\s+/u);
     if (header.length !== 2 * count) return undefined;
@@ -893,8 +917,7 @@ function pdfCrossReferenceStream(
       /\/BitsPerComponent\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1] ?? "8",
     );
     if (
-      predictor < 10 ||
-      predictor > 15 ||
+      (predictor !== 2 && (predictor < 10 || predictor > 15)) ||
       !Number.isSafeInteger(columns) ||
       !Number.isSafeInteger(colors) ||
       !Number.isSafeInteger(bits) ||
@@ -905,19 +928,56 @@ function pdfCrossReferenceStream(
       return null;
     }
     const rowBytes = Math.ceil((columns * colors * bits) / 8);
+    const encodedRowBytes = rowBytes + (predictor === 2 ? 0 : 1);
     if (
       !Number.isSafeInteger(rowBytes) ||
       rowBytes <= 0 ||
-      decoded.byteLength % (rowBytes + 1) !== 0
+      decoded.byteLength % encodedRowBytes !== 0 ||
+      (predictor === 2 && ![1, 2, 4, 8, 16].includes(bits))
     ) {
       return null;
     }
-    const reconstructed = Buffer.alloc(
-      (decoded.byteLength / (rowBytes + 1)) * rowBytes,
-    );
+    const reconstructed =
+      predictor === 2
+        ? Buffer.from(decoded)
+        : Buffer.alloc((decoded.byteLength / encodedRowBytes) * rowBytes);
     const pixelBytes = Math.max(1, Math.ceil((colors * bits) / 8));
     let input = 0;
     let output = 0;
+    if (predictor === 2) {
+      const samples = columns * colors;
+      const sampleMask = 2 ** bits - 1;
+      for (let row = 0; row < reconstructed.byteLength; row += rowBytes) {
+        for (let sample = colors; sample < samples; sample += 1) {
+          if (bits === 16) {
+            const current = row + sample * 2;
+            const previous = row + (sample - colors) * 2;
+            reconstructed.writeUInt16BE(
+              (reconstructed.readUInt16BE(current) +
+                reconstructed.readUInt16BE(previous)) &
+                sampleMask,
+              current,
+            );
+          } else {
+            const bit = sample * bits;
+            const previousBit = (sample - colors) * bits;
+            const current = row + Math.floor(bit / 8);
+            const previous = row + Math.floor(previousBit / 8);
+            const shift = 8 - bits - (bit % 8);
+            const previousShift = 8 - bits - (previousBit % 8);
+            const next =
+              (((reconstructed[current]! >> shift) & sampleMask) +
+                ((reconstructed[previous]! >> previousShift) & sampleMask)) &
+              sampleMask;
+            reconstructed[current] =
+              (reconstructed[current]! & ~(sampleMask << shift)) |
+              (next << shift);
+          }
+        }
+      }
+      decoded = reconstructed;
+      return { dictionary, contents: decoded };
+    }
     while (input < decoded.byteLength) {
       const filter = decoded[input++]!;
       if (filter > 4) return null;
@@ -1044,11 +1104,32 @@ function pdfStreamFilters(
     }
     value = resolved;
   }
-  return [...value.matchAll(/\/([^\s<>[\]()%/]+)/gu)].map((filter) =>
-    filter[1]!.replace(/#([0-9a-f]{2})/giu, (_match, encoded: string) =>
-      String.fromCharCode(Number.parseInt(encoded, 16)),
-    ),
-  );
+  const filters: string[] = [];
+  for (const filter of value.matchAll(
+    /\/([^\s<>[\]()%/]+)|(\d+)\s+(\d+)\s+R/gu,
+  )) {
+    let name = filter[1];
+    if (name === undefined) {
+      const resolved = pdfIndirectValue(
+        contents,
+        filter[2]!,
+        filter[3]!,
+        offsets,
+        path,
+      );
+      const reference = /^\/([^\s<>[\]()%/]+)$/u.exec(resolved ?? "");
+      if (reference?.[1] === undefined) {
+        throw new Error("Compressed PDF filter cannot be resolved safely.");
+      }
+      name = reference[1];
+    }
+    filters.push(
+      name.replace(/#([0-9a-f]{2})/giu, (_match, encoded: string) =>
+        String.fromCharCode(Number.parseInt(encoded, 16)),
+      ),
+    );
+  }
+  return filters;
 }
 
 function pdfLzwEarlyChange(dictionary: string, filterIndex: number): 0 | 1 {
