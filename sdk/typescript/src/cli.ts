@@ -867,7 +867,9 @@ export async function main(
         try {
           if (options.all) {
             return presentHistory(
-              await matchAllScans(dependencies, options.force),
+              await matchAllScans(dependencies, options.force, (warning) => {
+                errorOutput.write(`codex-security: warning: ${warning}\n`);
+              }),
               "match-all",
               format,
             );
@@ -1969,6 +1971,7 @@ function validateCliArguments(
 async function matchAllScans(
   dependencies: CliDependencies,
   force: boolean,
+  onWarning?: (warning: string) => void,
 ): Promise<JsonObject> {
   let repository = dependencies.currentDirectory();
   let scanCount = 0;
@@ -1976,6 +1979,8 @@ async function matchAllScans(
   let skippedPairs = 0;
   let matchedPairs = 0;
   let findingMatches = 0;
+  let unmatchedBatches = 0;
+  let firstFailure: unknown;
   let offset = 0;
   let firstPage = true;
   while (true) {
@@ -1992,30 +1997,38 @@ async function matchAllScans(
       firstPage = false;
     }
     for (const { beforeScanId, afterScanId } of page.pairs) {
-      const matching = await matchScanPairInBatches(
-        dependencies,
-        beforeScanId,
-        afterScanId,
-      );
-      const serialized = JSON.stringify(matching);
-      if (Buffer.byteLength(serialized) > MAX_MATCH_RESULT_BYTES) {
-        throw oversizedAutomaticMatchError();
+      try {
+        const matching = await matchScanPairInBatches(
+          dependencies,
+          beforeScanId,
+          afterScanId,
+        );
+        const serialized = JSON.stringify(matching);
+        if (Buffer.byteLength(serialized) > MAX_MATCH_RESULT_BYTES) {
+          throw oversizedAutomaticMatchError();
+        }
+        await dependencies.runWorkbench([
+          "save-scan-comparison",
+          "--before-scan-id",
+          beforeScanId,
+          "--after-scan-id",
+          afterScanId,
+          "--matches-json",
+          serialized,
+        ]);
+        matchedPairs += 1;
+        findingMatches += matching.matches.reduce(
+          (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
+            count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
+          0,
+        );
+      } catch (error) {
+        unmatchedBatches += 1;
+        firstFailure ??= error;
+        onWarning?.(
+          `Could not match findings against scan ${afterScanId}: ${cliErrorMessage(error)}`,
+        );
       }
-      await dependencies.runWorkbench([
-        "save-scan-comparison",
-        "--before-scan-id",
-        beforeScanId,
-        "--after-scan-id",
-        afterScanId,
-        "--matches-json",
-        serialized,
-      ]);
-      matchedPairs += 1;
-      findingMatches += matching.matches.reduce(
-        (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
-          count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
-        0,
-      );
     }
     if (page.nextOffset === null) break;
     if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset) {
@@ -2025,6 +2038,10 @@ async function matchAllScans(
     }
     offset = page.nextOffset;
   }
+  // A failure that left nothing matched is reported rather than presented as a
+  // successful no-op, so an unwritable workbench or a rejected credential still
+  // surfaces instead of being reduced to a warning.
+  if (matchedPairs === 0 && firstFailure !== undefined) throw firstFailure;
   return {
     repository,
     scanCount,
@@ -2032,6 +2049,7 @@ async function matchAllScans(
     matchedPairs,
     skippedPairs,
     findingMatches,
+    ...(unmatchedBatches === 0 ? {} : { unmatchedBatches }),
   };
 }
 
