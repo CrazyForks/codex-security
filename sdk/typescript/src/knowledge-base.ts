@@ -9,7 +9,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join, resolve, sep } from "node:path";
+import {
+  basename,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { unzipSync } from "fflate";
 
 const SUPPORTED_EXTENSIONS = new Set([
@@ -254,9 +262,11 @@ async function requireContainedSource(
   sourceRoot: string,
 ): Promise<string> {
   const canonical = await realpath(path);
+  const remaining = relative(sourceRoot, canonical);
   if (
-    canonical !== sourceRoot &&
-    !canonical.startsWith(`${sourceRoot}${sep}`)
+    remaining === ".." ||
+    remaining.startsWith(`..${sep}`) ||
+    isAbsolute(remaining)
   ) {
     throw new Error(
       `Knowledge base path escaped the requested source: ${path}`,
