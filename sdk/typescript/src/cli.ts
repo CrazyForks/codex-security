@@ -2928,6 +2928,7 @@ async function protectedHookExecutableRoots(
   const roots = new Set([repository]);
   const selectedGitDirectory = hookGitEnvironmentValue(environment, "GIT_DIR");
   const gitDirectories = new Set<string>();
+  const objectDirectories = new Set<string>();
   if (selectedGitDirectory) {
     const selected = await canonicalProtectedHookRoot(
       resolve(repository, selectedGitDirectory),
@@ -2940,11 +2941,11 @@ async function protectedHookExecutableRoots(
     "GIT_COMMON_DIR",
   );
   if (selectedCommonDirectory) {
-    roots.add(
-      await canonicalProtectedHookRoot(
-        resolve(repository, selectedCommonDirectory),
-      ),
+    const common = await canonicalProtectedHookRoot(
+      resolve(repository, selectedCommonDirectory),
     );
+    roots.add(common);
+    objectDirectories.add(join(common, "objects"));
   }
   const selectedWorktree = hookGitEnvironmentValue(
     environment,
@@ -2955,7 +2956,6 @@ async function protectedHookExecutableRoots(
       await canonicalProtectedHookRoot(resolve(repository, selectedWorktree)),
     );
   }
-  const objectDirectories = new Set<string>();
   const selectedObjectDirectory = hookGitEnvironmentValue(
     environment,
     "GIT_OBJECT_DIRECTORY",
@@ -3029,7 +3029,12 @@ async function protectedHookExecutableRoots(
       const path = join(gitDirectory, name);
       try {
         const metadata = await stat(path);
-        if (!metadata.isFile() || metadata.size > 1_024 * 1_024) continue;
+        if (!metadata.isFile()) continue;
+        if (metadata.size > 1_024 * 1_024) {
+          throw new Error(
+            "Git configuration is too large to safely discover protected worktrees.",
+          );
+        }
         for (const worktree of gitConfigWorktrees(
           await readFile(path, "utf8"),
         )) {
@@ -3064,7 +3069,9 @@ async function protectedHookExecutableRoots(
       if (objectDirectories.size >= 1_024) {
         throw new Error("Too many Git alternate object directories.");
       }
-      objectDirectories.add(resolve(canonical, alternate));
+      for (const decoded of gitAlternateObjectDirectories(alternate)) {
+        objectDirectories.add(resolve(canonical, decoded));
+      }
     }
   }
 
@@ -3114,7 +3121,14 @@ function hookGitEnvironmentValue(
 function gitConfigWorktrees(contents: string): readonly string[] {
   const worktrees: string[] = [];
   let core = false;
-  for (const line of contents.split(/\r?\n/u)) {
+  let continuation = "";
+  for (const segment of contents.split(/\r?\n/u)) {
+    let line = continuation + segment;
+    if (/(^|[^\\])(?:\\\\)*\\$/u.test(line)) {
+      continuation = line.slice(0, -1);
+      continue;
+    }
+    continuation = "";
     const section = /^\s*\[([^\]]+)\]/u.exec(line);
     if (section?.[1] !== undefined) {
       core = section[1].trim().toLowerCase() === "core";
