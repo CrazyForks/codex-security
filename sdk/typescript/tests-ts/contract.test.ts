@@ -177,7 +177,9 @@ describe("canonical scan contract", () => {
         scanDir,
         "validate_scan_contract.py",
       );
-      expect(validation.status, validation.stderr).toBe(0);
+      expect(validation.status, validation.stderr).toBe(
+        surfaces.length === 0 ? 2 : 0,
+      );
     }
   });
 
