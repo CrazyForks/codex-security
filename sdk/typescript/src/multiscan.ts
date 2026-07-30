@@ -16,7 +16,15 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  posix,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { Transform } from "node:stream";
 import { promisify } from "node:util";
 import Papa from "papaparse";
@@ -1080,16 +1088,12 @@ async function hasArtifacts(
     if (canonicalScope !== undefined) {
       try {
         const repository = await realpath(task.repository);
-        const selected = await realpath(join(repository, canonicalScope));
-        const relativeScope = relative(repository, selected);
-        if (
-          relativeScope === ".." ||
-          relativeScope.startsWith(`..${sep}`) ||
-          isAbsolute(relativeScope)
-        ) {
-          return false;
-        }
-        canonicalScope = relativeScope.split(sep).join("/") || ".";
+        canonicalScope = await pinnedMultiscanScope(
+          repository,
+          task.revision,
+          canonicalScope,
+          signal,
+        );
       } catch {
         if (recordedCanonicalScope !== undefined) {
           if (recordedCanonicalScope !== canonicalScope) return false;
@@ -1119,6 +1123,100 @@ async function hasArtifacts(
     if (signal?.aborted === true) signal.throwIfAborted();
     return false;
   }
+}
+
+async function pinnedMultiscanScope(
+  repository: string,
+  revision: string,
+  scope: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_LITERAL_PATHSPECS: "1",
+  };
+  for (const name of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  ]) {
+    delete environment[name];
+  }
+  const command = await resolveTrustedExecutable(
+    "git",
+    environment,
+    repository,
+  );
+  if (command === null)
+    throw new Error("Git is not available on a trusted PATH.");
+  let selected = posix.normalize(scope);
+  for (let followed = 0; followed <= 40; followed += 1) {
+    if (selected === ".") return selected;
+    const segments = selected.split("/");
+    let redirected = false;
+    for (let index = 0; index < segments.length; index += 1) {
+      signal?.throwIfAborted();
+      const candidate = segments.slice(0, index + 1).join("/");
+      const listed = await execFile(
+        command.executable,
+        [
+          "--no-replace-objects",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-C",
+          repository,
+          "ls-tree",
+          "-z",
+          revision,
+          "--",
+          candidate,
+        ],
+        { env: command.environment, signal, maxBuffer: 1024 * 1024 },
+      );
+      const entry = /^(\d{6}) (blob|tree) ([a-f0-9]{40,64})\t([^\0]+)\0$/u.exec(
+        listed.stdout,
+      );
+      if (entry?.[4] !== candidate) {
+        throw new Error(
+          "Multiscan scope cannot be resolved at its pinned revision.",
+        );
+      }
+      if (entry[1] !== "120000") continue;
+      const target = await execFile(
+        command.executable,
+        [
+          "--no-replace-objects",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-C",
+          repository,
+          "cat-file",
+          "blob",
+          entry[3]!,
+        ],
+        { env: command.environment, signal, maxBuffer: 64 * 1024 },
+      );
+      if (posix.isAbsolute(target.stdout) || target.stdout.includes("\0")) {
+        throw new Error("Multiscan scope escapes its repository.");
+      }
+      selected = posix.normalize(
+        posix.join(
+          posix.dirname(candidate),
+          target.stdout,
+          ...segments.slice(index + 1),
+        ),
+      );
+      if (selected === ".." || selected.startsWith("../")) {
+        throw new Error("Multiscan scope escapes its repository.");
+      }
+      redirected = true;
+      break;
+    }
+    if (!redirected) return selected;
+  }
+  throw new Error("Multiscan scope contains too many symbolic links.");
 }
 
 async function mkdirTemporaryPluginWorkspace(output: string): Promise<string> {

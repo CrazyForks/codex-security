@@ -377,6 +377,16 @@ describe("multiscan", () => {
       });
       expect(scans).toBe(1);
 
+      await mkdir(join(source.path, "another"));
+      await rm(join(source.path, "alias"));
+      await symlink("another", join(source.path, "alias"));
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toBe(1);
+
       const ledgerPath = join(paths.output, "results.jsonl");
       const manipulated = await results(ledgerPath);
       manipulated[manipulated.length - 1]!["canonicalScope"] = "another";
