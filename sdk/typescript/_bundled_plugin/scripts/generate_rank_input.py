@@ -827,11 +827,14 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     rows: list[JsonRow] = []
     for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
         rel = path.relative_to(repo)
-        if not diff_path_is_included(rel) and not (
-            args.mode == "revisions"
-            and status in {"A", "M"}
-            and is_immutable_gitlink(repo, args.head, rel)
-        ):
+        gitlink_revision = None
+        if args.mode == "revisions":
+            revision = args.base if status == "D" else args.head
+            if is_immutable_gitlink(repo, revision, rel):
+                gitlink_revision = revision
+        elif path.is_dir():
+            gitlink_revision = index_gitlink_revision(repo, rel)
+        if not diff_path_is_included(rel) and gitlink_revision is None:
             continue
 
         if status in {"D", "U"}:
@@ -840,6 +843,11 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             if args.mode == "revisions":
                 preview, is_binary = immutable_diff_preview(
                     repo, path, args.head, args.preview_bytes
+                )
+            elif gitlink_revision is not None:
+                preview, is_binary = (
+                    f"Git submodule pinned to commit {gitlink_revision}",
+                    False,
                 )
             elif status == "A" and not path.exists() and not path.is_symlink():
                 preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
@@ -885,6 +893,47 @@ def is_immutable_gitlink(repo: Path, head: str, relative: Path) -> bool:
         raise SystemExit("Could not inspect the selected Git diff.")
     entries = [entry for entry in listed.stdout.split(b"\0") if entry]
     return len(entries) == 1 and entries[0].startswith(b"160000 commit ")
+
+
+def index_gitlink_revision(repo: Path, relative: Path) -> str | None:
+    executable = trusted_git_executable(repo)
+    if executable is None:
+        raise SystemExit("Git is unavailable on the trusted executable path.")
+    environment = os.environ.copy()
+    for name in GIT_REPOSITORY_ENVIRONMENT:
+        environment.pop(name, None)
+    environment["GIT_LITERAL_PATHSPECS"] = "1"
+    listed = subprocess.run(
+        [
+            executable,
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            str(repo),
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            relative.as_posix(),
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+    )
+    if listed.returncode != 0:
+        raise SystemExit("Could not inspect the selected Git diff.")
+    entries = [entry for entry in listed.stdout.split(b"\0") if entry]
+    if len(entries) != 1:
+        return None
+    try:
+        metadata, path = entries[0].split(b"\t", 1)
+        mode, object_id, _stage = metadata.split(b" ", 2)
+    except ValueError:
+        return None
+    if mode != b"160000" or path != os.fsencode(relative.as_posix()):
+        return None
+    return object_id.decode("ascii")
 
 
 def make_rank_shards(args: argparse.Namespace) -> None:

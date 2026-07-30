@@ -290,6 +290,64 @@ describe("diff rank input", () => {
     expect(rows.map((row) => row.path)).toContain(".gitmodules");
   });
 
+  test("includes ignored paths that change from regular files into Git submodules", async () => {
+    const fixture = await createRepository();
+    const path = "vendor/dep";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "previous dependency\n",
+    );
+    git(fixture.repository, "add", "--force", path);
+    git(fixture.repository, "commit", "-qm", "track the previous dependency");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "rm", "--quiet", path);
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},${path}`,
+    );
+    git(fixture.repository, "commit", "-qm", "replace dependency with gitlink");
+
+    expect(await runDiffRankInput(fixture, "revisions")).toContainEqual({
+      path,
+      area: "diff",
+      preview: `Git submodule pinned to commit ${fixture.base}`,
+    });
+  });
+
+  test("previews local dirty Git submodules from their pinned index commit", async () => {
+    const fixture = await createRepository();
+    const submodule = join(fixture.repository, ".github", "actions", "sub");
+    await mkdir(submodule, { recursive: true });
+    git(submodule, "init", "-q", "-b", "main");
+    git(submodule, "config", "user.name", "Codex Security Test");
+    git(submodule, "config", "user.email", "codex-security@example.invalid");
+    await writeRepositoryFile(submodule, "action.yml", "name: original\n");
+    git(submodule, "add", ".");
+    git(submodule, "commit", "-qm", "original action");
+    const revision = git(submodule, "rev-parse", "HEAD");
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${revision},.github/actions/sub`,
+    );
+    git(fixture.repository, "commit", "-qm", "pin workflow action");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "config", "diff.ignoreSubmodules", "all");
+    await writeRepositoryFile(submodule, "action.yml", "name: dirty\n");
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path: ".github/actions/sub",
+      area: "diff",
+      preview: `Git submodule pinned to commit ${revision}`,
+    });
+  });
+
   test("inventories committed security-sensitive workflows, containers, and agent instructions", async () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
