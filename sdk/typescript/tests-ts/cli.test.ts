@@ -1294,6 +1294,7 @@ describe("CLI", () => {
       "inactive-include",
       "core-subsection",
       "disabled-worktree-config",
+      "overridden-worktree",
     ] as const) {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), `codex-security-cli-${mode}-`)),
@@ -1317,10 +1318,15 @@ describe("CLI", () => {
             config,
             `${await readFile(config, "utf8")}[core "example"]\n\tworktree = ${trustedDirectory}\n`,
           );
-        } else {
+        } else if (mode === "disabled-worktree-config") {
           await writeFile(
             join(repository, ".git", "config.worktree"),
             `[core]\n\tworktree = ${trustedDirectory}\n`,
+          );
+        } else {
+          await writeFile(
+            config,
+            `${await readFile(config, "utf8")}[core]\n\tworktree = ${trustedDirectory}\n\tworktree = ${repository.replaceAll("\\", "/")}\n`,
           );
         }
         const stderr = capture();
@@ -1348,7 +1354,14 @@ describe("CLI", () => {
   });
 
   test("protects active conditional and enabled Git worktree configuration", async () => {
-    for (const mode of ["active-include", "enabled-worktree-config"] as const) {
+    for (const mode of [
+      "active-include",
+      "character-class-include",
+      "enabled-worktree-config",
+      "implicit-worktree-config",
+      "ordered-worktree-config",
+      "common-directory",
+    ] as const) {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), `codex-security-cli-${mode}-`)),
       );
@@ -1361,23 +1374,70 @@ describe("CLI", () => {
         await mkdir(binaries, { recursive: true });
         const configuredWorktree = worktree.replaceAll("\\", "/");
         const config = join(repository, ".git", "config");
-        if (mode === "active-include") {
+        let selectedCommonDirectory: string | undefined;
+        if (mode === "active-include" || mode === "character-class-include") {
           const included = join(root, "active.gitconfig");
           await writeFile(
             included,
             `[core]\n\tworktree = ${configuredWorktree}\n`,
           );
           const gitDirectory = join(repository, ".git").replaceAll("\\", "/");
+          const condition =
+            mode === "character-class-include"
+              ? gitDirectory.replace("repository", "repositor[y]")
+              : gitDirectory;
           await writeFile(
             config,
-            `${await readFile(config, "utf8")}[includeIf "gitdir:${gitDirectory}/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
+            `${await readFile(config, "utf8")}[includeIf "gitdir:${condition}/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
           );
-        } else {
+        } else if (mode === "common-directory") {
+          selectedCommonDirectory = join(root, "selected-common");
           execFileSync(
             "git",
-            ["-C", repository, "config", "extensions.worktreeConfig", "true"],
+            ["init", "--bare", "-q", selectedCommonDirectory],
+            {
+              timeout: 10_000,
+            },
+          );
+          execFileSync(
+            "git",
+            ["-C", selectedCommonDirectory, "config", "core.bare", "false"],
             { timeout: 10_000 },
           );
+          execFileSync(
+            "git",
+            [
+              "-C",
+              selectedCommonDirectory,
+              "config",
+              "core.worktree",
+              configuredWorktree,
+            ],
+            { timeout: 10_000 },
+          );
+        } else {
+          if (mode === "ordered-worktree-config") {
+            const included = join(root, "disabled-worktree.gitconfig");
+            await writeFile(
+              included,
+              "[extensions]\n\tworktreeConfig = false\n",
+            );
+            await writeFile(
+              config,
+              `${await readFile(config, "utf8")}[include]\n\tpath = ${included.replaceAll("\\", "/")}\n[extensions]\n\tworktreeConfig\n`,
+            );
+          } else if (mode === "implicit-worktree-config") {
+            await writeFile(
+              config,
+              `${await readFile(config, "utf8")}[extensions]\n\tworktreeConfig\n`,
+            );
+          } else {
+            execFileSync(
+              "git",
+              ["-C", repository, "config", "extensions.worktreeConfig", "true"],
+              { timeout: 10_000 },
+            );
+          }
           await writeFile(
             join(repository, ".git", "config.worktree"),
             `[core]\n\tworktree = ${configuredWorktree}\n`,
@@ -1400,6 +1460,9 @@ describe("CLI", () => {
             currentDirectory: repository,
             environment: {
               ...process.env,
+              ...(selectedCommonDirectory === undefined
+                ? {}
+                : { GIT_COMMON_DIR: selectedCommonDirectory }),
               PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
             },
           }),
@@ -1469,7 +1532,7 @@ describe("CLI", () => {
     }
   });
 
-  test("resolves relative Git object stores from the effective worktree", async () => {
+  test("resolves relative Git object stores from Git's invocation directory", async () => {
     for (const name of [
       "GIT_OBJECT_DIRECTORY",
       "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -1480,12 +1543,14 @@ describe("CLI", () => {
       try {
         const repository = join(root, "repository");
         const invocation = join(repository, "nested", "source");
+        const selectedWorktree = join(root, "elsewhere", "selected-worktree");
         const objectDirectory = join(root, "external-objects");
         const binaries = join(objectDirectory, "node_modules", ".bin");
         const marker = join(root, "git-shim-executed");
         execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
         await Promise.all([
           mkdir(invocation, { recursive: true }),
+          mkdir(selectedWorktree, { recursive: true }),
           mkdir(binaries, { recursive: true }),
           mkdir(join(objectDirectory, "info"), { recursive: true }),
           mkdir(join(objectDirectory, "pack"), { recursive: true }),
@@ -1507,7 +1572,7 @@ describe("CLI", () => {
             currentDirectory: invocation,
             environment: {
               ...process.env,
-              GIT_WORK_TREE: repository,
+              GIT_WORK_TREE: selectedWorktree,
               [name]: join("..", "external-objects"),
               PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
             },
