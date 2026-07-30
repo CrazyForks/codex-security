@@ -705,14 +705,14 @@ describe("CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-tilde-"));
     const home = join(root, "home");
     const work = join(root, "work");
-    const previousHome = process.env.HOME;
-    const previousProfile = process.env.USERPROFILE;
+    const previousHome = process.env["HOME"];
+    const previousProfile = process.env["USERPROFILE"];
     try {
       await mkdir(home);
       await mkdir(work);
       await multiscanInventory(home);
-      process.env.HOME = home;
-      process.env.USERPROFILE = home;
+      process.env["HOME"] = home;
+      process.env["USERPROFILE"] = home;
       const stdout = capture();
       const stderr = capture();
       expect(
@@ -736,10 +736,10 @@ describe("CLI", () => {
       });
       expect(await stat(join(work, "~")).catch(() => null)).toBeNull();
     } finally {
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
-      if (previousProfile === undefined) delete process.env.USERPROFILE;
-      else process.env.USERPROFILE = previousProfile;
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousProfile;
       await rm(root, { recursive: true, force: true });
     }
   });

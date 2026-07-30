@@ -343,10 +343,10 @@ describe("bulk scan repository discovery", () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
-    const previousHome = process.env.HOME;
-    const previousProfile = process.env.USERPROFILE;
-    process.env.HOME = home;
-    process.env.USERPROFILE = home;
+    const previousHome = process.env["HOME"];
+    const previousProfile = process.env["USERPROFILE"];
+    process.env["HOME"] = home;
+    process.env["USERPROFILE"] = home;
     try {
       const { dependencies, prompt } = discoveryDependencies(root);
       prompt.confirms = [true];
@@ -357,10 +357,10 @@ describe("bulk scan repository discovery", () => {
       expect(result?.outputDir).toBe(join(home, "custom-results"));
       expect(await lstat(join(root, "~")).catch(() => null)).toBeNull();
     } finally {
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
-      if (previousProfile === undefined) delete process.env.USERPROFILE;
-      else process.env.USERPROFILE = previousProfile;
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousProfile;
     }
   });
 

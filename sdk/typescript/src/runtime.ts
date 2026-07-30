@@ -2007,7 +2007,9 @@ async function sameFile(left: string, right: string): Promise<boolean> {
 
 export function expandHome(value: string): string {
   const home =
-    process.env["HOME"]?.trim() || process.env["USERPROFILE"]?.trim() || homedir();
+    process.env["HOME"]?.trim() ||
+    process.env["USERPROFILE"]?.trim() ||
+    homedir();
   if (value === "~") return home;
   if (value.startsWith("~/") || value.startsWith("~\\")) {
     return join(home, value.slice(2));
