@@ -64,6 +64,8 @@ function pdf(
     extraStreams?: number;
     indirectLength?: boolean;
     headerComment?: string;
+    dictionaryPrefix?: string;
+    streamComment?: string;
   } = {},
 ): Uint8Array {
   const escaped = text.replace(/[\\()]/gu, "\\$&");
@@ -83,7 +85,7 @@ function pdf(
   const length = options.indirectLength
     ? `${content + extraStreams + 1} 0 R`
     : String(streamBytes.byteLength);
-  const streamObject = `<< /Length ${length}${filter === undefined ? "" : ` /Filter ${filter}`} >>\nstream\n${streamBytes.toString("latin1")}\nendstream`;
+  const streamObject = `<< ${options.dictionaryPrefix ?? ""}/Length ${length}${filter === undefined ? "" : ` /Filter ${filter}`} >>${options.streamComment === undefined ? "\n" : ` ${options.streamComment}\n`}stream\n${streamBytes.toString("latin1")}\nendstream`;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     `<< /Type /Pages /Kids [${pageObjects.map((number) => `${number} 0 R`).join(" ")}] /Count ${pages} >>`,
@@ -153,6 +155,18 @@ function encodeRunLength(bytes: Buffer): Buffer {
   }
   encoded.push(128);
   return Buffer.from(encoded);
+}
+
+function encodePdfLzwLiterals(bytes: Buffer): Buffer {
+  const codes = [256, ...bytes, 257];
+  let bits = "";
+  for (const code of codes) bits += code.toString(2).padStart(9, "0");
+  bits = bits.padEnd(Math.ceil(bits.length / 8) * 8, "0");
+  return Buffer.from(
+    Array.from({ length: bits.length / 8 }, (_unused, index) =>
+      Number.parseInt(bits.slice(index * 8, index * 8 + 8), 2),
+    ),
+  );
 }
 
 describe("scan knowledge bases", () => {
@@ -450,6 +464,7 @@ describe("scan knowledge bases", () => {
     const chained = join(root, "chained.pdf");
     const indirect = join(root, "indirect.pdf");
     const escaped = join(root, "escaped.pdf");
+    const lzw = join(root, "lzw.pdf");
     await writeFile(
       chained,
       pdf("ASCII85 then Flate", 1, true, "", {
@@ -465,6 +480,13 @@ describe("scan knowledge bases", () => {
       escaped,
       pdf("Escaped PDF filter", 1, true, "", { filter: "/#46lateDecode" }),
     );
+    await writeFile(
+      lzw,
+      pdf("LZW encoded text", 1, false, "", {
+        filter: "/LZWDecode",
+        encode: encodePdfLzwLiterals,
+      }),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.push(knowledgeBase.path);
@@ -473,6 +495,7 @@ describe("scan knowledge bases", () => {
         "ASCII85 then Flate",
         "Escaped PDF filter",
         "Indirect stream length",
+        "LZW encoded text",
       ].sort(),
     );
   });
@@ -492,6 +515,26 @@ describe("scan knowledge bases", () => {
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
       "Uncompressed PDF",
     ]);
+  });
+
+  test("bounds compressed streams after PDF comments and ignores fake literal lengths", async () => {
+    const root = await temporaryDirectory();
+    for (const [name, options] of [
+      ["comment-before-stream", { streamComment: "% comment before stream" }],
+      [
+        "literal-length-token",
+        { dictionaryPrefix: "/Note (/Length 999999999) " },
+      ],
+    ] as const) {
+      const document = join(root, `${name}.pdf`);
+      await writeFile(
+        document,
+        pdf("reviewable", 1, true, " ".repeat(9 * 1024 * 1024), options),
+      );
+      await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+        "8388608-byte extracted-text limit",
+      );
+    }
   });
 
   test("rejects duplicate DOCX document entries before repeated inflation", async () => {

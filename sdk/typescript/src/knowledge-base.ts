@@ -370,7 +370,8 @@ function boundCompressedPdfStreams(
 ): void {
   const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const contents = source.toString("latin1");
-  const streams = />>\s*stream(?:\r\n|\r|\n)/gu;
+  const streams =
+    />>(?:(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*)stream(?:\r\n|\r|\n)/gu;
   let inflatedBytes = 0;
   for (const marker of contents.matchAll(streams)) {
     signal?.throwIfAborted();
@@ -381,7 +382,7 @@ function boundCompressedPdfStreams(
 
     const streamStart = marker.index + marker[0].length;
     const declared = /\/Length\s+(\d+)(?:\s+(\d+)\s+R)?(?=[\s/>])/u.exec(
-      dictionary,
+      pdfDictionaryLexicalValues(dictionary),
     );
     let length = Number(declared?.[1]);
     if (declared?.[2] !== undefined) {
@@ -413,6 +414,10 @@ function boundCompressedPdfStreams(
           case "RunLengthDecode":
           case "RL":
             decoded = decodePdfRunLength(decoded, remaining);
+            break;
+          case "LZWDecode":
+          case "LZW":
+            decoded = decodePdfLzw(decoded, remaining);
             break;
           case "FlateDecode":
           case "Fl":
@@ -488,6 +493,57 @@ function pdfIndirectValue(
     "u",
   ).exec(contents)?.[1];
   return value;
+}
+
+function pdfDictionaryLexicalValues(dictionary: string): string {
+  let output = "";
+  let literalDepth = 0;
+  let escaped = false;
+  let comment = false;
+  let hex = false;
+  for (let index = 0; index < dictionary.length; index += 1) {
+    const character = dictionary[index]!;
+    if (comment) {
+      if (character === "\r" || character === "\n") {
+        comment = false;
+        output += character;
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (literalDepth > 0) {
+      output += " ";
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === "(") {
+        literalDepth += 1;
+      } else if (character === ")") {
+        literalDepth -= 1;
+      }
+      continue;
+    }
+    if (hex) {
+      output += " ";
+      if (character === ">") hex = false;
+      continue;
+    }
+    if (character === "%") {
+      comment = true;
+      output += " ";
+    } else if (character === "(") {
+      literalDepth = 1;
+      output += " ";
+    } else if (character === "<" && dictionary[index + 1] !== "<") {
+      hex = true;
+      output += " ";
+    } else {
+      output += character;
+    }
+  }
+  return output;
 }
 
 function pdfStreamFilters(contents: string, dictionary: string): string[] {
@@ -576,7 +632,7 @@ function decodePdfAscii85(value: Buffer, maximum: number): Buffer {
 }
 
 function decodePdfRunLength(value: Buffer, maximum: number): Buffer {
-  const output = Buffer.allocUnsafe(maximum);
+  const output = Buffer.allocUnsafe(Math.min(maximum, value.length * 128));
   let written = 0;
   for (let index = 0; index < value.length; ) {
     const control = value[index++]!;
@@ -603,6 +659,57 @@ function decodePdfRunLength(value: Buffer, maximum: number): Buffer {
     }
   }
   return output.subarray(0, written);
+}
+
+function decodePdfLzw(value: Buffer, maximum: number): Buffer {
+  let dictionary = Array.from({ length: 256 }, (_unused, code) =>
+    Buffer.from([code]),
+  );
+  let nextCode = 258;
+  let codeBits = 9;
+  let bitOffset = 0;
+  let previous: Buffer | undefined;
+  const chunks: Buffer[] = [];
+  let outputBytes = 0;
+  while (bitOffset + codeBits <= value.byteLength * 8) {
+    let code = 0;
+    for (let bit = 0; bit < codeBits; bit += 1) {
+      const offset = bitOffset + bit;
+      code =
+        (code << 1) |
+        ((value[Math.floor(offset / 8)]! >> (7 - (offset % 8))) & 1);
+    }
+    bitOffset += codeBits;
+    if (code === 256) {
+      dictionary = Array.from({ length: 256 }, (_unused, item) =>
+        Buffer.from([item]),
+      );
+      nextCode = 258;
+      codeBits = 9;
+      previous = undefined;
+      continue;
+    }
+    if (code === 257) break;
+    const entry =
+      dictionary[code] ??
+      (code === nextCode && previous !== undefined
+        ? Buffer.concat([previous, previous.subarray(0, 1)])
+        : undefined);
+    if (entry === undefined) throw new Error("Invalid PDF LZW stream.");
+    if (outputBytes + entry.byteLength > maximum) {
+      throw Object.assign(new Error("Decoded PDF stream is too large."), {
+        code: "ERR_BUFFER_TOO_LARGE",
+      });
+    }
+    chunks.push(entry);
+    outputBytes += entry.byteLength;
+    if (previous !== undefined && nextCode < 4_096) {
+      dictionary[nextCode++] = Buffer.concat([previous, entry.subarray(0, 1)]);
+      if (nextCode + 1 === 1 << codeBits && codeBits < 12) codeBits += 1;
+    }
+    previous = entry;
+  }
+  return Buffer.concat(chunks, outputBytes);
 }
 
 async function extractPdf(
