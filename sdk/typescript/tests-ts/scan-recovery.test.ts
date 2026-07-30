@@ -240,6 +240,52 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
+  test("rejects model-edited persisted scope exclusions against the protected snapshot", async () => {
+    const fixture = await startDraftScan();
+    const scope = (
+      fixture.registration["contract"] as {
+        scope: { requiredExcludePaths: string[] };
+      }
+    ).scope.requiredExcludePaths;
+    const attestation = join(
+      fixture.stateDir,
+      "expected-scope-exclusions.json",
+    );
+    await writeFile(attestation, JSON.stringify(scope));
+    const tamper = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sqlite3, sys",
+          "with sqlite3.connect(sys.argv[1]) as connection:",
+          "    connection.execute('UPDATE scans SET scope_exclusions_json = ? WHERE id = ?', ('[]', sys.argv[2]))",
+        ].join("\n"),
+        join(fixture.stateDir, "workbench.sqlite3"),
+        fixture.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(tamper.status, tamper.stderr).toBe(0);
+
+    await expect(
+      runWorkbench(
+        {
+          python: fixture.python,
+          pluginRoot: PLUGIN_ROOT,
+          environment: {
+            PATH: process.env["PATH"],
+            CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+            CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE: attestation,
+          },
+        },
+        ["get-scan", "--scan-id", fixture.scanId],
+      ),
+    ).rejects.toThrow(/protected snapshot/iu);
+  });
+
   test("returns the authoritative directory snapshot contract at registration", async () => {
     const fixture = await startDraftScan();
     const registration = fixture.registration;

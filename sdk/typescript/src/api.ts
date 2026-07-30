@@ -326,6 +326,7 @@ export class CodexSecurity {
     let targetPathsFile: string | null = null;
     let scopeInventoryDirectory: string | null = null;
     let scopeInventoryFile: string | null = null;
+    let scopeExclusionsFile: string | null = null;
     let standardScopeInventory: ScopeInventorySnapshot | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
@@ -792,6 +793,18 @@ export class CodexSecurity {
           scopeInventoryDirectory,
           signal,
         );
+        scopeExclusionsFile = join(
+          scopeInventoryDirectory,
+          "scope_exclusions.json",
+        );
+        await writeFile(
+          scopeExclusionsFile,
+          `${JSON.stringify(expectedScopeExclusions ?? [])}\n`,
+          { flag: "wx", mode: 0o400, signal },
+        );
+        await chmod(scopeExclusionsFile, 0o400);
+        workbenchOptions.environment["CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE"] =
+          scopeExclusionsFile;
         scopeInventoryFile = join(
           scopeInventoryDirectory,
           "scope_inventory.jsonl",
@@ -837,6 +850,9 @@ export class CodexSecurity {
         ...(scopeInventoryFile === null
           ? {}
           : { CODEX_SECURITY_SCOPE_INVENTORY_FILE: scopeInventoryFile }),
+        ...(scopeExclusionsFile === null
+          ? {}
+          : { CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE: scopeExclusionsFile }),
       };
       const environment = {
         ...pluginExecutionEnvironment(
@@ -890,10 +906,12 @@ export class CodexSecurity {
             ...standardScopeInventory,
             path: scopeInventoryFile,
           },
-          environment: selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-          ),
+          environment: {
+            ...selectedScanEnvironment(runtime.environment, options.auth),
+            ...(scopeExclusionsFile === null
+              ? {}
+              : { CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE: scopeExclusionsFile }),
+          },
           signal,
         });
       };

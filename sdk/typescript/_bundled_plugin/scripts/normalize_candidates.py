@@ -86,17 +86,21 @@ def positive_line(value: Any, field: str) -> int:
     return value
 
 
-def source_line_count(source: Path) -> int:
+def source_line_count(source: Path, stop_after: int | None = None) -> int:
     """Count universal-newline source lines without loading the entire file."""
 
     count = 0
     previous: int | None = None
     with source.open("rb") as contents:
         while chunk := contents.read(64 * 1024):
+            if stop_after == 1 and chunk:
+                return 1
             count += chunk.count(b"\n") + chunk.count(b"\r") - chunk.count(b"\r\n")
             if previous == ord("\r") and chunk[0] == ord("\n"):
                 count -= 1
             previous = chunk[-1]
+            if stop_after is not None and count >= stop_after:
+                return count
     return count + int(previous is not None and previous not in (ord("\r"), ord("\n")))
 
 
@@ -129,8 +133,8 @@ def normalize_locations(
         end = positive_line(item.get("end_line", start), "end_line")
         if end < start:
             raise ValueError("end_line: must be greater than or equal to start_line")
-        if source not in line_counts:
-            line_counts[source] = source_line_count(source)
+        if line_counts.get(source, 0) < end:
+            line_counts[source] = source_line_count(source, end)
         if end > line_counts[source]:
             raise ValueError(f"line range {start}-{end} exceeds {relative}:{line_counts[source]}")
         role = item.get("role")

@@ -549,6 +549,7 @@ export async function prepareScopeInventory(
     "02_discovery",
     "scope_inventory.jsonl",
   );
+  let exclusionFile: string | null = null;
   try {
     for (const directory of [
       join(options.scanDir, "artifacts"),
@@ -564,6 +565,21 @@ export async function prepareScopeInventory(
     if (existing !== null) {
       throw new Error("inventory output already exists");
     }
+    if (options.expectedExclusions !== undefined) {
+      exclusionFile = join(
+        dirname(output),
+        `.scope-exclusions-${randomUUID()}.json`,
+      );
+      await writeFile(
+        exclusionFile,
+        JSON.stringify(options.expectedExclusions),
+        {
+          flag: "wx",
+          mode: 0o600,
+          signal: options.signal,
+        },
+      );
+    }
     await execFile(
       options.python,
       [
@@ -576,12 +592,9 @@ export async function prepareScopeInventory(
         ...(options.scopesFile === undefined
           ? []
           : ["--scopes-file", options.scopesFile]),
-        ...(options.expectedExclusions === undefined
+        ...(exclusionFile === null
           ? []
-          : [
-              "--expected-exclusions-json",
-              JSON.stringify(options.expectedExclusions),
-            ]),
+          : ["--expected-exclusions-file", exclusionFile]),
         "--out",
         output,
       ],
@@ -607,6 +620,10 @@ export async function prepareScopeInventory(
       `Could not prepare the standard scan scope inventory: ${processErrorDetail(error)}`,
       { cause: error },
     );
+  } finally {
+    if (exclusionFile !== null) {
+      await rm(exclusionFile, { force: true });
+    }
   }
 }
 

@@ -546,6 +546,21 @@ def registered_standard_scope_exclusions(scan: sqlite3.Row) -> list[dict[str, st
     patterns = [exclusion["pattern"] for exclusion in exclusions]
     if patterns != sorted(set(patterns)):
         raise SystemExit("Stored standard scope exclusions are invalid.")
+    attestation = os.environ.get("CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE")
+    if attestation:
+        try:
+            expected = json.loads(
+                Path(attestation).read_text(encoding="utf-8"),
+                parse_constant=reject_non_finite_json,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise SystemExit("Protected standard scope exclusions are invalid.") from exc
+        if (
+            not isinstance(expected, list)
+            or any(not isinstance(pattern, str) for pattern in expected)
+            or patterns != expected
+        ):
+            raise SystemExit("Stored standard scope exclusions do not match their protected snapshot.")
     return exclusions
 
 

@@ -191,6 +191,10 @@ def parse_args() -> argparse.Namespace:
         help="Host-registered JSON array of exclusion patterns to attest during traversal.",
     )
     inventory.add_argument(
+        "--expected-exclusions-file",
+        help="Private host-owned JSON file containing registered exclusion patterns.",
+    )
+    inventory.add_argument(
         "--max-files",
         type=int,
         default=MAX_SCOPE_INVENTORY_FILES,
@@ -372,7 +376,11 @@ def record_scope_symlink_exclusion(
     path: Path,
     exclusions: dict[str, dict[str, str]],
 ) -> None:
-    pattern = path.relative_to(repository).as_posix()
+    relative = path.relative_to(repository).as_posix()
+    pattern = "".join(
+        {"[": "[[]", "]": "[]]", "*": "[*]", "?": "[?]"}.get(character, character)
+        for character in relative
+    )
     exclusions[pattern] = {
         "pattern": pattern,
         "reason": STANDARD_SCOPE_SYMLINK_REASON,
@@ -499,7 +507,7 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
 
 def write_jsonl(output: Path, rows: list[JsonRow]) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8") as handle:
+    with output.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")))
             handle.write("\n")
@@ -677,10 +685,17 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
         raise SystemExit("Invalid standard scan scope inventory limit: --max-bytes")
 
     expected_exclusions: list[str] | None = None
-    if args.expected_exclusions_json is not None:
+    if args.expected_exclusions_json is not None and args.expected_exclusions_file is not None:
+        raise SystemExit("Choose one host-registered standard scan scope exclusion source")
+    if args.expected_exclusions_json is not None or args.expected_exclusions_file is not None:
         try:
-            decoded: object = json.loads(args.expected_exclusions_json)
-        except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            serialized = (
+                Path(args.expected_exclusions_file).read_text(encoding="utf-8")
+                if args.expected_exclusions_file is not None
+                else args.expected_exclusions_json
+            )
+            decoded: object = json.loads(serialized)
+        except (OSError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
             raise SystemExit("Invalid host-registered standard scan scope exclusions") from exc
         if not isinstance(decoded, list) or any(
             not isinstance(pattern, str) or not pattern for pattern in decoded
@@ -933,6 +948,10 @@ def validate_standard_finding_payload(
     conditions = attack_path.get("change_conditions")
     canonical_conditions = "\n".join(conditions) if isinstance(conditions, list) else conditions
 
+    normalized_attack_path = {
+        field: {"summary": value} if field in {"dataflow", "reachability"} and isinstance(value, str) else value
+        for field, value in attack_path.items()
+    }
     fields = (
         ("taxonomy", taxonomy.get("cwe"), candidate.get("cwe_ids")),
         ("severity", severity.get("level"), attack_path.get("severity")),
@@ -955,7 +974,11 @@ def validate_standard_finding_payload(
         ("validation method", finding_validation.get("method"), validation.get("method")),
         ("validation evidence", finding_validation.get("summary"), validation.get("evidence")),
     ) + tuple(
-        ("attack-path " + field, finding_attack_path.get(field), attack_path.get(field))
+        (
+            "attack-path " + field,
+            finding_attack_path.get(field),
+            normalized_attack_path.get(field),
+        )
         for field in ("dataflow", "reachability", "counterevidence", "impact", "likelihood")
     )
     for field, actual, expected in fields:

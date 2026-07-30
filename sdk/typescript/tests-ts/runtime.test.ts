@@ -1702,6 +1702,50 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  test("passes large host exclusion inventories through a private temporary file", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(join(pluginRoot, "scripts"), { recursive: true }),
+      mkdir(repository),
+      mkdir(scanDir),
+    ]);
+    await writeFile(
+      join(pluginRoot, "scripts", "generate_rank_input.py"),
+      [
+        "import json, pathlib, sys",
+        "assert '--expected-exclusions-json' not in sys.argv",
+        "source = pathlib.Path(sys.argv[sys.argv.index('--expected-exclusions-file') + 1])",
+        "assert len(json.loads(source.read_text(encoding='utf-8'))) == 5000",
+        "output = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])",
+        "output.write_text(json.dumps({'path': 'safe.ts'}) + '\\n', encoding='utf-8')",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot,
+      repository,
+      scanDir,
+      expectedExclusions: Array.from(
+        { length: 5000 },
+        (_value, index) => `excluded/package-${index}/node_modules/**`,
+      ),
+      environment: {},
+    });
+
+    expect(inventory.fileCount).toBe(1);
+    expect(
+      (await readdir(dirname(inventory.path))).some((name) =>
+        name.startsWith(".scope-exclusions-"),
+      ),
+    ).toBe(false);
+  });
+
   testPosix(
     "preserves drive-like colon filenames in authoritative POSIX inventories",
     async () => {
@@ -2070,8 +2114,8 @@ describe("runtime directories and plugin Python boundary", () => {
         summary: validation.evidence,
       },
       attackPath: {
-        dataflow: attackPath.dataflow,
-        reachability: attackPath.reachability,
+        dataflow: { summary: attackPath.dataflow },
+        reachability: { summary: attackPath.reachability },
         counterevidence: attackPath.counterevidence,
         impact: attackPath.impact,
         likelihood: attackPath.likelihood,
@@ -2556,8 +2600,8 @@ describe("runtime directories and plugin Python boundary", () => {
                 summary: completeValidation.evidence,
               },
               attackPath: {
-                dataflow: completeAttackPath.dataflow,
-                reachability: completeAttackPath.reachability,
+                dataflow: { summary: completeAttackPath.dataflow },
+                reachability: { summary: completeAttackPath.reachability },
                 counterevidence: completeAttackPath.counterevidence,
                 impact: completeAttackPath.impact,
                 likelihood: completeAttackPath.likelihood,

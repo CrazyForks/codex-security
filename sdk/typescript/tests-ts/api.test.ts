@@ -3919,6 +3919,90 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("keeps glob metacharacters in excluded symbolic-link names literal", async () => {
+    if (process.platform === "win32") return;
+
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const external = join(root, "outside.ts");
+    const manifest = join(root, "scan-manifest.json");
+    const coverage = join(root, "coverage.json");
+    await mkdir(repository);
+    await Promise.all([
+      writeFile(
+        join(repository, "safe-decoy.ts"),
+        "export const safe = true;\n",
+      ),
+      writeFile(external, "export const secret = true;\n"),
+      writeFile(
+        manifest,
+        JSON.stringify({
+          scan: { scope: { includePaths: ["."], excludePaths: [] } },
+        }),
+      ),
+      writeFile(
+        coverage,
+        JSON.stringify({
+          completeness: "complete",
+          includePaths: ["."],
+          excludePaths: [],
+          explicitExclusions: [],
+        }),
+      ),
+    ]);
+    await symlink(external, join(repository, "safe-*.ts"));
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "bind-scope-exclusions",
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--manifest",
+        manifest,
+        "--coverage",
+        coverage,
+      ],
+      { stdio: "pipe" },
+    );
+    const exclusions = (
+      JSON.parse(await readFile(coverage, "utf8")) as {
+        excludePaths: string[];
+      }
+    ).excludePaths;
+    expect(exclusions).toContain("safe-[*].ts");
+    const checked = JSON.parse(
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "module = runpy.run_path(str(Path(sys.argv[1]) / 'workbench_scan_history.py'))",
+            "with open(sys.argv[2], encoding='utf-8') as source: coverage = json.load(source)",
+            "scan = {'status': 'complete', 'target_id': 'target'}",
+            "print(json.dumps({path: module['scan_covers_path'](scan, target_id='target', path=path, coverage=coverage) for path in ['safe-*.ts', 'safe-decoy.ts']}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          coverage,
+        ],
+        { encoding: "utf8" },
+      ),
+    ) as Record<string, boolean>;
+
+    expect(checked).toEqual({ "safe-*.ts": false, "safe-decoy.ts": true });
+  });
+
   test("aligns the bundled standard workflow with the authoritative inventory", async () => {
     const [skill, workflow, artifacts, capabilities] = await Promise.all([
       readFile(
@@ -4109,6 +4193,7 @@ describe("CodexSecurity orchestration", () => {
       let prompt = "";
       let protectedInventory: string | null = null;
       let protectedInventoryDirectory: string | null = null;
+      let protectedExclusions: string | null = null;
       const client = new TestClient(
         {},
         {
@@ -4127,6 +4212,12 @@ describe("CodexSecurity orchestration", () => {
             }
             protectedInventory = immutable;
             protectedInventoryDirectory = dirname(immutable);
+            const exclusions =
+              options.env?.["CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE"];
+            if (typeof exclusions !== "string") {
+              throw new Error("missing protected standard exclusions");
+            }
+            protectedExclusions = exclusions;
             expect(
               basename(protectedInventoryDirectory).startsWith(
                 "codex-security-scope-inventory-",
@@ -4145,8 +4236,12 @@ describe("CodexSecurity orchestration", () => {
                     expect(await readFile(immutable, "utf8")).toBe(
                       await readFile(inventory, "utf8"),
                     );
+                    expect(
+                      JSON.parse(await readFile(exclusions, "utf8")),
+                    ).toEqual([]);
                     if (process.platform !== "win32") {
                       expect((await stat(immutable)).mode & 0o777).toBe(0o400);
+                      expect((await stat(exclusions)).mode & 0o777).toBe(0o400);
                       expect(
                         (await stat(protectedInventoryDirectory!)).mode & 0o777,
                       ).toBe(0o700);
@@ -4184,7 +4279,9 @@ describe("CodexSecurity orchestration", () => {
       expect(prompt).not.toContain("make-repo-rank-input");
       expect(protectedInventory).not.toBeNull();
       expect(protectedInventoryDirectory).not.toBeNull();
+      expect(protectedExclusions).not.toBeNull();
       expect(existsSync(protectedInventory!)).toBe(false);
+      expect(existsSync(protectedExclusions!)).toBe(false);
       expect(existsSync(protectedInventoryDirectory!)).toBe(false);
       await client.close();
     }
