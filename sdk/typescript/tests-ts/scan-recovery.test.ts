@@ -279,6 +279,20 @@ describe("malformed scan artifact recovery", () => {
     ).resolves.toMatchObject({
       export: { path: join(fixture.scanDir, "findings.json") },
     });
+    await expect(
+      workbench(fixture, [
+        "export-findings",
+        "--scan-id",
+        fixture.scanId,
+        "--format",
+        "sarif",
+      ]),
+    ).resolves.toMatchObject({
+      export: { path: join(fixture.scanDir, "exports", "results.sarif") },
+    });
+    await expect(
+      readFile(join(fixture.scanDir, "exports", "results.sarif"), "utf8"),
+    ).resolves.toContain('"version": "2.1.0"');
   });
 
   test("does not treat a symlink-only repository snapshot as empty", async () => {

@@ -2082,7 +2082,11 @@ def _validate_existing_seal(
 
 
 def _read_sealed_scan(
-    scan_dir: Path, schema_dir: Path | None, required_for: str
+    scan_dir: Path,
+    schema_dir: Path | None,
+    required_for: str,
+    *,
+    trusted_sealed_scan: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], bytes]:
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
@@ -2108,7 +2112,14 @@ def _read_sealed_scan(
     _validate_manifest(manifest)
     _validate_findings(manifest, findings)
     _validate_coverage(
-        manifest, coverage, scan_dir, findings, enforce_complete_review=True
+        manifest,
+        coverage,
+        scan_dir,
+        findings,
+        enforce_complete_review=True,
+        authoritative_empty_scope_inventory=(
+            AUTHORITATIVE_EMPTY_SCOPE_INVENTORY if trusted_sealed_scan else None
+        ),
     )
     _validate_sealed_coverage_receipts(scan, coverage)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
@@ -2119,7 +2130,11 @@ def _read_sealed_scan(
 
 
 def build_sarif_projection(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+    scan_dir: Path,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+    *,
+    trusted_sealed_scan: bool = False,
 ) -> dict[str, Any]:
     if source_root is not None:
         try:
@@ -2129,7 +2144,12 @@ def build_sarif_projection(
             source_root_is_directory = False
         if not source_root_is_directory:
             raise ContractError("source root: expected an existing directory")
-    manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
+    manifest, findings, coverage, _ = _read_sealed_scan(
+        scan_dir,
+        schema_dir,
+        "SARIF projection",
+        trusted_sealed_scan=trusted_sealed_scan,
+    )
     sarif = build_sarif(manifest, findings, source_root)
     if coverage["completeness"] != "complete":
         run = sarif["runs"][0]
@@ -2149,9 +2169,18 @@ def build_sarif_projection(
 
 
 def write_sarif_projection(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+    scan_dir: Path,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+    *,
+    trusted_sealed_scan: bool = False,
 ) -> None:
-    sarif = build_sarif_projection(scan_dir, source_root, schema_dir)
+    sarif = build_sarif_projection(
+        scan_dir,
+        source_root,
+        schema_dir,
+        trusted_sealed_scan=trusted_sealed_scan,
+    )
     _write_scan_local_json(scan_dir, "exports/results.sarif", sarif)
 
 
@@ -2333,7 +2362,12 @@ def _write_sarif_projection_if_possible(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> None:
     try:
-        write_sarif_projection(scan_dir, source_root, schema_dir)
+        write_sarif_projection(
+            scan_dir,
+            source_root,
+            schema_dir,
+            trusted_sealed_scan=True,
+        )
     except (ContractError, OSError) as error:
         print(
             f"codex-security: warning: automatic SARIF export failed: {error}. "

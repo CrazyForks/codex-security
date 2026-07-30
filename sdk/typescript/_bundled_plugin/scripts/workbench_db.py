@@ -2430,7 +2430,7 @@ def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) ->
         path = artifact_path(scan_dir, ARTIFACTS["findings"], required=True)
     elif args.format == "sarif":
         try:
-            write_sarif_projection(scan_dir)
+            write_sarif_projection(scan_dir, trusted_sealed_scan=True)
         except ContractError as exc:
             raise SystemExit(str(exc)) from exc
         path = artifact_path(scan_dir, "exports/results.sarif", required=True)
