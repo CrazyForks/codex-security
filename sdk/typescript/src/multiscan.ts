@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import {
   type FileHandle,
@@ -256,34 +256,6 @@ async function runCampaign(
           cost = result.cost;
           if (result.coverage.completeness !== "complete") {
             throw new Error("Multiscan repository coverage is incomplete.");
-          }
-          if (canonicalScope !== undefined && canonicalScope !== task.scope) {
-            const binding = `${JSON.stringify({ scope: task.scope, canonicalScope })}\n`;
-            const bindingName = ".multiscan-scope.json";
-            await writeFile(join(scanDir, bindingName), binding, {
-              flag: "wx",
-              mode: 0o600,
-            });
-            const manifestPath = join(scanDir, "scan-manifest.json");
-            const manifest = JSON.parse(
-              await readFile(manifestPath, "utf8"),
-            ) as {
-              scan?: { artifacts?: Array<Record<string, unknown>> };
-            };
-            if (!Array.isArray(manifest.scan?.artifacts)) {
-              throw new Error(
-                "Multiscan scope cannot be bound to an unsealed scan.",
-              );
-            }
-            manifest.scan.artifacts.push({
-              path: bindingName,
-              sha256: createHash("sha256").update(binding).digest("hex"),
-              mediaType: "application/json",
-            });
-            await writeFile(
-              manifestPath,
-              `${JSON.stringify(manifest, null, 2)}\n`,
-            );
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
@@ -1120,23 +1092,7 @@ async function hasArtifacts(
         canonicalScope = relativeScope.split(sep).join("/") || ".";
       } catch {
         if (recordedCanonicalScope !== undefined) {
-          if (recordedCanonicalScope !== canonicalScope) {
-            const bindingPath = join(path, ".multiscan-scope.json");
-            const bindingMetadata = await lstat(bindingPath);
-            if (!bindingMetadata.isFile() || bindingMetadata.nlink !== 1) {
-              return false;
-            }
-            const binding = JSON.parse(await readFile(bindingPath, "utf8")) as {
-              scope?: unknown;
-              canonicalScope?: unknown;
-            };
-            if (
-              binding.scope !== task.scope ||
-              binding.canonicalScope !== recordedCanonicalScope
-            ) {
-              return false;
-            }
-          }
+          if (recordedCanonicalScope !== canonicalScope) return false;
           canonicalScope = recordedCanonicalScope;
         }
       }
@@ -1155,15 +1111,6 @@ async function hasArtifacts(
         pluginVersion: plugin.version,
       },
     });
-    if (
-      recordedCanonicalScope !== undefined &&
-      recordedCanonicalScope !== task.scope &&
-      !contract.manifest.scan.artifacts.some(
-        (artifact) => artifact.path === ".multiscan-scope.json",
-      )
-    ) {
-      return false;
-    }
     return (
       contract.coverage.completeness === "complete" &&
       contract.manifest.scan.target.kind !== "directory_snapshot"

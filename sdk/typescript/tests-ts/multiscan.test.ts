@@ -377,32 +377,7 @@ describe("multiscan", () => {
       });
       expect(scans).toBe(1);
 
-      const remote = "ssh://127.0.0.1:1/symlinked-scope.git";
-      await writeFile(
-        paths.input,
-        `id,repository,revision,scope\nscoped,${remote},${revision},alias\n`,
-      );
-      const manifestPath = join(paths.output, "manifest.json");
-      const campaign = JSON.parse(await readFile(manifestPath, "utf8")) as {
-        tasks: Array<{ repository: string }>;
-      };
-      campaign.tasks[0]!.repository = remote;
-      await writeFile(manifestPath, `${JSON.stringify(campaign, null, 2)}\n`);
       const ledgerPath = join(paths.output, "results.jsonl");
-      const receipts = await results(ledgerPath);
-      for (const receipt of receipts) receipt["repository"] = remote;
-      await writeFile(
-        ledgerPath,
-        `${receipts.map((receipt) => JSON.stringify(receipt)).join("\n")}\n`,
-      );
-
-      expect(await runMultiscan(options(paths, security))).toMatchObject({
-        completed: 1,
-        failed: 0,
-        skipped: 1,
-      });
-      expect(scans).toBe(1);
-
       const manipulated = await results(ledgerPath);
       manipulated[manipulated.length - 1]!["canonicalScope"] = "another";
       await writeFile(
@@ -431,13 +406,36 @@ describe("multiscan", () => {
       coverage.includePaths = ["another"];
       await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
       await reseal(dirname(scanManifestPath));
-      await writeFile(
-        join(dirname(scanManifestPath), ".multiscan-scope.json"),
-        `${JSON.stringify({ scope: "alias", canonicalScope: "another" })}\n`,
-      );
 
       const resumed = await runMultiscan(options(paths, security));
       expect(resumed.skipped).toBe(0);
+      expect(resumed.completed).toBe(1);
+      expect(scans).toBe(2);
+
+      const remote = "ssh://127.0.0.1:1/symlinked-scope.git";
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nscoped,${remote},${revision},alias\n`,
+      );
+      const manifestPath = join(paths.output, "manifest.json");
+      const campaign = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        tasks: Array<{ repository: string }>;
+      };
+      campaign.tasks[0]!.repository = remote;
+      await writeFile(manifestPath, `${JSON.stringify(campaign, null, 2)}\n`);
+      const receipts = await results(ledgerPath);
+      for (const receipt of receipts) receipt["repository"] = remote;
+      await writeFile(
+        ledgerPath,
+        `${receipts.map((receipt) => JSON.stringify(receipt)).join("\n")}\n`,
+      );
+
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 0,
+        failed: 1,
+        skipped: 0,
+      });
+      expect(scans).toBe(2);
     },
   );
 
