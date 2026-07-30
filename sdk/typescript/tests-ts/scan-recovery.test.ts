@@ -470,6 +470,89 @@ describe("malformed scan artifact recovery", () => {
     ).toMatchObject({ filesTotal: 1 });
   });
 
+  test("does not certify sparse submodule index contents as an empty scope", async () => {
+    const fixture = await startDraftScan("clean");
+    const child = join(fixture.repository, "..", "sparse-submodule-source");
+    await mkdir(join(child, "secret"), { recursive: true });
+    await writeFile(
+      join(child, "secret", "token.py"),
+      "secret = 'review me'\n",
+    );
+    await writeFile(join(child, "visible.py"), "print('visible')\n");
+    for (const args of [
+      ["init", "--quiet", child],
+      ["-C", child, "add", "."],
+      [
+        "-C",
+        child,
+        "-c",
+        "user.name=Codex Security",
+        "-c",
+        "user.email=codex-security@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "tracked secret",
+      ],
+      [
+        "-C",
+        fixture.repository,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        child,
+        "vendor/sub",
+      ],
+      [
+        "-C",
+        fixture.repository,
+        "-c",
+        "user.name=Codex Security",
+        "-c",
+        "user.email=codex-security@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "add sparse submodule",
+      ],
+      [
+        "-C",
+        join(fixture.repository, "vendor", "sub"),
+        "sparse-checkout",
+        "set",
+        "--no-cone",
+        "/visible.py",
+      ],
+    ]) {
+      const result = spawnSync("git", args, { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    await mkdir(join(fixture.repository, "vendor", "sub", "secret"), {
+      recursive: true,
+    });
+    const scanDir = join(fixture.stateDir, "sparse-submodule-scope");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+
+    await expect(
+      workbench(fixture, [
+        "register-cli-scan",
+        "--repository",
+        fixture.repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository: fixture.repository,
+          target: { kind: "paths", paths: ["vendor/sub/secret"] },
+        }),
+      ]),
+    ).rejects.toThrow("empty scope was being verified");
+  });
+
   test("rejects an empty scope that changes during snapshot capture", async () => {
     const fixture = await startDraftScan("directory", true);
     const scanDir = join(fixture.stateDir, "racing-scan");

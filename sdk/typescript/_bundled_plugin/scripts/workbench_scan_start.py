@@ -23,6 +23,7 @@ from workbench_target import (
     directory_snapshot_digest_and_reviewable_count,
     git_bytes,
     git_revision,
+    git_submodule_entries,
     worktree_content_digest,
 )
 
@@ -109,6 +110,36 @@ def verify_empty_scope_identity(
     )
     if tracked_scope is None or tracked_scope:
         raise SystemExit(changed_message)
+    requested = scopes if scopes else (scope,)
+    verify_nested_empty_scopes(target, requested, changed_message)
+
+
+def verify_nested_empty_scopes(
+    repository: Path, scopes: tuple[str, ...], changed_message: str
+) -> None:
+    for submodule, _revision in git_submodule_entries(repository):
+        nested_scopes = []
+        for scope in scopes:
+            try:
+                nested_scope = (repository / scope).relative_to(submodule)
+            except ValueError:
+                continue
+            nested_scopes.append(nested_scope.as_posix())
+        if not nested_scopes:
+            continue
+        if not submodule.exists() or not (submodule / ".git").exists():
+            raise SystemExit(changed_message)
+        tracked = git_bytes(
+            submodule,
+            "ls-files",
+            "--cached",
+            "-z",
+            "--",
+            *nested_scopes,
+        )
+        if tracked is None or tracked:
+            raise SystemExit(changed_message)
+        verify_nested_empty_scopes(submodule, tuple(nested_scopes), changed_message)
 
 
 def scan_diff_identity(
