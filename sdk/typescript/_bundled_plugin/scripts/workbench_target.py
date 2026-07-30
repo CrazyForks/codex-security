@@ -114,10 +114,17 @@ def git_diff_content_digest(target: Path, base_revision: str, head_revision: str
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def worktree_content_digest(target: Path, *, legacy: bool = False) -> str:
+def worktree_content_digest(
+    target: Path, *, legacy: bool = False, include_conflicted_index: bool = True
+) -> str:
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
-    return worktree_content_digest_for_context(repository, pathspec, legacy=legacy)
+    return worktree_content_digest_for_context(
+        repository,
+        pathspec,
+        legacy=legacy,
+        include_conflicted_index=include_conflicted_index,
+    )
 
 
 def worktree_content_digest_for_context(
@@ -127,6 +134,7 @@ def worktree_content_digest_for_context(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     legacy: bool = False,
+    include_conflicted_index: bool = True,
 ) -> str:
     tracked = git_bytes(
         repository,
@@ -196,7 +204,7 @@ def worktree_content_digest_for_context(
                 raise SystemExit("Could not snapshot the selected Git index.") from error
             if stage != b"0":
                 conflicts.append(entry)
-        conflicted_index = b"\0".join(sorted(conflicts))
+        conflicted_index = b"\0".join(sorted(conflicts)) if include_conflicted_index else b""
     untracked = git_bytes(
         repository,
         "ls-files",
@@ -308,7 +316,10 @@ def git_submodule_paths(target: Path) -> tuple[Path, ...]:
 
 
 def require_clean_submodule_worktrees(target: Path) -> None:
-    for submodule, expected_revision in git_submodule_entries(target):
+    expected_revisions: dict[Path, set[str]] = {}
+    for submodule, revision in git_submodule_entries(target):
+        expected_revisions.setdefault(submodule, set()).add(revision)
+    for submodule, revisions in expected_revisions.items():
         relative_path = str(submodule.relative_to(target))
         if not submodule.exists():
             continue
@@ -325,7 +336,7 @@ def require_clean_submodule_worktrees(target: Path) -> None:
             raise SystemExit(
                 f"Could not inspect initialized Git submodule contents: {relative_path}"
             )
-        if git_output(submodule, "rev-parse", "HEAD") != expected_revision:
+        if git_output(submodule, "rev-parse", "HEAD") not in revisions:
             raise SystemExit(
                 "Initialized Git submodules must be checked out at the revision recorded "
                 f"by the parent repository: {relative_path}"
@@ -653,6 +664,7 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
         )
         if (
             worktree_content_digest(target) != expected_digest
+            and worktree_content_digest(target, include_conflicted_index=False) != expected_digest
             and worktree_content_digest(target, legacy=True) != expected_digest
         ):
             return (

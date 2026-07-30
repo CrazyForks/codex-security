@@ -379,7 +379,10 @@ def require_diff_target(
                 "Select Uncommitted changes again."
             )
         if content_digest and content_digest != current_digest:
-            if content_digest != worktree_content_digest(target, legacy=True):
+            if content_digest not in {
+                worktree_content_digest(target, include_conflicted_index=False),
+                worktree_content_digest(target, legacy=True),
+            }:
                 raise SystemExit(
                     "Working-tree contents changed after they were selected. "
                     "Select Uncommitted changes again."

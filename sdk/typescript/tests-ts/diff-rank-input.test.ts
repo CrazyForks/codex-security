@@ -809,6 +809,54 @@ describe("diff rank input", () => {
     );
   });
 
+  test("snapshots initialized Git submodules with conflicting pinned revisions", async () => {
+    const fixture = await createRepository();
+    const path = ".github/actions/security";
+    const submodule = join(fixture.repository, path);
+    await mkdir(submodule, { recursive: true });
+    git(submodule, "init", "-q", "-b", "main");
+    git(submodule, "config", "user.name", "Codex Security Test");
+    git(submodule, "config", "user.email", "codex-security@example.invalid");
+    await writeRepositoryFile(submodule, "action.yml", "runs: node20\n");
+    git(submodule, "add", ".");
+    git(submodule, "commit", "-qm", "first pin");
+    const first = git(submodule, "rev-parse", "HEAD");
+    await writeRepositoryFile(submodule, "action.yml", "runs: node24\n");
+    git(submodule, "commit", "-qam", "second pin");
+    const second = git(submodule, "rev-parse", "HEAD");
+    const index = [
+      `0 ${"0".repeat(40)}\t${path}`,
+      `160000 ${first} 1\t${path}`,
+      `160000 ${second} 2\t${path}`,
+      `160000 ${first} 3\t${path}`,
+    ].join("\n");
+    const updated = spawnSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+      input: `${index}\n`,
+    });
+    expect(updated.status, updated.stderr).toBe(0);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const digest = execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from workbench_target import worktree_content_digest; print(worktree_content_digest(Path(sys.argv[2])))",
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+      ],
+      { encoding: "utf8" },
+    ).trim();
+
+    expect(digest).toMatch(
+      /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
+    );
+  });
+
   test("reviews conflicted submodule stages under excluded dependency directories", async () => {
     const fixture = await createRepository();
     const path = "vendor/dependency";
@@ -1252,6 +1300,64 @@ describe("diff rank input", () => {
     ]);
 
     expect(digest()).not.toBe(previous);
+  });
+
+  test("accepts immediately preceding snapshot digests for unresolved conflicts", async () => {
+    const fixture = await createRepository();
+    const path = "src/app.ts";
+    const hashes = ["base-target.ts", "ours-target.ts", "theirs-target.ts"].map(
+      (target) =>
+        execFileSync("git", ["hash-object", "-w", "--stdin"], {
+          cwd: fixture.repository,
+          encoding: "utf8",
+          input: target,
+        }).trim(),
+    );
+    const index = [
+      `0 ${"0".repeat(40)}\t${path}`,
+      ...hashes.map((hash, stage) => `120000 ${hash} ${stage + 1}\t${path}`),
+    ].join("\n");
+    const updated = spawnSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+      input: `${index}\n`,
+    });
+    expect(updated.status, updated.stderr).toBe(0);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_db import require_diff_target",
+          "from workbench_target import worktree_content_digest",
+          "target = Path(sys.argv[2])",
+          "revision = sys.argv[3]",
+          "previous = worktree_content_digest(target, include_conflicted_index=False)",
+          "current = worktree_content_digest(target)",
+          "selected = require_diff_target(target, 'working_tree', revision, revision, previous)",
+          "print(json.dumps({'previous': previous, 'current': current, 'selected': selected['contentDigest']}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        fixture.base,
+      ],
+      { encoding: "utf8" },
+    );
+    const snapshots = JSON.parse(result) as {
+      previous: string;
+      current: string;
+      selected: string;
+    };
+
+    expect(snapshots.current).not.toBe(snapshots.previous);
+    expect(snapshots.selected).toBe(snapshots.current);
   });
 
   test("preserves legacy working-tree snapshots while binding new index digests", async () => {
