@@ -915,6 +915,9 @@ describe("multiscan", () => {
     let calls = 0;
     const security = client(async (_repository, scanOptions = {}) => {
       calls += 1;
+      await expect(access(scanOptions.outputDir!)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       return await completedScan(scanOptions.outputDir!);
     });
 
@@ -1444,6 +1447,9 @@ describe("multiscan", () => {
     let calls = 0;
     const security = client(async (_repository, scanOptions = {}) => {
       calls += 1;
+      await expect(access(scanOptions.outputDir!)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       return await completedScan(scanOptions.outputDir!);
     });
     const initial = await runMultiscan(options(paths, security));

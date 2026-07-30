@@ -222,7 +222,8 @@ async function runCampaign(
         let failure: string | undefined;
         let cost: Readonly<ScanCost> | null = null;
         try {
-          await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
+          await ensureOutputDirectory(dirname(scanDir));
+          await rm(scanDir, { recursive: true, force: true });
           await rm(checkout, { recursive: true, force: true });
           await mkdir(checkout, { mode: 0o700 });
           await checkoutRevision(
