@@ -73,6 +73,7 @@ function pdf(
     uncompressedImage?: boolean;
     formBytes?: Buffer;
     headerComment?: string;
+    catalogPrefix?: string;
     dictionaryPrefix?: string;
     streamComment?: string;
   } = {},
@@ -120,7 +121,7 @@ function pdf(
       : directFilter;
   const streamObject = `<< ${options.dictionaryPrefix ?? ""}/Length ${length}${filter === undefined ? "" : ` /Filter ${filter}`} >>${options.streamComment === undefined ? "\n" : ` ${options.streamComment}\n`}stream\n${streamBytes.toString("latin1")}\nendstream`;
   const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< ${options.catalogPrefix ?? ""}/Type /Catalog /Pages 2 0 R >>`,
     `<< /Type /Pages /Kids [${pageObjects.map((number) => `${number} 0 R`).join(" ")}] /Count ${pages} >>`,
     ...pageObjects.map(
       () =>
@@ -189,6 +190,7 @@ function xrefStreamPdf(
       name: string;
       encode: (bytes: Buffer) => Buffer;
     };
+    objectStreamDecodeParametersObject?: string;
   } = {},
 ): Buffer {
   const original = Buffer.from(document).toString("latin1");
@@ -218,6 +220,10 @@ function xrefStreamPdf(
   const compressed = new Map<number, { stream: number; index: number }>();
   if (compressIndirectObjects && references.length > 0) {
     const streamObject = ++maximumObject;
+    const decodeParametersObject =
+      options.objectStreamDecodeParametersObject === undefined
+        ? undefined
+        : ++maximumObject;
     const values: string[] = [];
     for (const number of references) {
       const expression = new RegExp(
@@ -265,7 +271,14 @@ function xrefStreamPdf(
     const encoded = objectStreamFilter.encode(
       Buffer.from(header + objectBody, "latin1"),
     );
-    body += `${streamObject} 0 obj\n<< /Type /ObjStm /N ${references.length} /First ${header.length} /Length ${encoded.byteLength} /Filter ${objectStreamFilter.name} >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\n`;
+    if (decodeParametersObject !== undefined) {
+      body += `${decodeParametersObject} 0 obj\n${options.objectStreamDecodeParametersObject}\nendobj\n`;
+    }
+    const filterName = objectStreamFilter.name.replaceAll(
+      "@DECODE_PARAMETERS@",
+      `${decodeParametersObject} 0 R`,
+    );
+    body += `${streamObject} 0 obj\n<< /Type /ObjStm /N ${references.length} /First ${header.length} /Length ${encoded.byteLength} /Filter ${filterName} >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\n`;
   }
   const xrefObject = ++maximumObject;
   const xrefOffset = Buffer.byteLength(body, "latin1");
@@ -1080,20 +1093,50 @@ describe("scan knowledge bases", () => {
   });
 
   test("applies an LZW predictor before the next compressed object-stream filter", async () => {
+    for (const [name, parameter, indirect] of [
+      ["explicit columns", "<< /Predictor 12 /Columns 1 >>", false],
+      ["default columns", "<< /Predictor 12 >>", false],
+      ["indirect parameters", "@DECODE_PARAMETERS@", true],
+    ] as const) {
+      const root = await temporaryDirectory();
+      const document = join(root, `${name}.pdf`);
+      await writeFile(
+        document,
+        xrefStreamPdf(pdf("Predicted compressed page", 1, true), true, 0, {
+          compressPageObjects: true,
+          ...(indirect
+            ? { objectStreamDecodeParametersObject: "<< /Predictor 12 >>" }
+            : {}),
+          objectStreamFilter: {
+            name: `[/LZWDecode /ASCII85Decode] /DecodeParms [${parameter} null]`,
+            encode: (contents) =>
+              encodePdfLzwLiterals(
+                Buffer.from(
+                  [...encodeAscii85(contents)].flatMap((byte) => [0, byte]),
+                ),
+              ),
+          },
+        }),
+      );
+
+      const knowledgeBase = await prepareKnowledgeBase([document]);
+      temporaryDirectories.push(knowledgeBase.path);
+      expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+        "Predicted compressed page",
+      ]);
+    }
+  });
+
+  test("ignores predictor parameters on filters without predictor support", async () => {
     const root = await temporaryDirectory();
-    const document = join(root, "predicted-lzw-object-stream.pdf");
+    const document = join(root, "non-predictor-object-stream.pdf");
     await writeFile(
       document,
-      xrefStreamPdf(pdf("Predicted compressed page", 1, true), true, 0, {
+      xrefStreamPdf(pdf("Non-predictor compressed page", 1, true), true, 0, {
         compressPageObjects: true,
         objectStreamFilter: {
-          name: "[/LZWDecode /ASCII85Decode] /DecodeParms [<< /Predictor 12 /Columns 1 >> null]",
-          encode: (contents) =>
-            encodePdfLzwLiterals(
-              Buffer.from(
-                [...encodeAscii85(contents)].flatMap((byte) => [0, byte]),
-              ),
-            ),
+          name: "[/RunLengthDecode /ASCII85Decode] /DecodeParms [<< /Predictor 12 >> null]",
+          encode: (contents) => encodeRunLength(encodeAscii85(contents)),
         },
       }),
     );
@@ -1101,8 +1144,24 @@ describe("scan knowledge bases", () => {
     const knowledgeBase = await prepareKnowledgeBase([document]);
     temporaryDirectories.push(knowledgeBase.path);
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
-      "Predicted compressed page",
+      "Non-predictor compressed page",
     ]);
+  });
+
+  test("does not let literal stream markers suppress later compressed streams", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "literal-stream-marker.pdf");
+    await writeFile(
+      document,
+      pdf("reviewable", 1, true, " ".repeat(9 * 1024 * 1024), {
+        catalogPrefix:
+          "/Length 10000000 /Decoy (>>\nstream\nnot a real stream) ",
+      }),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
   });
 
   test("ignores stream-shaped bytes inside declared uncompressed image data", async () => {

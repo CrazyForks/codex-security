@@ -411,6 +411,15 @@ function boundCompressedPdfStreams(
     signal?.throwIfAborted();
     if (marker.index < streamBodyEnd) continue;
     const object = pdfObjectBeforeOffset(objectOffsets, marker.index);
+    const lexicalPrefix = pdfDictionaryLexicalValues(
+      contents.slice(
+        object?.[1] ??
+          Math.max(0, marker.index - MAX_PDF_DICTIONARY_SCAN_BYTES),
+        marker.index + 2,
+      ),
+      false,
+    );
+    if (!lexicalPrefix.endsWith(">>")) continue;
     const dictionary = pdfStreamDictionary(
       contents,
       marker.index + 2,
@@ -492,7 +501,13 @@ function boundCompressedPdfStreams(
             decoded = decodePdfLzw(
               decoded,
               maximumOutput,
-              pdfLzwEarlyChange(dictionary, filterIndex),
+              pdfLzwEarlyChange(
+                dictionary,
+                filterIndex,
+                contents,
+                indirectObjects,
+                path,
+              ),
             );
             break;
           case "FlateDecode":
@@ -527,23 +542,30 @@ function boundCompressedPdfStreams(
           { cause: error },
         );
       }
-      const predictorWork = {
-        remaining: MAX_PDF_DECODE_WORK_BYTES - decodingWorkBytes,
-      };
-      const predicted = pdfApplyPredictor(
-        dictionary,
-        decoded,
-        predictorWork,
-        filterIndex,
-      );
-      if (predicted === null) {
-        throw new Error(
-          `Knowledge base PDF compressed stream cannot be safely bounded: ${path}`,
+      if (["FlateDecode", "Fl", "LZWDecode", "LZW"].includes(filter)) {
+        const predictorWork = {
+          remaining: MAX_PDF_DECODE_WORK_BYTES - decodingWorkBytes,
+        };
+        const predicted = pdfApplyPredictor(
+          dictionary,
+          decoded,
+          predictorWork,
+          filterIndex,
+          contents,
+          indirectObjects,
+          path,
         );
+        if (predicted === null) {
+          throw new Error(
+            `Knowledge base PDF compressed stream cannot be safely bounded: ${path}`,
+          );
+        }
+        decodingWorkBytes +=
+          MAX_PDF_DECODE_WORK_BYTES -
+          decodingWorkBytes -
+          predictorWork.remaining;
+        decoded = predicted;
       }
-      decodingWorkBytes +=
-        MAX_PDF_DECODE_WORK_BYTES - decodingWorkBytes - predictorWork.remaining;
-      decoded = predicted;
       decodingWorkBytes += decoded.byteLength;
       if (decodingWorkBytes > MAX_PDF_DECODE_WORK_BYTES) {
         throw oversizedPdfStream(path);
@@ -623,7 +645,7 @@ function pdfIndirectValue(
   if (offset === null || offset === undefined) return undefined;
   if (typeof offset === "number") {
     const value = new RegExp(
-      `^${object}\\s+${generation}\\s+obj(?:\\s+|%[^\\r\\n]*(?:\\r\\n|\\r|\\n))*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)`,
+      `^${object}\\s+${generation}\\s+obj(?:\\s+|%[^\\r\\n]*(?:\\r\\n|\\r|\\n))*(<<[\\s\\S]*?>>|\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)`,
       "u",
     ).exec(contents.slice(offset));
     if (value?.[1] === undefined) return undefined;
@@ -940,7 +962,7 @@ function pdfCrossReferenceStream(
           decoded = decodePdfLzw(
             decoded,
             work.remaining,
-            pdfLzwEarlyChange(dictionary, filterIndex),
+            pdfLzwEarlyChange(dictionary, filterIndex, contents, offsets, path),
           );
           break;
         default:
@@ -952,9 +974,19 @@ function pdfCrossReferenceStream(
     }
     work.remaining -= decoded.byteLength;
     if (work.remaining < 0) return null;
-    const predicted = pdfApplyPredictor(dictionary, decoded, work, filterIndex);
-    if (predicted === null) return null;
-    decoded = predicted;
+    if (["FlateDecode", "Fl", "LZWDecode", "LZW"].includes(filter)) {
+      const predicted = pdfApplyPredictor(
+        dictionary,
+        decoded,
+        work,
+        filterIndex,
+        contents,
+        offsets,
+        path,
+      );
+      if (predicted === null) return null;
+      decoded = predicted;
+    }
   }
   return { dictionary, contents: decoded };
 }
@@ -964,13 +996,24 @@ function pdfApplyPredictor(
   decoded: Buffer,
   work: { remaining: number },
   filterIndex: number,
+  contents: string,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
+  path: string,
 ): Buffer | null {
-  const parameters = pdfFilterDecodeParameters(dictionary, filterIndex);
+  const parameters = pdfFilterDecodeParameters(
+    dictionary,
+    filterIndex,
+    contents,
+    offsets,
+    path,
+  );
   const predictor = Number(
     /\/Predictor\s+(\d+)(?=[\s/>])/u.exec(parameters ?? "")?.[1] ?? "1",
   );
   if (predictor === 1) return decoded;
-  const columns = Number(/\/Columns\s+(\d+)(?=[\s/>])/u.exec(parameters!)?.[1]);
+  const columns = Number(
+    /\/Columns\s+(\d+)(?=[\s/>])/u.exec(parameters!)?.[1] ?? "1",
+  );
   const colors = Number(
     /\/Colors\s+(\d+)(?=[\s/>])/u.exec(parameters!)?.[1] ?? "1",
   );
@@ -1344,8 +1387,20 @@ function pdfStreamFilters(
   return filters;
 }
 
-function pdfLzwEarlyChange(dictionary: string, filterIndex: number): 0 | 1 {
-  const selected = pdfFilterDecodeParameters(dictionary, filterIndex);
+function pdfLzwEarlyChange(
+  dictionary: string,
+  filterIndex: number,
+  contents: string,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
+  path: string,
+): 0 | 1 {
+  const selected = pdfFilterDecodeParameters(
+    dictionary,
+    filterIndex,
+    contents,
+    offsets,
+    path,
+  );
   if (selected === undefined) return 1;
   const value = /\/EarlyChange\s+([01])(?=[\s/>])/u.exec(selected)?.[1];
   return value === "0" ? 0 : 1;
@@ -1354,16 +1409,34 @@ function pdfLzwEarlyChange(dictionary: string, filterIndex: number): 0 | 1 {
 function pdfFilterDecodeParameters(
   dictionary: string,
   filterIndex: number,
+  contents: string,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
+  path: string,
 ): string | undefined {
   const lexical = pdfDictionaryLexicalValues(dictionary);
-  const parameters = /\/(?:DecodeParms|DP)\s+(\[[\s\S]*?\]|<<[\s\S]*?>>)/u.exec(
-    lexical,
-  )?.[1];
+  const parameters =
+    /\/(?:DecodeParms|DP)\s+(\[[\s\S]*?\]|<<[\s\S]*?>>|\d+\s+\d+\s+R)/u.exec(
+      lexical,
+    )?.[1];
   if (parameters === undefined) return undefined;
   const selected = parameters.startsWith("[")
-    ? [...parameters.matchAll(/null|<<[\s\S]*?>>/gu)][filterIndex]?.[0]
+    ? [...parameters.matchAll(/null|<<[\s\S]*?>>|\d+\s+\d+\s+R/gu)][
+        filterIndex
+      ]?.[0]
     : parameters;
-  return selected === "null" ? undefined : selected;
+  if (selected === undefined || selected === "null") return undefined;
+  const reference = /^(\d+)\s+(\d+)\s+R$/u.exec(selected);
+  if (reference === null) return selected;
+  const resolved = pdfIndirectValue(
+    contents,
+    reference[1]!,
+    reference[2]!,
+    offsets,
+    path,
+  );
+  return resolved?.startsWith("<<") && resolved.endsWith(">>")
+    ? resolved
+    : undefined;
 }
 
 function oversizedPdfStream(path: string): KnowledgeBaseLimitError {
