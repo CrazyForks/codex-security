@@ -1217,7 +1217,13 @@ describe("runtime directories and plugin Python boundary", () => {
     const digest = (): string => {
       const result = Bun.spawnSync(
         [python!, "-I", "-B", "-c", source, scripts, repository, base, head],
-        { cwd: repository },
+        {
+          cwd: repository,
+          env: {
+            ...process.env,
+            CODEX_SECURITY_GIT: Bun.which("git")!,
+          },
+        },
       );
       expect(result.exitCode).toBe(0);
       return result.stdout.toString().trim();
