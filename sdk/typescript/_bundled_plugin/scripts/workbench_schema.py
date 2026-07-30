@@ -610,6 +610,14 @@ MIGRATIONS = (
         ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';
         """,
     ),
+    (
+        26,
+        "bind registered standard scan inventories",
+        """
+        ALTER TABLE scan_progress
+        ADD COLUMN standard_review_inventory_json TEXT;
+        """,
+    ),
 )
 
 

@@ -97,7 +97,6 @@ from workbench_target import (
     copy_directory_excluding,
     copy_git_worktree_files,
     directory_content_digest,
-    directory_snapshot_file_count,
     directory_snapshot_regular_file_count,
     directory_snapshot_reviewable_file_count,
     git_bytes,
@@ -603,7 +602,8 @@ def workbench_completion_binding(
     }
     progress_row = connection.execute(
         """
-        SELECT scope_file_count, review_items_total, review_items_completed
+        SELECT scope_file_count, review_items_total, review_items_completed,
+            standard_review_inventory_json
         FROM scan_progress
         WHERE scan_id = ?
         """,
@@ -612,16 +612,19 @@ def workbench_completion_binding(
     if progress_row is None:
         raise SystemExit("Codex Security scan is missing authoritative scope progress.")
     scope_file_count = progress_row["scope_file_count"]
-    scope_paths = requested_scan_paths(scan)
+    standard_review_inventory = None
+    if scan["mode"] == "standard":
+        captured_inventory = progress_row["standard_review_inventory_json"]
+        if captured_inventory is None:
+            raise SystemExit("Standard scan is missing its authoritative registered inventory.")
+        standard_review_inventory = json.loads(captured_inventory)
+        if not isinstance(standard_review_inventory, list) or any(
+            not isinstance(path, str) for path in standard_review_inventory
+        ):
+            raise SystemExit("Standard scan has an invalid authoritative registered inventory.")
     standard_review_file_count = (
-        directory_snapshot_file_count(
-            Path(scan["target_path"]),
-            include_symlinks=False,
-            count_scopes=tuple(Path(scan["target_path"]) / path for path in scope_paths)
-            if scope_paths != ["."]
-            else None,
-        )
-        if scan["mode"] == "standard"
+        len(standard_review_inventory)
+        if standard_review_inventory is not None
         else scope_file_count
     )
 
@@ -636,6 +639,11 @@ def workbench_completion_binding(
         "coverageMode": expected_coverage_mode(scan),
         "scopeFileCount": scope_file_count,
         "standardReviewFileCount": standard_review_file_count,
+        **(
+            {"standardReviewPaths": standard_review_inventory}
+            if standard_review_inventory is not None
+            else {}
+        ),
         "reviewItemsTotal": progress_row["review_items_total"],
         "reviewItemsCompleted": progress_row["review_items_completed"],
         **(
@@ -1712,6 +1720,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             timestamp=timestamp,
             handoff_status="delivered",
             scan_dir=scan_dir,
+            standard_review_scopes=tuple(paths) if paths else None,
         )
         connection.execute(
             "UPDATE scans SET recipe_json = ?, parent_scan_id = ? WHERE id = ?",

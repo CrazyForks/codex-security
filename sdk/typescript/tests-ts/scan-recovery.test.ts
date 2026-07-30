@@ -122,6 +122,7 @@ async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
   emptyScope = false,
   symlinkScope = false,
+  configure?: (repository: string) => Promise<void>,
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -176,6 +177,8 @@ async function startDraftScan(
       expect(initialized.status, initialized.stderr).toBe(0);
     }
   }
+
+  await configure?.(target);
 
   const fixture: ScanFixture = {
     python: python!,
@@ -242,6 +245,40 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
     fixture.scanId,
   ]);
   return result["scan"] as unknown as ScanSummary;
+}
+
+async function prepareStandardNoFindingReview(
+  fixture: ScanFixture,
+  inventory: string[],
+): Promise<void> {
+  const findingsPath = join(fixture.scanDir, "findings.json");
+  const coveragePath = join(fixture.scanDir, "coverage.json");
+  const discovery = join(fixture.scanDir, "artifacts", "02_discovery");
+  await mkdir(discovery, { recursive: true });
+  const findings = await readJson<FindingsDocument>(findingsPath);
+  const coverage = await readJson<CoverageDocument>(coveragePath);
+  findings.findings = [];
+  const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+  surface.disposition = "no_issue_found";
+  surface.receiptRefs = [];
+  await Promise.all([
+    writeJson(findingsPath, findings),
+    writeJson(coveragePath, coverage),
+    writeFile(
+      join(discovery, "in_scope_files.txt"),
+      `${inventory.join("\n")}\n`,
+    ),
+    writeFile(join(discovery, "candidate_ledger.jsonl"), ""),
+    workbench(fixture, [
+      "update-progress",
+      "--scan-id",
+      fixture.scanId,
+      "--review-items-total",
+      String(inventory.length),
+      "--review-items-completed",
+      String(inventory.length),
+    ]),
+  ]);
 }
 
 describe("malformed scan artifact recovery", () => {
@@ -408,6 +445,83 @@ describe("malformed scan artifact recovery", () => {
     await expect(completeScan(fixture)).rejects.toThrow(
       "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
     );
+  });
+
+  test("rejects a same-sized standard inventory that replaces registered files", async () => {
+    const fixture = await startDraftScan();
+    await prepareStandardNoFindingReview(fixture, ["src/invented.py"]);
+
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
+  });
+
+  test("binds standard review progress to the original registered snapshot", async () => {
+    const fixture = await startDraftScan(
+      "directory",
+      false,
+      false,
+      async (repository) => {
+        await writeFile(
+          join(repository, "src", "unreviewed.py"),
+          "# unreviewed\n",
+        );
+      },
+    );
+    await rm(join(fixture.repository, "src", "unreviewed.py"));
+    await prepareStandardNoFindingReview(fixture, ["src/extract.py"]);
+
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
+  });
+
+  test("applies ripgrep ignore rules to the registered standard inventory", async () => {
+    const fixture = await startDraftScan(
+      "clean",
+      false,
+      false,
+      async (repository) => {
+        await mkdir(join(repository, "dist"));
+        await writeFile(join(repository, ".gitignore"), "dist/\n");
+        await writeFile(
+          join(repository, "dist", "kept.js"),
+          "ignored but tracked\n",
+        );
+        for (const args of [
+          [
+            "-C",
+            repository,
+            "add",
+            "--force",
+            "--",
+            ".gitignore",
+            "dist/kept.js",
+          ],
+          [
+            "-C",
+            repository,
+            "-c",
+            "user.name=Codex Security",
+            "-c",
+            "user.email=codex-security@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "add ignored tracked file",
+          ],
+        ]) {
+          const result = spawnSync("git", args, { encoding: "utf8" });
+          expect(result.status, result.stderr).toBe(0);
+        }
+      },
+    );
+    await prepareStandardNoFindingReview(fixture, [
+      ".gitignore",
+      "src/extract.py",
+    ]);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
   });
 
   test("preserves authoritative standard coverage for all-not-applicable surfaces", async () => {

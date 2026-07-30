@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
+import stat
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -245,8 +248,16 @@ def insert_running_scan(
     timestamp: str,
     handoff_status: str = "pending",
     scan_dir: Path | None = None,
+    standard_review_scopes: tuple[str, ...] | None = None,
 ) -> str:
     revision = target_identity[0]
+    standard_review_inventory = None
+    if workspace["default_mode"] == "standard":
+        standard_review_inventory = registered_standard_review_inventory(
+            target, standard_review_scopes or (scope,)
+        )
+        if scan_target_identity(target, diff_target) != target_identity:
+            raise SystemExit("The selected scan target changed while its scope inventory was captured.")
     native_scan = scan_dir is None
     if scan_dir is None:
         scan_dir = Path(
@@ -292,10 +303,17 @@ def insert_running_scan(
         """
         INSERT INTO scan_progress (
             scan_id, scope_file_count, review_items_total, review_items_completed,
-            reportable_findings_count, updated_at
-        ) VALUES (?, ?, 0, 0, 0, ?)
+            reportable_findings_count, updated_at, standard_review_inventory_json
+        ) VALUES (?, ?, 0, 0, 0, ?, ?)
         """,
-        (scan_id, scope_file_count, timestamp),
+        (
+            scan_id,
+            scope_file_count,
+            timestamp,
+            json.dumps(standard_review_inventory, ensure_ascii=True, separators=(",", ":"))
+            if standard_review_inventory is not None
+            else None,
+        ),
     )
     connection.execute(
         "UPDATE workspaces SET active_scan_id = ?, updated_at = ? WHERE id = ?",
@@ -311,6 +329,51 @@ def insert_running_scan(
                 (json.dumps(false_positives, allow_nan=False) + "\n").encode(),
             )
     return scan_id
+
+
+def registered_standard_review_inventory(target: Path, scopes: tuple[str, ...]) -> tuple[str, ...]:
+    executable = shutil.which("rg")
+    if executable is None:
+        raise SystemExit("Standard scans require ripgrep to capture their registered file inventory.")
+    resolved_executable = Path(executable).resolve()
+    if target == resolved_executable or target in resolved_executable.parents:
+        raise SystemExit("Standard scan inventory cannot use a repository-controlled executable.")
+    try:
+        listed = subprocess.run(
+            [
+                str(resolved_executable),
+                "--files",
+                "--hidden",
+                "--null",
+                "--glob",
+                "!.git/**",
+                "--",
+                *scopes,
+            ],
+            cwd=target,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise SystemExit("Could not capture the registered standard scan inventory.") from error
+    if listed.returncode not in {0, 1}:
+        raise SystemExit("Could not capture the registered standard scan inventory.")
+    paths: set[str] = set()
+    for raw in (path for path in listed.stdout.split(b"\0") if path):
+        try:
+            decoded = raw.decode("utf-8")
+            relative = PurePosixPath(decoded)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("unsafe repository-relative path")
+            path = target / relative.as_posix()
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            path.resolve(strict=True).relative_to(target)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise SystemExit("Could not capture the registered standard scan inventory.") from error
+        paths.add(relative.as_posix())
+    return tuple(sorted(paths))
 
 
 def main() -> None:

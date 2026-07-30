@@ -1572,12 +1572,16 @@ def _has_verified_standard_scan_review(
             return False
 
         scope_count = authoritative_review_progress.get("standardReviewFileCount")
+        authoritative_paths = authoritative_review_progress.get("standardReviewPaths")
         review_total = authoritative_review_progress.get("reviewItemsTotal")
         review_completed = authoritative_review_progress.get("reviewItemsCompleted")
         if (
             not isinstance(scope_count, int)
             or isinstance(scope_count, bool)
             or scope_count != len(scope_paths)
+            or not isinstance(authoritative_paths, list)
+            or any(not isinstance(path, str) for path in authoritative_paths)
+            or set(authoritative_paths) != scope_paths
             or review_total != scope_count
             or review_completed != scope_count
         ):
