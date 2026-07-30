@@ -397,40 +397,30 @@ function boundCompressedPdfStreams(
   const objectOffsets = [...(indirectObjects?.entries() ?? [])]
     .filter((entry): entry is [string, number] => typeof entry[1] === "number")
     .sort((left, right) => left[1] - right[1]);
+  const pageContentReferences = pdfPageContentReferences(
+    contents,
+    indirectObjects,
+    path,
+    signal,
+  );
   let inflatedBytes = 0;
   let decodingWorkBytes = 0;
   const dictionaryWork = { remaining: MAX_PDF_DICTIONARY_WORK_BYTES };
   for (const marker of contents.matchAll(streams)) {
     signal?.throwIfAborted();
+    const object = pdfObjectBeforeOffset(objectOffsets, marker.index);
     const dictionary = pdfStreamDictionary(
       contents,
       marker.index + 2,
       dictionaryWork,
       path,
-      indirectObjects,
+      object?.[1],
     );
     if (dictionary === null) continue;
-    const lexicalDictionary = pdfDictionaryLexicalValues(dictionary);
+    const lexicalDictionary = pdfDictionaryLexicalValues(dictionary, false);
     if (pdfTopLevelDictionaryName(lexicalDictionary, "Subtype") === "Image") {
-      let low = 0;
-      let high = objectOffsets.length;
-      while (low < high) {
-        const middle = Math.floor((low + high) / 2);
-        if (objectOffsets[middle]![1] < marker.index) low = middle + 1;
-        else high = middle;
-      }
-      const entry = objectOffsets[low - 1];
-      const [number, generation] = entry?.[0].split(":") ?? [];
       const pageContent =
-        number !== undefined &&
-        generation !== undefined &&
-        pdfContentsReferencesObject(
-          contents,
-          number,
-          generation,
-          indirectObjects,
-          path,
-        );
+        object !== undefined && pageContentReferences.has(object[0]);
       if (!pageContent) continue;
     }
     const filters = pdfStreamFilters(
@@ -552,14 +542,12 @@ function pdfStreamDictionary(
   end: number,
   work: { remaining: number },
   path: string,
-  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
+  objectOffset?: number,
 ): string | null {
   let depth = 1;
   let minimum = Math.max(0, end - MAX_PDF_DICTIONARY_SCAN_BYTES);
-  for (const offset of offsets?.values() ?? []) {
-    if (typeof offset === "number" && offset < end && offset > minimum) {
-      minimum = offset;
-    }
+  if (objectOffset !== undefined && objectOffset > minimum) {
+    minimum = objectOffset;
   }
   const lexical = pdfDictionaryLexicalValues(
     contents.slice(minimum, end),
@@ -589,6 +577,20 @@ function pdfStreamDictionary(
     );
   }
   return null;
+}
+
+function pdfObjectBeforeOffset(
+  offsets: ReadonlyArray<readonly [string, number]>,
+  selected: number,
+): readonly [string, number] | undefined {
+  let low = 0;
+  let high = offsets.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (offsets[middle]![1] < selected) low = middle + 1;
+    else high = middle;
+  }
+  return offsets[low - 1];
 }
 
 function pdfIndirectValue(
@@ -670,11 +672,16 @@ function pdfIndirectValue(
       ) {
         return undefined;
       }
+      const raw = stream
+        .subarray(first + start, first + next)
+        .toString("latin1")
+        .trim();
+      const primitive = /^(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)$/u.exec(raw)?.[1];
       parsed.push({
         number,
-        value: /^\s*(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)\s*$/u.exec(
-          stream.subarray(first + start, first + next).toString("latin1"),
-        )?.[1],
+        value:
+          primitive ??
+          (raw.startsWith("<<") && raw.endsWith(">>") ? raw : undefined),
       });
     }
     objects = parsed;
@@ -1118,53 +1125,82 @@ function pdfTopLevelDictionaryName(
     if (
       dictionaryDepth !== 1 ||
       arrayDepth !== 0 ||
-      !dictionary.startsWith(`/${key}`, index)
+      dictionary[index] !== "/"
     ) {
       continue;
     }
-    const value = new RegExp(
-      `^/${key}\\s*/([^\\s<>[\\]()%/]+)(?=[\\s/>])`,
-      "u",
-    ).exec(dictionary.slice(index));
-    if (value?.[1] !== undefined) return value[1];
+    const value = /^\/([^\s<>[\]()%/]+)\s*\/([^\s<>[\]()%/]+)(?=[\s/>])/u.exec(
+      dictionary.slice(index),
+    );
+    if (value?.[1] !== undefined && pdfDecodedName(value[1]) === key) {
+      return pdfDecodedName(value[2]!);
+    }
   }
   return undefined;
 }
 
-function pdfContentsReferencesObject(
+function pdfDecodedName(value: string): string {
+  return value.replace(/#([0-9a-f]{2})/giu, (_match, encoded: string) =>
+    String.fromCharCode(Number.parseInt(encoded, 16)),
+  );
+}
+
+function pdfPageContentReferences(
   contents: string,
-  number: string,
-  generation: string,
   offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
   path: string,
-): boolean {
+  signal?: AbortSignal,
+): ReadonlySet<string> {
   const references = /\/(?:Contents)\s+(\[[^\]]*\]|\d+\s+\d+\s+R)/gu;
+  const pending: string[] = [];
+  let remaining = MAX_PDF_XREF_OBJECTS;
   for (const entry of contents.matchAll(references)) {
-    const pending = [entry[1]!];
-    const visited = new Set<string>();
-    while (pending.length > 0) {
-      const current = pdfDictionaryLexicalValues(pending.pop()!);
-      for (const reference of current.matchAll(/(\d+)\s+(\d+)\s+R/gu)) {
-        const key = `${reference[1]}:${reference[2]}`;
-        if (reference[1] === number && reference[2] === generation) {
-          return true;
-        }
-        if (visited.has(key) || visited.size >= MAX_PDF_XREF_OBJECTS) continue;
-        visited.add(key);
-        const resolved = pdfIndirectValue(
-          contents,
-          reference[1]!,
-          reference[2]!,
-          offsets,
-          path,
-        );
-        if (resolved?.trimStart().startsWith("[") === true) {
-          pending.push(resolved);
-        }
+    signal?.throwIfAborted();
+    if (--remaining < 0) throw oversizedPdfStream(path);
+    pending.push(entry[1]!);
+  }
+  for (const [key, offset] of offsets ?? []) {
+    if (offset === null || typeof offset === "number") continue;
+    signal?.throwIfAborted();
+    if (--remaining < 0) throw oversizedPdfStream(path);
+    const [object, generation] = key.split(":");
+    const dictionary = pdfIndirectValue(
+      contents,
+      object!,
+      generation!,
+      offsets,
+      path,
+    );
+    if (dictionary === undefined || !dictionary.startsWith("<<")) continue;
+    const lexical = pdfDictionaryLexicalValues(dictionary, false);
+    if (pdfTopLevelDictionaryName(lexical, "Type") !== "Page") continue;
+    const contentsValue = /\/Contents\s+(\[[^\]]*\]|\d+\s+\d+\s+R)/u.exec(
+      lexical,
+    )?.[1];
+    if (contentsValue !== undefined) pending.push(contentsValue);
+  }
+  const selected = new Set<string>();
+  while (pending.length > 0) {
+    signal?.throwIfAborted();
+    if (--remaining < 0) throw oversizedPdfStream(path);
+    const current = pdfDictionaryLexicalValues(pending.pop()!);
+    for (const reference of current.matchAll(/(\d+)\s+(\d+)\s+R/gu)) {
+      const key = `${reference[1]}:${reference[2]}`;
+      if (selected.has(key)) continue;
+      selected.add(key);
+      const resolved = pdfIndirectValue(
+        contents,
+        reference[1]!,
+        reference[2]!,
+        offsets,
+        path,
+      );
+      if (resolved?.trimStart().startsWith("[") === true) {
+        pending.push(resolved);
       }
     }
   }
-  return false;
+  return selected;
 }
 
 function pdfStreamFilters(
@@ -1214,11 +1250,7 @@ function pdfStreamFilters(
       }
       name = reference[1];
     }
-    filters.push(
-      name.replace(/#([0-9a-f]{2})/giu, (_match, encoded: string) =>
-        String.fromCharCode(Number.parseInt(encoded, 16)),
-      ),
-    );
+    filters.push(pdfDecodedName(name));
   }
   return filters;
 }

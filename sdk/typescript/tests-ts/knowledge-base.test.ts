@@ -148,7 +148,7 @@ function pdf(
     ...(options.formBytes === undefined
       ? []
       : [
-          `<< /Type /XObject /Subtype /Form /Foo << /Subtype /Image >> /BBox [0 0 1 1] /Length ${deflateSync(options.formBytes).byteLength} /Filter /FlateDecode >>\nstream\n${deflateSync(options.formBytes).toString("latin1")}\nendstream`,
+          `<< /Type /XObject /Foo /#3E#3E /Bar << /Subtype /Image >> /Subtype /Form /BBox [0 0 1 1] /Length ${deflateSync(options.formBytes).byteLength} /Filter /FlateDecode >>\nstream\n${deflateSync(options.formBytes).toString("latin1")}\nendstream`,
         ]),
   ];
   let output = `%PDF-1.4\n${options.headerComment === undefined ? "" : `% ${options.headerComment}\n`}`;
@@ -170,7 +170,11 @@ function xrefStreamPdf(
   document: Uint8Array,
   compressIndirectObjects = false,
   objectHeaderPadding = 0,
-  options: { objectHeaderComments?: boolean; tiffPredictor?: boolean } = {},
+  options: {
+    objectHeaderComments?: boolean;
+    tiffPredictor?: boolean;
+    compressPageObjects?: boolean;
+  } = {},
 ): Buffer {
   const original = Buffer.from(document).toString("latin1");
   const table = original.lastIndexOf("\nxref\n");
@@ -184,6 +188,13 @@ function xrefStreamPdf(
       ),
     ),
   ];
+  if (options.compressPageObjects) {
+    for (const page of body.matchAll(
+      /(?:^|\n)(\d+) 0 obj\n<< \/Type \/Page(?=[\s/>])/gu,
+    )) {
+      references.push(Number(page[1]));
+    }
+  }
   let maximumObject = Math.max(
     ...[...body.matchAll(/^(\d+)\s+0\s+obj$/gmu)].map((match) =>
       Number(match[1]),
@@ -909,6 +920,56 @@ describe("scan knowledge bases", () => {
       pdf("Small document text", 1, true, "/Fm1 Do ", {
         formBytes: Buffer.alloc(9 * 1024 * 1024, 32),
       }),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+  });
+
+  test("bounds cumulative indirect PDF contents references", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "contents-reference-budget.pdf");
+    await writeFile(
+      document,
+      pdf("Bound repeated contents references", 1, true, "", {
+        headerComment: "/Contents 5 0 R ".repeat(70_000),
+      }),
+    );
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
+  });
+
+  test("indexes cross-reference ownership across many compressed streams", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "many-streams.pdf");
+    await writeFile(
+      document,
+      pdf("Indexed stream ownership", 1, true, "", { extraStreams: 1_024 }),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Indexed stream ownership",
+    ]);
+  });
+
+  test("bounds image-tagged content streams referenced by compressed page objects", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "compressed-page-content.pdf");
+    await writeFile(
+      document,
+      xrefStreamPdf(
+        pdf("reviewable", 1, true, " ".repeat(9 * 1024 * 1024), {
+          dictionaryPrefix: "/Subtype /Image ",
+        }),
+        true,
+        0,
+        { compressPageObjects: true },
+      ),
     );
 
     await expect(prepareKnowledgeBase([document])).rejects.toThrow(
