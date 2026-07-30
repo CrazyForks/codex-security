@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -417,26 +418,38 @@ describe("malformed scan artifact recovery", () => {
     expect(preparedManifest.scan.target.snapshotDigest).toBe(
       contract.diffTarget.contentDigest,
     );
-    expect((await completeScan(fixture)).progress.status).toBe("complete");
 
-    const downgrade = spawnSync(
-      fixture.python,
-      [
-        "-I",
-        "-B",
-        "-c",
+    const downgrade = () => {
+      const result = spawnSync(
+        fixture.python,
         [
-          "import sqlite3, sys",
-          "with sqlite3.connect(sys.argv[1]) as connection:",
-          "    connection.execute('UPDATE scans SET diff_content_digest = NULL WHERE id = ?', (sys.argv[2],))",
-          "    connection.execute('UPDATE workspaces SET diff_content_digest = NULL WHERE id = (SELECT workspace_id FROM scans WHERE id = ?)', (sys.argv[2],))",
-        ].join("\n"),
-        join(fixture.stateDir, "workbench.sqlite3"),
-        fixture.scanId,
-      ],
-      { encoding: "utf8" },
-    );
-    expect(downgrade.status, downgrade.stderr).toBe(0);
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "with sqlite3.connect(sys.argv[1]) as connection:",
+            "    connection.execute('UPDATE scans SET diff_content_digest = NULL WHERE id = ?', (sys.argv[2],))",
+            "    connection.execute('UPDATE workspaces SET diff_content_digest = NULL WHERE id = (SELECT workspace_id FROM scans WHERE id = ?)', (sys.argv[2],))",
+          ].join("\n"),
+          join(fixture.stateDir, "workbench.sqlite3"),
+          fixture.scanId,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    };
+    downgrade();
+    const gitDirectory = join(repository, ".git");
+    const unavailableGitDirectory = join(root, "temporarily-unavailable-git");
+    await rename(gitDirectory, unavailableGitDirectory);
+    try {
+      expect((await completeScan(fixture)).progress.status).toBe("complete");
+    } finally {
+      await rename(unavailableGitDirectory, gitDirectory);
+    }
+
+    downgrade();
     expect((await completeScan(fixture)).progress.status).toBe("complete");
   });
 

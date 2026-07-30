@@ -78,6 +78,20 @@ EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 def trusted_git_executable(protected_root: Path | None = None) -> str | None:
     executable = os.environ.get("CODEX_SECURITY_GIT")
     if not executable:
+        names = ("git.exe", "git.com") if os.name == "nt" else ("git",)
+        root = protected_root.resolve() if protected_root is not None else None
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            for name in names:
+                try:
+                    candidate = (Path(entry) / name).resolve(strict=True)
+                except OSError:
+                    continue
+                if root is not None and (candidate == root or root in candidate.parents):
+                    continue
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
         return None
     candidate = Path(executable)
     if not candidate.is_absolute():

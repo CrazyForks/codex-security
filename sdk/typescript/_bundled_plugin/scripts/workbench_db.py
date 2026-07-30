@@ -1535,16 +1535,30 @@ def backfill_legacy_immutable_diff_digest(
         or scan["diff_content_digest"] is not None
     ):
         return scan
-    if scan["status"] == "complete":
-        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    manifest_path = scan_dir / ARTIFACTS["manifest"]
+    manifest = read_json_object(manifest_path) if manifest_path.is_file() else None
+    manifest_scan = manifest.get("scan") if isinstance(manifest, dict) else None
+    sealed = isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None
+    if scan["status"] == "complete" or sealed:
         require_recorded_manifest_digest(scan, scan_dir)
-        manifest = read_json_object(scan_dir / ARTIFACTS["manifest"])
-        target = manifest.get("scan", {}).get("target", {})
+        target = manifest_scan.get("target", {}) if isinstance(manifest_scan, dict) else {}
         digest = target.get("snapshotDigest") if isinstance(target, dict) else None
         if not isinstance(digest, str) or re.fullmatch(
             r"codex-security-snapshot/v1:sha256:[a-f0-9]{64}", digest
         ) is None:
-            raise SystemExit("Completed immutable diff scan is missing its sealed snapshot digest.")
+            raise SystemExit("Sealed immutable diff scan is missing its snapshot digest.")
+        completed_at = manifest_scan.get("completedAt")
+        if not isinstance(completed_at, str):
+            raise SystemExit("Sealed immutable diff scan is missing its completion timestamp.")
+        try:
+            _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=expected_coverage_mode(scan),
+                completion_binding=workbench_completion_binding(scan, completed_at),
+            )
+        except ContractError as exc:
+            raise SystemExit(str(exc)) from exc
     else:
         target = require_scan_target_identity(scan)
         digest = git_diff_content_digest(

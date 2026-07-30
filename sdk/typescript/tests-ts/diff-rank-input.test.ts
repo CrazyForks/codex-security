@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -197,6 +197,99 @@ describe("diff rank input", () => {
     expect(JSON.stringify(rows)).not.toContain("different-checkout");
   });
 
+  test("resolves trusted system Git for direct plugin launches without an SDK override", async () => {
+    const fixture = await createRepository();
+    const trustedGit = Bun.which("git");
+    expect(trustedGit).not.toBeNull();
+    const shimDirectory = join(fixture.repository, "node_modules", ".bin");
+    const marker = join(fixture.root, "repository-git-ran");
+    await mkdir(shimDirectory, { recursive: true });
+    await writeFile(
+      join(shimDirectory, process.platform === "win32" ? "git.cmd" : "git"),
+      process.platform === "win32"
+        ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+        : `#!/bin/sh\nprintf hijacked > '${marker}'\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const environment = { ...process.env };
+    delete environment["CODEX_SECURITY_GIT"];
+    environment["PATH"] = [shimDirectory, dirname(trustedGit!)].join(delimiter);
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "from pathlib import Path",
+          "import sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_constants import trusted_git_executable",
+          "print(trusted_git_executable(Path(sys.argv[2])))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+      ],
+      { encoding: "utf8", env: environment },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(await realpath(trustedGit!));
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "treats metacharacters in immutable Git paths as literal names",
+    async () => {
+      const fixture = await createRepository();
+      const path = "src/[security]*.ts";
+      await writeRepositoryFile(
+        fixture.repository,
+        path,
+        "export const literal = 'immutable';\n",
+      );
+      git(fixture.repository, "add", path);
+      git(fixture.repository, "commit", "-qm", "add literal Git path");
+
+      expect(await runDiffRankInput(fixture, "revisions")).toContainEqual({
+        path,
+        area: "diff",
+        preview: "export const literal = 'immutable';",
+      });
+    },
+  );
+
+  test("includes ignored Git submodule changes and their recorded commits", async () => {
+    const fixture = await createRepository();
+    const revision = fixture.base;
+    await writeRepositoryFile(
+      fixture.repository,
+      ".gitmodules",
+      '[submodule "security"]\n\tpath = dependencies/security\n\turl = https://example.invalid/security.git\n',
+    );
+    git(fixture.repository, "config", "diff.ignoreSubmodules", "all");
+    git(fixture.repository, "add", ".gitmodules");
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${revision},dependencies/security`,
+    );
+    git(fixture.repository, "commit", "-qm", "add pinned security dependency");
+
+    const rows = await runDiffRankInput(fixture, "revisions");
+
+    expect(rows).toContainEqual({
+      path: "dependencies/security",
+      area: "diff",
+      preview: `Git submodule pinned to commit ${revision}`,
+    });
+    expect(rows.map((row) => row.path)).toContain(".gitmodules");
+  });
+
   test("inventories committed security-sensitive workflows, containers, and agent instructions", async () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
@@ -353,6 +446,24 @@ describe("diff rank input", () => {
       ].sort(),
     );
     expect(rows.every((row) => row.preview.length > 0)).toBe(true);
+  });
+
+  test("reads staged-only additions from their immutable Git index blobs", async () => {
+    const fixture = await createRepository();
+    const path = "src/staged-only.ts";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "export const staged = 'review this exact blob';\n",
+    );
+    git(fixture.repository, "add", path);
+    await rm(join(fixture.repository, path));
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path,
+      area: "diff",
+      preview: "export const staged = 'review this exact blob';",
+    });
   });
 
   test.skipIf(process.platform === "win32")(
