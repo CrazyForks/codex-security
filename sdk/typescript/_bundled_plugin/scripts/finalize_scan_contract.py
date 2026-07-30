@@ -42,6 +42,7 @@ TARGET_REQUIRED_COORDINATE_FIELDS = {
     "git_diff": {"snapshotDigest"},
     "directory_snapshot": {"snapshotDigest"},
 }
+AUTHORITATIVE_EMPTY_SCOPE_INVENTORY = "artifacts/02_discovery/scope_inventory.jsonl"
 DISPOSITIONS = {"reported", "no_issue_found", "rejected", "not_applicable", "needs_follow_up"}
 SARIF_LEVELS = {
     "critical": "error",
@@ -892,6 +893,7 @@ def _recover_unsealed_findings(
 
 def _recover_unsealed_coverage(
     coverage: dict[str, Any],
+    findings: dict[str, Any],
     schema_dir: Path,
     scan_dir: Path,
     warnings: list[str],
@@ -999,6 +1001,26 @@ def _recover_unsealed_coverage(
             {"id": f"discarded-finding-{index}", "reason": warning}
             for index, warning in enumerate(discarded_findings, 1)
         )
+        partial = True
+
+    has_findings = bool(_require_list(findings, "findings", "findings"))
+    has_reported_surface = any(
+        surface.get("disposition") == "reported" for surface in coverage["surfaces"]
+    )
+    if has_findings and not has_reported_surface:
+        coverage["surfaces"].append(
+            {
+                "id": "surface_recovered_reported_findings",
+                "label": "Recovered reportable findings",
+                "disposition": "reported",
+                "receiptRefs": [],
+            }
+        )
+        partial = True
+    elif not has_findings and has_reported_surface:
+        for surface in coverage["surfaces"]:
+            if surface.get("disposition") == "reported":
+                surface["disposition"] = "needs_follow_up"
         partial = True
 
     if coverage["deferred"] and completeness != "partial":
@@ -1298,6 +1320,7 @@ def _validate_coverage(
     findings: dict[str, Any] | None = None,
     *,
     enforce_complete_review: bool = False,
+    authoritative_empty_scope_inventory: str | None = None,
 ) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
@@ -1313,14 +1336,23 @@ def _validate_coverage(
         raise ContractError("coverage.excludePaths: must match manifest scope")
     surfaces = _require_list(coverage, "surfaces", "coverage")
     if enforce_complete_review and completeness == "complete" and not surfaces:
-        inventory = "artifacts/02_discovery/scope_inventory.jsonl"
         try:
-            descriptor = open_scan_local_file_descriptor(scan_dir, inventory, "scope inventory")
+            if authoritative_empty_scope_inventory != AUTHORITATIVE_EMPTY_SCOPE_INVENTORY:
+                raise ContractError("scope inventory is not host-owned")
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, authoritative_empty_scope_inventory, "scope inventory"
+            )
             try:
                 if os.fstat(descriptor).st_size != 0:
                     raise ContractError("scope inventory is not empty")
             finally:
                 os.close(descriptor)
+            if scan.get("artifacts") is not None and not any(
+                isinstance(artifact, dict)
+                and artifact.get("path") == authoritative_empty_scope_inventory
+                for artifact in scan["artifacts"]
+            ):
+                raise ContractError("scope inventory is missing from sealed artifacts")
         except (ContractError, OSError) as error:
             raise ContractError(
                 "coverage.surfaces: complete coverage requires a reviewed surface "
@@ -1361,7 +1393,7 @@ def _validate_coverage(
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
-    if enforce_complete_review and completeness == "complete" and findings is not None:
+    if enforce_complete_review and findings is not None:
         has_findings = bool(_require_list(findings, "findings", "findings"))
         if has_reported_surface != has_findings:
             raise ContractError(
@@ -2317,6 +2349,7 @@ def _prepare_scan_finalization(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
+    trusted_sealed_scan: bool = False,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
 
@@ -2325,6 +2358,12 @@ def _prepare_scan_finalization(
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     scan = _require_dict(manifest, "scan", "manifest")
     was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    enforce_fresh_scan = not was_sealed or not trusted_sealed_scan
+    authoritative_empty_scope_inventory = (
+        completion_binding.get("emptyScopeInventory")
+        if completion_binding is not None
+        else None
+    )
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
@@ -2375,7 +2414,7 @@ def _prepare_scan_finalization(
             manifest, findings, schema_dir, scan_dir, completion_warnings
         )
         _recover_unsealed_coverage(
-            coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
+            coverage, findings, schema_dir, scan_dir, completion_warnings, discarded_findings
         )
         _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
     else:
@@ -2386,7 +2425,8 @@ def _prepare_scan_finalization(
         coverage,
         scan_dir,
         findings,
-        enforce_complete_review=not was_sealed,
+        enforce_complete_review=enforce_fresh_scan,
+        authoritative_empty_scope_inventory=authoritative_empty_scope_inventory,
     )
     _validate_canonical_schemas_before_projection(manifest, findings, coverage, schema_dir)
     _require_derived_writeup_files(scan_dir, findings)
@@ -2418,7 +2458,18 @@ def _prepare_scan_finalization(
         _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
         *[
             _artifact_record(scan_dir, ref, "application/octet-stream")
-            for ref in _coverage_receipt_refs(coverage)
+            for ref in sorted(
+                {
+                    *_coverage_receipt_refs(coverage),
+                    *(
+                        [authoritative_empty_scope_inventory]
+                        if coverage.get("completeness") == "complete"
+                        and not coverage.get("surfaces")
+                        and authoritative_empty_scope_inventory is not None
+                        else []
+                    ),
+                }
+            )
         ],
     ]
     _validate_sealed_coverage_receipts(scan, coverage)
@@ -2477,12 +2528,14 @@ def finalize_scan(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
+    trusted_sealed_scan: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     prepared = _prepare_scan_finalization(
         scan_dir,
         schema_dir,
         expected_coverage_mode=expected_coverage_mode,
         completion_binding=completion_binding,
+        trusted_sealed_scan=trusted_sealed_scan,
     )
     return _write_prepared_scan_finalization(prepared, source_root)
 

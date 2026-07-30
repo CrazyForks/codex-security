@@ -161,6 +161,7 @@ describe("canonical scan contract", () => {
       await writeJson(findingsPath, findings);
       await writeJson(coveragePath, coverage);
       await reseal(scanDir);
+      await writeFile(join(scanDir, "report.md"), "# Existing sealed scan\n");
 
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
@@ -169,7 +170,9 @@ describe("canonical scan contract", () => {
         findings: { findings: [] },
       });
       const projection = runPythonContractTool(scanDir);
-      expect(projection.status, projection.stderr).toBe(0);
+      expect(projection.status, projection.stderr).toBe(
+        surfaces.length === 0 ? 2 : 0,
+      );
       const validation = runPythonContractTool(
         scanDir,
         "validate_scan_contract.py",
@@ -178,7 +181,7 @@ describe("canonical scan contract", () => {
     }
   });
 
-  test("finalizes a complete scan with an authoritatively empty scope", async () => {
+  test("rejects a producer-created empty scope inventory without authoritative state", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");
     const coveragePath = join(scanDir, "coverage.json");
@@ -207,13 +210,32 @@ describe("canonical scan contract", () => {
 
     const result = runPythonContractTool(scanDir);
 
-    expect(result.status, result.stderr).toBe(0);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toMatchObject({
-      coverage: { completeness: "complete", surfaces: [] },
-      findings: { findings: [] },
-    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
+  });
+
+  test("rejects producer-authored sealed coverage without trusted scan state", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const findings = await readJson(findingsPath);
+    const coverage = await readJson(coveragePath);
+    findings["findings"] = [];
+    coverage["surfaces"] = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+    ]);
+    await reseal(scanDir);
+
+    const result = runPythonContractTool(scanDir);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
   });
 
   test("preserves sealed complete v1 scans without reviewed surfaces", async () => {
@@ -300,7 +322,10 @@ describe("canonical scan contract", () => {
 
       const result = runPythonContractTool(scanDir);
       expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(
+        "reported surfaces must match completed findings",
+      );
     }
   });
 
@@ -382,38 +407,41 @@ describe("canonical scan contract", () => {
     expect(result.status).toBe(0);
   });
 
-  test("rejects reported coverage inconsistent with completed findings", async () => {
-    for (const reportedWithoutFindings of [true, false]) {
-      const scanDir = await copyExample();
-      const findingsPath = join(scanDir, "findings.json");
-      const coveragePath = join(scanDir, "coverage.json");
-      const findings = await readJson(findingsPath);
-      const coverage = await readJson(coveragePath);
-      if (reportedWithoutFindings) {
-        findings["findings"] = [];
-      } else {
-        coverage["surfaces"][0]["disposition"] = "no_issue_found";
+  test("rejects reported coverage inconsistent with findings at every completeness level", async () => {
+    for (const completeness of ["complete", "partial", "unknown"]) {
+      for (const reportedWithoutFindings of [true, false]) {
+        const scanDir = await copyExample();
+        const findingsPath = join(scanDir, "findings.json");
+        const coveragePath = join(scanDir, "coverage.json");
+        const findings = await readJson(findingsPath);
+        const coverage = await readJson(coveragePath);
+        coverage["completeness"] = completeness;
+        if (reportedWithoutFindings) {
+          findings["findings"] = [];
+        } else {
+          coverage["surfaces"][0]["disposition"] = "no_issue_found";
+        }
+        await writeJson(findingsPath, findings);
+        await writeJson(coveragePath, coverage);
+        await reseal(scanDir);
+
+        await expect(
+          loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+        ).resolves.toMatchObject({ coverage: { completeness } });
+
+        const manifestPath = join(scanDir, "scan-manifest.json");
+        const draftManifest = await readJson(manifestPath);
+        delete draftManifest["scan"]["sealedAt"];
+        delete draftManifest["scan"]["artifacts"];
+        await writeJson(manifestPath, draftManifest);
+
+        const result = runPythonContractTool(scanDir);
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(
+          "coverage.surfaces: reported surfaces must match completed findings",
+        );
       }
-      await writeJson(findingsPath, findings);
-      await writeJson(coveragePath, coverage);
-      await reseal(scanDir);
-
-      await expect(
-        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).resolves.toMatchObject({ coverage: { completeness: "complete" } });
-
-      const manifestPath = join(scanDir, "scan-manifest.json");
-      const draftManifest = await readJson(manifestPath);
-      delete draftManifest["scan"]["sealedAt"];
-      delete draftManifest["scan"]["artifacts"];
-      await writeJson(manifestPath, draftManifest);
-
-      const result = runPythonContractTool(scanDir);
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(2);
-      expect(result.stderr).toContain(
-        "coverage.surfaces: reported surfaces must match completed findings",
-      );
     }
   });
 

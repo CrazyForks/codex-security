@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cp,
   mkdir,
@@ -116,6 +117,7 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
 
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" = "directory",
+  emptyScope = false,
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -127,7 +129,9 @@ async function startDraftScan(
   const target = join(root, "repository");
   const scanDir = join(root, "scan");
   await mkdir(join(target, "src"), { recursive: true });
-  await writeFile(join(target, "src", "extract.py"), "# fixture\n");
+  if (!emptyScope) {
+    await writeFile(join(target, "src", "extract.py"), "# fixture\n");
+  }
   await mkdir(scanDir, { mode: 0o700 });
 
   if (repositoryKind !== "directory") {
@@ -223,6 +227,91 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
+  test("seals a host-proven empty scope inventory into the completed scan", async () => {
+    const fixture = await startDraftScan("directory", true);
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    coverage.surfaces = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+    ]);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+    const manifest = await readJson<{
+      scan: {
+        artifacts: Array<{ path: string; mediaType: string; sha256: string }>;
+      };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(manifest.scan.artifacts).toContainEqual({
+      path: "artifacts/02_discovery/scope_inventory.jsonl",
+      mediaType: "application/octet-stream",
+      sha256:
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    });
+  });
+
+  test("rejects a self-sealed empty inventory for a nonempty running scan", async () => {
+    const fixture = await startDraftScan();
+    await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const inventoryPath = join(
+      fixture.scanDir,
+      "artifacts",
+      "02_discovery",
+      "scope_inventory.jsonl",
+    );
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    coverage.surfaces = [];
+    await mkdir(join(fixture.scanDir, "artifacts", "02_discovery"), {
+      recursive: true,
+    });
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeFile(inventoryPath, ""),
+    ]);
+
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const manifest = await readJson<{
+      scan: {
+        artifacts: Array<{ path: string; mediaType: string; sha256: string }>;
+      };
+    }>(manifestPath);
+    for (const artifact of manifest.scan.artifacts) {
+      artifact.sha256 = createHash("sha256")
+        .update(await readFile(join(fixture.scanDir, artifact.path)))
+        .digest("hex");
+    }
+    manifest.scan.artifacts.push({
+      path: "artifacts/02_discovery/scope_inventory.jsonl",
+      mediaType: "application/octet-stream",
+      sha256: createHash("sha256").update("").digest("hex"),
+    });
+    await writeJson(manifestPath, manifest);
+
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
+    const running = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((running["scan"] as ScanSummary).progress.status).toBe("running");
+  });
+
   test("returns the authoritative directory snapshot contract at registration", async () => {
     const fixture = await startDraftScan();
     const registration = fixture.registration;
@@ -705,7 +794,12 @@ describe("malformed scan artifact recovery", () => {
     const recovered = await readJson<CoverageDocument>(path);
     expect(recovered).toMatchObject({
       completeness: "partial",
-      surfaces: [],
+      surfaces: [
+        {
+          id: "surface_recovered_reported_findings",
+          disposition: "reported",
+        },
+      ],
       explicitExclusions: [],
       deferred: [],
     });

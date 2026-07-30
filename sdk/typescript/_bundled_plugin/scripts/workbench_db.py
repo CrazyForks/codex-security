@@ -44,6 +44,7 @@ from filesystem_identity import (
     stored_filesystem_identity_matches as stored_filesystem_identity_matches,
 )
 from finalize_scan_contract import (
+    AUTHORITATIVE_EMPTY_SCOPE_INVENTORY,
     PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
@@ -564,7 +565,9 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
-def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[str, Any]:
+def workbench_completion_binding(
+    connection: sqlite3.Connection, scan: sqlite3.Row, completed_at: str
+) -> dict[str, Any]:
     """Return deterministic draft fields owned by the selected workbench scan."""
 
     contract = scan_contract(scan)
@@ -594,6 +597,12 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "includePaths": requested_scan_paths(scan),
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
+    progress_row = connection.execute(
+        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
+    ).fetchone()
+    if progress_row is None:
+        raise SystemExit("Codex Security scan is missing authoritative scope progress.")
+    scope_file_count = progress_row["scope_file_count"]
 
     return {
         "scanId": scan["id"],
@@ -604,6 +613,12 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "allowedTargetKinds": target_contract["allowedKinds"],
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
+        "scopeFileCount": scope_file_count,
+        **(
+            {"emptyScopeInventory": AUTHORITATIVE_EMPTY_SCOPE_INVENTORY}
+            if scope_file_count == 0
+            else {}
+        ),
     }
 
 
@@ -1390,6 +1405,7 @@ def complete_scan_locked(
             manifest, _, _ = finalize_scan(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
+                trusted_sealed_scan=True,
             )
         except ContractError as exc:
             raise SystemExit(str(exc)) from exc
@@ -1412,7 +1428,9 @@ def complete_scan_locked(
         warnings.append(warning)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
-    completion_binding = workbench_completion_binding(scan, completion_timestamp)
+    completion_binding = workbench_completion_binding(connection, scan, completion_timestamp)
+    if completion_binding.get("emptyScopeInventory") is not None:
+        write_scan_local_bytes(scan_dir, AUTHORITATIVE_EMPTY_SCOPE_INVENTORY, b"")
     if scan["recipe_json"] is not None:
         manifest = read_json_object(artifact_path(scan_dir, ARTIFACTS["manifest"], required=True))
         manifest_scan = manifest.get("scan")
@@ -1695,7 +1713,9 @@ def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     require_recorded_manifest_digest(scan, scan_dir)
     try:
-        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(scan_dir)
+        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(
+            scan_dir, trusted_sealed_scan=True
+        )
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
     if not was_sealed or manifest["scan"]["id"] != scan["id"]:
