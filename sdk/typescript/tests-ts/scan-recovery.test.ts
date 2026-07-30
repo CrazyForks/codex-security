@@ -115,7 +115,7 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
 }
 
 async function startDraftScan(
-  repositoryKind: "directory" | "clean" | "dirty" = "directory",
+  repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -152,6 +152,15 @@ async function startDraftScan(
     }
     if (repositoryKind === "dirty") {
       await writeFile(join(target, "src", "extract.py"), "# changed fixture\n");
+    }
+    if (repositoryKind === "nested") {
+      const nested = join(target, "nested");
+      await mkdir(nested);
+      await writeFile(join(nested, "source.py"), "# nested fixture\n");
+      const initialized = spawnSync("git", ["init", "--quiet", nested], {
+        encoding: "utf8",
+      });
+      expect(initialized.status, initialized.stderr).toBe(0);
     }
   }
 
@@ -246,8 +255,8 @@ describe("malformed scan artifact recovery", () => {
     });
   });
 
-  test("returns authoritative clean and dirty Git target contracts", async () => {
-    for (const kind of ["clean", "dirty"] as const) {
+  test("returns authoritative clean, dirty, and nested Git target contracts", async () => {
+    for (const kind of ["clean", "dirty", "nested"] as const) {
       const fixture = await startDraftScan(kind);
       const registration = fixture.registration;
       const contract = registration["contract"] as {
@@ -275,6 +284,31 @@ describe("malformed scan artifact recovery", () => {
         expect(contract.target.requiredSnapshotDigest).toMatch(
           /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
         );
+      }
+      if (kind === "nested") {
+        const copied = spawnSync(
+          fixture.python,
+          [
+            "-I",
+            "-B",
+            "-c",
+            [
+              "import sys",
+              "from pathlib import Path",
+              "sys.path.insert(0, sys.argv[1])",
+              "import workbench_target as target",
+              "source = Path(sys.argv[2])",
+              "checkout = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
+              "git_dir = Path(target.git_output(source, 'rev-parse', '--absolute-git-dir'))",
+              "assert target.worktree_content_digest_for_context(checkout, '.', git_dir=git_dir, work_tree=checkout) == target.worktree_content_digest(source)",
+            ].join("\n"),
+            join(PLUGIN_ROOT, "scripts"),
+            fixture.repository,
+            join(fixture.stateDir, "checkout"),
+          ],
+          { encoding: "utf8" },
+        );
+        expect(copied.status, copied.stderr).toBe(0);
       }
     }
   });
