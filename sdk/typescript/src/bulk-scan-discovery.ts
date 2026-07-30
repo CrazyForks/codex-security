@@ -12,6 +12,7 @@ import {
   bulkScanRepositoryLimitError,
   MAX_BULK_SCAN_REPOSITORIES,
 } from "./bulk-scan-limits.js";
+import { expandHome } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -164,9 +165,11 @@ export async function runBulkScanWizard(
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
-    await prompt.input(
-      "Where should scan results be saved?",
-      "./security-scans",
+    expandHome(
+      await prompt.input(
+        "Where should scan results be saved?",
+        "./security-scans",
+      ),
     ),
   );
   const inputPath = join(outputDir, "repositories.csv");
