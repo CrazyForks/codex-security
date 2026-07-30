@@ -896,7 +896,36 @@ async function publishReceiptRepair(
   );
   await copyFile(path, quarantine, constants.COPYFILE_EXCL);
   try {
-    await rename(replacement, path);
+    try {
+      await rename(replacement, path);
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !["EPERM", "EACCES", "EEXIST"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      ) {
+        throw error;
+      }
+      const destination = await openReceiptLedger(
+        path,
+        constants.O_WRONLY | constants.O_TRUNC,
+      );
+      const source = await open(replacement, constants.O_RDONLY);
+      try {
+        for await (const chunk of source.createReadStream({
+          autoClose: false,
+          highWaterMark: 64 * 1024,
+        })) {
+          await destination.writeFile(chunk);
+        }
+        await destination.sync();
+      } finally {
+        await source.close();
+        await destination.close();
+      }
+      await rm(replacement, { force: true });
+    }
   } catch (error) {
     await rm(replacement, { force: true });
     throw error;
