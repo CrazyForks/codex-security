@@ -40,6 +40,7 @@ const MAX_PDF_PAGES = 512;
 const MAX_PDF_XREF_OBJECTS = 65_536;
 const MAX_PDF_DICTIONARY_SCAN_BYTES = 256 * 1024;
 const MAX_PDF_DICTIONARY_WORK_BYTES = 2 * MAX_DOCUMENT_BYTES;
+const MAX_PDF_DECODE_WORK_BYTES = 4 * MAX_EXTRACTED_DOCUMENT_BYTES;
 const MAX_PDF_LZW_CODES = 1_000_000;
 const READ_CHUNK_BYTES = 64 * 1024;
 
@@ -50,6 +51,16 @@ interface DiscoveryState {
 }
 
 class KnowledgeBaseLimitError extends Error {}
+
+type PdfCrossReferenceEntry =
+  | number
+  | { readonly stream: number; readonly index: number }
+  | null;
+
+const pdfObjectStreamCache = new WeakMap<
+  ReadonlyMap<string, PdfCrossReferenceEntry>,
+  { streams: Map<number, Buffer | null>; remaining: number }
+>();
 
 export interface PreparedKnowledgeBase {
   path: string;
@@ -376,8 +387,9 @@ function boundCompressedPdfStreams(
   const contents = source.toString("latin1");
   const streams =
     />>(?:(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*)stream(?:\r\n|\r|\n)/gu;
-  const indirectObjects = pdfCrossReferenceOffsets(contents);
+  const indirectObjects = pdfCrossReferenceOffsets(contents, path, signal);
   let inflatedBytes = 0;
+  let decodingWorkBytes = 0;
   const dictionaryWork = { remaining: MAX_PDF_DICTIONARY_WORK_BYTES };
   for (const marker of contents.matchAll(streams)) {
     signal?.throwIfAborted();
@@ -389,7 +401,12 @@ function boundCompressedPdfStreams(
       indirectObjects,
     );
     if (dictionary === null) continue;
-    const filters = pdfStreamFilters(contents, dictionary, indirectObjects);
+    const filters = pdfStreamFilters(
+      contents,
+      dictionary,
+      indirectObjects,
+      path,
+    );
     if (filters.length === 0) continue;
 
     const streamStart = marker.index + marker[0].length;
@@ -403,6 +420,7 @@ function boundCompressedPdfStreams(
         declared[1]!,
         declared[2],
         indirectObjects,
+        path,
       );
       if (referenced === undefined) {
         throw new Error(
@@ -421,35 +439,42 @@ function boundCompressedPdfStreams(
     let decoded = source.subarray(streamStart, streamEnd);
     for (const [filterIndex, filter] of filters.entries()) {
       signal?.throwIfAborted();
-      if (inflatedBytes >= MAX_EXTRACTED_DOCUMENT_BYTES) {
+      if (
+        inflatedBytes >= MAX_EXTRACTED_DOCUMENT_BYTES ||
+        decodingWorkBytes >= MAX_PDF_DECODE_WORK_BYTES
+      ) {
         throw oversizedPdfStream(path);
       }
+      const maximumOutput = Math.min(
+        MAX_EXTRACTED_DOCUMENT_BYTES,
+        MAX_PDF_DECODE_WORK_BYTES - decodingWorkBytes,
+      );
       try {
         switch (filter) {
           case "ASCIIHexDecode":
           case "AHx":
-            decoded = decodePdfAsciiHex(decoded, MAX_EXTRACTED_DOCUMENT_BYTES);
+            decoded = decodePdfAsciiHex(decoded, maximumOutput);
             break;
           case "ASCII85Decode":
           case "A85":
-            decoded = decodePdfAscii85(decoded, MAX_EXTRACTED_DOCUMENT_BYTES);
+            decoded = decodePdfAscii85(decoded, maximumOutput);
             break;
           case "RunLengthDecode":
           case "RL":
-            decoded = decodePdfRunLength(decoded, MAX_EXTRACTED_DOCUMENT_BYTES);
+            decoded = decodePdfRunLength(decoded, maximumOutput);
             break;
           case "LZWDecode":
           case "LZW":
             decoded = decodePdfLzw(
               decoded,
-              MAX_EXTRACTED_DOCUMENT_BYTES,
+              maximumOutput,
               pdfLzwEarlyChange(dictionary, filterIndex),
             );
             break;
           case "FlateDecode":
           case "Fl":
             decoded = inflateSync(decoded, {
-              maxOutputLength: MAX_EXTRACTED_DOCUMENT_BYTES,
+              maxOutputLength: maximumOutput,
             });
             break;
           case "DCTDecode":
@@ -478,6 +503,10 @@ function boundCompressedPdfStreams(
           { cause: error },
         );
       }
+      decodingWorkBytes += decoded.byteLength;
+      if (decodingWorkBytes > MAX_PDF_DECODE_WORK_BYTES) {
+        throw oversizedPdfStream(path);
+      }
     }
     inflatedBytes += decoded.byteLength;
     if (inflatedBytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
@@ -491,12 +520,12 @@ function pdfStreamDictionary(
   end: number,
   work: { remaining: number },
   path: string,
-  offsets: ReadonlyMap<string, number | null> | null,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
 ): string | null {
   let depth = 1;
   let minimum = Math.max(0, end - MAX_PDF_DICTIONARY_SCAN_BYTES);
   for (const offset of offsets?.values() ?? []) {
-    if (offset !== null && offset < end && offset > minimum) {
+    if (typeof offset === "number" && offset < end && offset > minimum) {
       minimum = offset;
     }
   }
@@ -539,19 +568,95 @@ function pdfIndirectValue(
   contents: string,
   object: string,
   generation: string,
-  offsets: ReadonlyMap<string, number | null> | null,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
+  path: string,
 ): string | undefined {
   const offset = offsets?.get(`${object}:${generation}`);
   if (offset === null || offset === undefined) return undefined;
-  return new RegExp(
-    `^${object}\\s+${generation}\\s+obj\\s*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)\\s*endobj`,
-    "u",
-  ).exec(contents.slice(offset))?.[1];
+  if (typeof offset === "number") {
+    return new RegExp(
+      `^${object}\\s+${generation}\\s+obj\\s*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)\\s*endobj`,
+      "u",
+    ).exec(contents.slice(offset))?.[1];
+  }
+  if (offsets === null || generation !== "0") return undefined;
+  const streamOffset = offsets.get(`${offset.stream}:0`);
+  if (typeof streamOffset !== "number") return undefined;
+  let cache = pdfObjectStreamCache.get(offsets);
+  if (cache === undefined) {
+    cache = { streams: new Map(), remaining: MAX_PDF_DECODE_WORK_BYTES };
+    pdfObjectStreamCache.set(offsets, cache);
+  }
+  let stream = cache.streams.get(offset.stream);
+  if (stream === null) return undefined;
+  if (stream === undefined) {
+    cache.streams.set(offset.stream, null);
+    const decoded = pdfCrossReferenceStream(
+      contents,
+      streamOffset,
+      offsets,
+      path,
+      cache,
+    );
+    if (decoded === null) return undefined;
+    const dictionary = pdfDictionaryLexicalValues(decoded.dictionary);
+    const count = Number(/\/N\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1]);
+    const first = Number(/\/First\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1]);
+    if (
+      !Number.isSafeInteger(count) ||
+      count > MAX_PDF_XREF_OBJECTS ||
+      !Number.isSafeInteger(first) ||
+      first > decoded.contents.byteLength
+    ) {
+      return undefined;
+    }
+    stream = decoded.contents;
+    cache.streams.set(offset.stream, stream);
+  }
+  const dictionary = pdfObjectStreamDictionary(contents, streamOffset);
+  if (dictionary === null) return undefined;
+  const lexical = pdfDictionaryLexicalValues(dictionary);
+  const count = Number(/\/N\s+(\d+)(?=[\s/>])/u.exec(lexical)?.[1]);
+  const first = Number(/\/First\s+(\d+)(?=[\s/>])/u.exec(lexical)?.[1]);
+  if (
+    !Number.isSafeInteger(count) ||
+    !Number.isSafeInteger(first) ||
+    offset.index >= count ||
+    first > stream.byteLength
+  ) {
+    return undefined;
+  }
+  const header = stream
+    .subarray(0, first)
+    .toString("latin1")
+    .trim()
+    .split(/\s+/u);
+  if (header.length !== 2 * count) return undefined;
+  const objectNumber = Number(header[offset.index * 2]);
+  const start = Number(header[offset.index * 2 + 1]);
+  const next =
+    offset.index + 1 < count
+      ? Number(header[(offset.index + 1) * 2 + 1])
+      : stream.byteLength - first;
+  if (
+    objectNumber !== Number(object) ||
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(next) ||
+    start > next ||
+    first + next > stream.byteLength
+  ) {
+    return undefined;
+  }
+  return /^\s*(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)\s*$/u.exec(
+    stream.subarray(first + start, first + next).toString("latin1"),
+  )?.[1];
 }
 
 function pdfCrossReferenceOffsets(
   contents: string,
-): ReadonlyMap<string, number | null> | null {
+  path: string,
+  signal?: AbortSignal,
+): ReadonlyMap<string, PdfCrossReferenceEntry> | null {
   const marker = /startxref\s+(\d+)\s+%%EOF\s*$/u.exec(contents);
   let offset = Number(marker?.[1]);
   if (
@@ -561,15 +666,98 @@ function pdfCrossReferenceOffsets(
   ) {
     return null;
   }
-  const entries = new Map<string, number | null>();
+  const entries = new Map<string, PdfCrossReferenceEntry>();
   const visited = new Set<number>();
+  const pending = [offset];
+  const decodingWork = { remaining: MAX_PDF_DECODE_WORK_BYTES };
   const whitespace = /[\u0000\t\n\f\r ]*/uy;
   const section = /(\d+)[\t ]+(\d+)(?:\r\n|\r|\n)/uy;
   const entry = /(\d+)[\t ]+(\d+)[\t ]+([nf])(?:[\t ]*(?:\r\n|\r|\n)|$)/uy;
 
-  while (!visited.has(offset)) {
+  while (pending.length > 0) {
+    signal?.throwIfAborted();
+    offset = pending.shift()!;
+    if (visited.has(offset)) continue;
     visited.add(offset);
-    if (contents.slice(offset, offset + 4) !== "xref") return null;
+    if (contents.slice(offset, offset + 4) !== "xref") {
+      const stream = pdfCrossReferenceStream(
+        contents,
+        offset,
+        entries,
+        path,
+        decodingWork,
+      );
+      if (stream === null) return null;
+      const dictionary = pdfDictionaryLexicalValues(stream.dictionary);
+      if (!/\/Type\s*\/XRef(?=[\s/>])/u.test(dictionary)) return null;
+      const widths = /\/W\s*\[([^\]]+)\]/u
+        .exec(dictionary)?.[1]
+        ?.trim()
+        .split(/\s+/u)
+        .map(Number);
+      if (
+        widths?.length !== 3 ||
+        widths.some((width) => !Number.isSafeInteger(width) || width > 6)
+      ) {
+        return null;
+      }
+      const rowSize = widths.reduce((total, width) => total + width, 0);
+      if (rowSize === 0) return null;
+      const size = Number(/\/Size\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1]);
+      const indices = /\/Index\s*\[([^\]]+)\]/u
+        .exec(dictionary)?.[1]
+        ?.trim()
+        .split(/\s+/u)
+        .map(Number) ?? [0, size];
+      if (
+        !Number.isSafeInteger(size) ||
+        indices.length % 2 !== 0 ||
+        indices.some((index) => !Number.isSafeInteger(index) || index < 0)
+      ) {
+        return null;
+      }
+      let cursor = 0;
+      for (let index = 0; index < indices.length; index += 2) {
+        const first = indices[index]!;
+        const count = indices[index + 1]!;
+        if (count > MAX_PDF_XREF_OBJECTS) return null;
+        for (let row = 0; row < count; row += 1) {
+          if (cursor + rowSize > stream.contents.byteLength) return null;
+          const fields = widths.map((width, field) => {
+            let value = field === 0 && width === 0 ? 1 : 0;
+            for (let byte = 0; byte < width; byte += 1) {
+              value = value * 256 + stream.contents[cursor++]!;
+            }
+            return value;
+          });
+          const key = `${first + row}:${fields[0] === 2 ? 0 : fields[2]}`;
+          if (entries.has(key)) continue;
+          if (entries.size >= MAX_PDF_XREF_OBJECTS) return null;
+          entries.set(
+            key,
+            fields[0] === 0
+              ? null
+              : fields[0] === 1
+                ? fields[1]!
+                : fields[0] === 2
+                  ? { stream: fields[1]!, index: fields[2]! }
+                  : null,
+          );
+        }
+      }
+      const previous = /\/Prev\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1];
+      if (previous !== undefined) {
+        const previousOffset = Number(previous);
+        if (
+          !Number.isSafeInteger(previousOffset) ||
+          previousOffset >= contents.length
+        ) {
+          return null;
+        }
+        pending.push(previousOffset);
+      }
+      continue;
+    }
     let cursor = offset + 4;
     while (true) {
       whitespace.lastIndex = cursor;
@@ -580,14 +768,13 @@ function pdfCrossReferenceOffsets(
           contents.slice(cursor + "trailer".length, cursor + 64 * 1024),
         );
         const previous = /\/Prev\s+(\d+)(?=[\s/>])/u.exec(trailer)?.[1];
-        if (previous === undefined) return entries;
-        offset = Number(previous);
-        if (
-          !Number.isSafeInteger(offset) ||
-          offset < 0 ||
-          offset >= contents.length
-        ) {
-          return null;
+        const xrefStream = /\/XRefStm\s+(\d+)(?=[\s/>])/u.exec(trailer)?.[1];
+        for (const value of [xrefStream, previous]) {
+          if (value === undefined) continue;
+          const next = Number(value);
+          if (!Number.isSafeInteger(next) || next >= contents.length)
+            return null;
+          pending.push(next);
         }
         break;
       }
@@ -601,8 +788,7 @@ function pdfCrossReferenceOffsets(
         !Number.isSafeInteger(firstObject) ||
         !Number.isSafeInteger(count) ||
         count < 0 ||
-        count > MAX_PDF_XREF_OBJECTS ||
-        entries.size + count > MAX_PDF_XREF_OBJECTS
+        count > MAX_PDF_XREF_OBJECTS
       ) {
         return null;
       }
@@ -613,12 +799,163 @@ function pdfCrossReferenceOffsets(
         cursor = entry.lastIndex;
         const key = `${firstObject + index}:${Number(value[2])}`;
         if (!entries.has(key)) {
+          if (entries.size >= MAX_PDF_XREF_OBJECTS) return null;
           entries.set(key, value[3] === "n" ? Number(value[1]) : null);
         }
       }
     }
   }
-  return null;
+  return entries;
+}
+
+function pdfObjectStreamDictionary(
+  contents: string,
+  offset: number,
+): string | null {
+  const header = /^\d+\s+\d+\s+obj\s*/u.exec(contents.slice(offset));
+  if (header === null) return null;
+  const tail = contents.slice(offset + header[0].length);
+  const marker =
+    />>(?:(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*)stream(?:\r\n|\r|\n)/u.exec(tail);
+  return marker === null ? null : tail.slice(0, marker.index + 2);
+}
+
+function pdfCrossReferenceStream(
+  contents: string,
+  offset: number,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry>,
+  path: string,
+  work: { remaining: number },
+): { dictionary: string; contents: Buffer } | null {
+  const header = /^\d+\s+\d+\s+obj\s*/u.exec(contents.slice(offset));
+  if (header === null) return null;
+  const tail = contents.slice(offset + header[0].length);
+  const marker =
+    />>(?:(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*)stream(?:\r\n|\r|\n)/u.exec(tail);
+  if (marker === null || marker.index > MAX_PDF_DICTIONARY_SCAN_BYTES) {
+    return null;
+  }
+  const dictionary = tail.slice(0, marker.index + 2);
+  const length = Number(
+    /\/Length\s+(\d+)(?=[\s/>])/u.exec(
+      pdfDictionaryLexicalValues(dictionary),
+    )?.[1],
+  );
+  const streamOffset =
+    offset + header[0].length + marker.index + marker[0].length;
+  if (
+    !Number.isSafeInteger(length) ||
+    streamOffset + length > contents.length
+  ) {
+    return null;
+  }
+  let decoded: Buffer<ArrayBufferLike> = Buffer.from(
+    contents.slice(streamOffset, streamOffset + length),
+    "latin1",
+  );
+  for (const filter of pdfStreamFilters(contents, dictionary, offsets, path)) {
+    try {
+      switch (filter) {
+        case "FlateDecode":
+        case "Fl":
+          decoded = inflateSync(decoded, {
+            maxOutputLength: Math.min(
+              MAX_EXTRACTED_DOCUMENT_BYTES,
+              work.remaining,
+            ),
+          });
+          break;
+        case "ASCIIHexDecode":
+        case "AHx":
+          decoded = decodePdfAsciiHex(decoded, work.remaining);
+          break;
+        case "ASCII85Decode":
+        case "A85":
+          decoded = decodePdfAscii85(decoded, work.remaining);
+          break;
+        default:
+          return null;
+      }
+    } catch {
+      return null;
+    }
+    work.remaining -= decoded.byteLength;
+    if (work.remaining < 0) return null;
+  }
+  const predictor = Number(
+    /\/Predictor\s+(\d+)(?=[\s/>])/u.exec(
+      pdfDictionaryLexicalValues(dictionary),
+    )?.[1] ?? "1",
+  );
+  if (predictor !== 1) {
+    const columns = Number(
+      /\/Columns\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1],
+    );
+    const colors = Number(
+      /\/Colors\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1] ?? "1",
+    );
+    const bits = Number(
+      /\/BitsPerComponent\s+(\d+)(?=[\s/>])/u.exec(dictionary)?.[1] ?? "8",
+    );
+    if (
+      predictor < 10 ||
+      predictor > 15 ||
+      !Number.isSafeInteger(columns) ||
+      !Number.isSafeInteger(colors) ||
+      !Number.isSafeInteger(bits) ||
+      columns <= 0 ||
+      colors <= 0 ||
+      bits <= 0
+    ) {
+      return null;
+    }
+    const rowBytes = Math.ceil((columns * colors * bits) / 8);
+    if (
+      !Number.isSafeInteger(rowBytes) ||
+      rowBytes <= 0 ||
+      decoded.byteLength % (rowBytes + 1) !== 0
+    ) {
+      return null;
+    }
+    const reconstructed = Buffer.alloc(
+      (decoded.byteLength / (rowBytes + 1)) * rowBytes,
+    );
+    const pixelBytes = Math.max(1, Math.ceil((colors * bits) / 8));
+    let input = 0;
+    let output = 0;
+    while (input < decoded.byteLength) {
+      const filter = decoded[input++]!;
+      if (filter > 4) return null;
+      for (let column = 0; column < rowBytes; column += 1) {
+        const left =
+          column < pixelBytes ? 0 : reconstructed[output - pixelBytes]!;
+        const above = output < rowBytes ? 0 : reconstructed[output - rowBytes]!;
+        const upperLeft =
+          output < rowBytes || column < pixelBytes
+            ? 0
+            : reconstructed[output - rowBytes - pixelBytes]!;
+        let prediction = 0;
+        if (filter === 1) prediction = left;
+        else if (filter === 2) prediction = above;
+        else if (filter === 3) prediction = Math.floor((left + above) / 2);
+        else if (filter === 4) {
+          const estimate = left + above - upperLeft;
+          const leftDistance = Math.abs(estimate - left);
+          const aboveDistance = Math.abs(estimate - above);
+          const diagonalDistance = Math.abs(estimate - upperLeft);
+          prediction =
+            leftDistance <= aboveDistance && leftDistance <= diagonalDistance
+              ? left
+              : aboveDistance <= diagonalDistance
+                ? above
+                : upperLeft;
+        }
+        reconstructed[output++] = (decoded[input++]! + prediction) & 255;
+      }
+    }
+    decoded = reconstructed;
+  }
+  return { dictionary, contents: decoded };
 }
 
 function pdfDictionaryLexicalValues(dictionary: string): string {
@@ -678,7 +1015,8 @@ function pdfDictionaryLexicalValues(dictionary: string): string {
 function pdfStreamFilters(
   contents: string,
   dictionary: string,
-  offsets: ReadonlyMap<string, number | null> | null,
+  offsets: ReadonlyMap<string, PdfCrossReferenceEntry> | null,
+  path: string,
 ): string[] {
   const match =
     /\/(?:Filter|F)\s+(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+\s+\d+\s+R)(?=[\s/>])/u.exec(
@@ -693,6 +1031,7 @@ function pdfStreamFilters(
       reference[1]!,
       reference[2]!,
       offsets,
+      path,
     );
     if (resolved === undefined) {
       throw new Error("Compressed PDF filter cannot be resolved safely.");

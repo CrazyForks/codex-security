@@ -119,6 +119,105 @@ function pdf(
   return Buffer.from(output, "latin1");
 }
 
+function xrefStreamPdf(
+  document: Uint8Array,
+  compressIndirectObjects = false,
+): Buffer {
+  const original = Buffer.from(document).toString("latin1");
+  const table = original.lastIndexOf("\nxref\n");
+  if (table < 0)
+    throw new Error("PDF fixture does not contain a classic xref.");
+  let body = original.slice(0, table + 1).replace("%PDF-1.4", "%PDF-1.5");
+  const references = [
+    ...new Set(
+      [...body.matchAll(/\/(?:Length|Filter)\s+(\d+)\s+0\s+R/gu)].map((match) =>
+        Number(match[1]),
+      ),
+    ),
+  ];
+  let maximumObject = Math.max(
+    ...[...body.matchAll(/^(\d+)\s+0\s+obj$/gmu)].map((match) =>
+      Number(match[1]),
+    ),
+  );
+  const compressed = new Map<number, { stream: number; index: number }>();
+  if (compressIndirectObjects && references.length > 0) {
+    const streamObject = ++maximumObject;
+    const values: string[] = [];
+    for (const number of references) {
+      const expression = new RegExp(
+        `(?:^|\\n)${number} 0 obj\\n([\\s\\S]*?)\\nendobj\\n`,
+        "u",
+      );
+      const match = expression.exec(body);
+      if (match?.[1] === undefined) {
+        throw new Error("Indirect PDF fixture object is missing.");
+      }
+      compressed.set(number, { stream: streamObject, index: values.length });
+      values.push(match[1]);
+      body =
+        body.slice(0, match.index + 1) +
+        body.slice(match.index + match[0].length);
+    }
+    let objectBody = "";
+    let header = "";
+    for (const [index, number] of references.entries()) {
+      header += `${number} ${objectBody.length} `;
+      objectBody += `${values[index]} `;
+    }
+    const encoded = deflateSync(Buffer.from(header + objectBody, "latin1"));
+    body += `${streamObject} 0 obj\n<< /Type /ObjStm /N ${references.length} /First ${header.length} /Length ${encoded.byteLength} /Filter /FlateDecode >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\n`;
+  }
+  const xrefObject = ++maximumObject;
+  const xrefOffset = Buffer.byteLength(body, "latin1");
+  const objects = new Map<number, number>();
+  for (const match of body.matchAll(/^(\d+)\s+0\s+obj$/gmu)) {
+    objects.set(Number(match[1]), match.index!);
+  }
+  objects.set(xrefObject, xrefOffset);
+  const records = Buffer.alloc((xrefObject + 1) * 7);
+  for (let number = 0; number <= xrefObject; number += 1) {
+    const position = number * 7;
+    const compact = compressed.get(number);
+    if (compact !== undefined) {
+      records[position] = 2;
+      records.writeUInt32BE(compact.stream, position + 1);
+      records.writeUInt16BE(compact.index, position + 5);
+    } else if (objects.has(number)) {
+      records[position] = 1;
+      records.writeUInt32BE(objects.get(number)!, position + 1);
+    } else {
+      records.writeUInt16BE(65535, position + 5);
+    }
+  }
+  const encoded = deflateSync(records);
+  body += `${xrefObject} 0 obj\n<< /Type /XRef /Size ${xrefObject + 1} /Root 1 0 R /W [1 4 2] /Length ${encoded.byteLength} /Filter /FlateDecode >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(body, "latin1");
+}
+
+function incrementallyUpdatedPdf(document: Uint8Array): Buffer {
+  const original = Buffer.from(document).toString("latin1");
+  const table = original.lastIndexOf("\nxref\n");
+  if (table < 0)
+    throw new Error("PDF fixture does not contain a classic xref.");
+  let body = original.slice(0, table + 1);
+  const objects = new Map<number, number>();
+  for (const match of body.matchAll(/^(\d+)\s+0\s+obj$/gmu)) {
+    objects.set(Number(match[1]), match.index!);
+  }
+  const size = 40_000;
+  const entries = Array.from({ length: size }, (_unused, number) =>
+    objects.has(number)
+      ? `${String(objects.get(number)).padStart(10, "0")} 00000 n \n`
+      : "0000000000 65535 f \n",
+  ).join("");
+  const previous = Buffer.byteLength(body, "latin1");
+  body += `xref\n0 ${size}\n${entries}trailer\n<< /Size ${size} /Root 1 0 R >>\n`;
+  const latest = Buffer.byteLength(body, "latin1");
+  body += `xref\n0 ${size}\n${entries}trailer\n<< /Size ${size} /Root 1 0 R /Prev ${previous} >>\nstartxref\n${latest}\n%%EOF\n`;
+  return Buffer.from(body, "latin1");
+}
+
 function encodeAscii85(bytes: Buffer): Buffer {
   let encoded = "";
   for (let index = 0; index < bytes.length; index += 4) {
@@ -481,6 +580,18 @@ describe("scan knowledge bases", () => {
     await expect(prepareKnowledgeBase([cumulative])).rejects.toThrow(
       "8388608-byte extracted-text limit",
     );
+
+    const intermediate = join(root, "cumulative-intermediate.pdf");
+    await writeFile(
+      intermediate,
+      pdf("reviewable", 1, true, `>${" ".repeat(4 * 1024 * 1024)}`, {
+        filter: "[/FlateDecode /ASCIIHexDecode]",
+        extraStreams: 8,
+      }),
+    );
+    await expect(prepareKnowledgeBase([intermediate])).rejects.toThrow(
+      "8388608-byte extracted-text limit",
+    );
   });
 
   test("accepts PDF filter chains, indirect lengths, and escaped filter names", async () => {
@@ -539,6 +650,51 @@ describe("scan knowledge bases", () => {
         earlyChangeText,
       ].sort(),
     );
+  });
+
+  test("resolves indirect PDF values from compressed cross-reference and object streams", async () => {
+    const root = await temporaryDirectory();
+    for (const compressIndirectObjects of [false, true]) {
+      const name = compressIndirectObjects
+        ? "object-stream.pdf"
+        : "xref-stream.pdf";
+      await writeFile(
+        join(root, name),
+        xrefStreamPdf(
+          pdf(`PDF ${name}`, 1, true, "", {
+            indirectLength: true,
+            indirectFilter: true,
+          }),
+          compressIndirectObjects,
+        ),
+      );
+    }
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
+      "PDF object-stream.pdf",
+      "PDF xref-stream.pdf",
+    ]);
+  });
+
+  test("counts unique objects across overlapping incremental cross-reference tables", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "incremental.pdf");
+    await writeFile(
+      document,
+      incrementallyUpdatedPdf(
+        pdf("Incremental cross-reference tables", 1, true, "", {
+          indirectFilter: true,
+        }),
+      ),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Incremental cross-reference tables",
+    ]);
   });
 
   test("does not mistake a PDF comment for a stream compression filter", async () => {
