@@ -154,6 +154,28 @@ describe("scan history renderer", () => {
     }
   });
 
+  test("ignores malformed persisted knowledge-base paths", () => {
+    for (const knowledgeBasePaths of [
+      "/not/an/array",
+      { path: "/not/an/array" },
+      [null, 42, "/safe/threat-model.md"],
+    ]) {
+      const result = {
+        scanId: "scan-1",
+        progress: { status: "complete" },
+        recipe: { knowledgeBasePaths },
+      };
+      expect(() =>
+        renderScanHistory(result, "show", { color: false }),
+      ).not.toThrow();
+      if (Array.isArray(knowledgeBasePaths)) {
+        expect(renderScanHistory(result, "show", { color: false })).toContain(
+          "/safe/threat-model.md",
+        );
+      }
+    }
+  });
+
   test("keeps repositories visible at narrow and wide terminal widths", () => {
     const scans = [
       {
@@ -476,5 +498,41 @@ describe("severity badge column", () => {
     );
     expect(text).toContain("    INFO      Informational finding");
     expect(text).not.toContain("INFORMATIONAL  ");
+  });
+
+  test("keeps unrecognized severity labels inside the fixed badge column", () => {
+    const text = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          beforeScanId: "before-scan",
+          afterScanId: "after-scan",
+          coverage: { afterCompleteness: "complete" },
+          summary: { new: 2 },
+          findings: [
+            {
+              status: "new",
+              severity: "extraordinary-severity",
+              title: "Unknown severity finding",
+            },
+            {
+              status: "new",
+              severity: "critical",
+              title: "Known severity finding",
+            },
+          ],
+        },
+        "compare",
+        { color: false },
+      ),
+    );
+    const unknown = text
+      .split("\n")
+      .find((line) => line.includes("Unknown severity finding"))!;
+    const known = text
+      .split("\n")
+      .find((line) => line.includes("Known severity finding"))!;
+    expect(unknown.indexOf("Unknown severity finding")).toBe(
+      known.indexOf("Known severity finding"),
+    );
   });
 });

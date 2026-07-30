@@ -153,6 +153,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_unmatched_scan_pairs.add_argument("--repository", required=True)
     list_unmatched_scan_pairs.add_argument("--force", action="store_true")
     list_unmatched_scan_pairs.add_argument("--offset", type=non_negative_int, default=0)
+    list_unmatched_scan_pairs.add_argument("--completed-before")
 
     get_scan_matching_inputs = subparsers.add_parser("get-scan-matching-inputs")
     get_scan_matching_inputs.add_argument("--scan-id", required=True)
@@ -173,12 +174,15 @@ def parse_args(description: str) -> argparse.Namespace:
     compare_scans.add_argument("--before-scan-id", required=True)
     compare_scans.add_argument("--after-scan-id", required=True)
     compare_scans.add_argument("--include-matching-inputs", action="store_true")
+    compare_scans.add_argument("--include-matching-status", action="store_true")
     compare_scans.add_argument("--require-matches", action="store_true")
 
     save_scan_comparison = subparsers.add_parser("save-scan-comparison")
     save_scan_comparison.add_argument("--before-scan-id", required=True)
     save_scan_comparison.add_argument("--after-scan-id", required=True)
-    save_scan_comparison.add_argument("--matches-json", required=True)
+    matches = save_scan_comparison.add_mutually_exclusive_group(required=True)
+    matches.add_argument("--matches-json")
+    matches.add_argument("--matches-file")
 
     list_global_findings = subparsers.add_parser("list-global-findings")
     list_global_findings.add_argument("--query")

@@ -146,7 +146,9 @@ export function renderScanHistory(
     const severity = findingSeverity(entry);
     const title = clean(entry["title"]);
     const badge = paint(
-      (SEVERITY_LABELS[severity] ?? severity).padEnd(SEVERITY_BADGE_WIDTH),
+      (SEVERITY_LABELS[severity] ?? severity)
+        .slice(0, SEVERITY_BADGE_WIDTH)
+        .padEnd(SEVERITY_BADGE_WIDTH),
       SEVERITY_COLORS[severity] ?? 37,
     );
     wrap(title, FINDING_INDENT, `    ${badge}  `);
@@ -327,8 +329,13 @@ export function renderScanHistory(
         );
       }
     }
-    const knowledgeBase = recipe["knowledgeBasePaths"] as string[] | undefined;
-    if (knowledgeBase?.length) {
+    const savedKnowledgeBase = recipe["knowledgeBasePaths"];
+    const knowledgeBase = Array.isArray(savedKnowledgeBase)
+      ? savedKnowledgeBase.filter(
+          (path): path is string => typeof path === "string",
+        )
+      : [];
+    if (knowledgeBase.length > 0) {
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,
       );
@@ -450,7 +457,7 @@ export function renderScanHistory(
     if (result["unmatchedBatches"]) {
       lines.push(
         `  ${paint(
-          `${clean(result["unmatchedBatches"])} scans could not be matched; rerun to retry`,
+          `${clean(result["unmatchedBatches"])} comparisons could not be matched; rerun to retry`,
           33,
         )}`,
       );

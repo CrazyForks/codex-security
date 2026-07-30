@@ -1,8 +1,11 @@
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { readFile, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { CodexSecurityError, DiffTarget } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   capture,
   dependencies,
@@ -121,7 +124,7 @@ describe("CLI workbench", () => {
           "before",
           "--after-scan-id",
           "after",
-          "--include-matching-inputs",
+          "--include-matching-status",
         ],
         {
           comparable: true,
@@ -139,7 +142,7 @@ describe("CLI workbench", () => {
           "before",
           "--after-scan-id",
           "after",
-          "--include-matching-inputs",
+          "--include-matching-status",
         ],
         {
           comparable: true,
@@ -245,6 +248,99 @@ describe("CLI workbench", () => {
     expect(calls).toEqual(["compare-scans"]);
   });
 
+  test("pages explicit scan comparisons without requesting unbounded inputs", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    expect(
+      await main(
+        ["scans", "compare", "before", "after", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "compare-scans") {
+              return { matchingCached: false };
+            }
+            if (args[0] === "get-scan-matching-inputs") {
+              return {
+                scanId: args[2]!,
+                findings: [{ occurrenceId: args[2]! }],
+                nextOffset: null,
+                totalFindings: 1,
+              };
+            }
+            return { summary: { persisting: 1 } };
+          },
+          onMatch: async () => ({
+            matches: [
+              {
+                beforeOccurrenceIds: ["before"],
+                afterOccurrenceIds: ["after"],
+                confidence: "high",
+                reason: "Same root cause.",
+              },
+            ],
+            uncertain: [],
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(calls.map(([command]) => command)).toEqual([
+      "compare-scans",
+      "get-scan-matching-inputs",
+      "get-scan-matching-inputs",
+      "save-scan-comparison",
+    ]);
+    expect(calls[0]).toContain("--include-matching-status");
+    expect(calls[0]).not.toContain("--include-matching-inputs");
+    expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
+  });
+
+  test("passes large valid match results through a private temporary file", async () => {
+    const reason = "safe reason ".repeat(2_000);
+    let matchesPath: string | undefined;
+    expect(
+      await main(
+        ["scans", "match", "before", "after", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: async (args): Promise<JsonObject> => {
+            if (args[0] === "compare-scans") {
+              return {
+                matchingCached: false,
+                matchingInputs: {
+                  before: [{ occurrenceId: "before" }],
+                  after: [{ occurrenceId: "after" }],
+                },
+              };
+            }
+            expect(args[5]).toBe("--matches-file");
+            matchesPath = args[6]!;
+            expect(
+              JSON.parse(await readFile(matchesPath, "utf8")),
+            ).toMatchObject({ matches: [{ reason }] });
+            return { summary: { persisting: 1 } };
+          },
+          onMatch: async () => ({
+            matches: [
+              {
+                beforeOccurrenceIds: ["before"],
+                afterOccurrenceIds: ["after"],
+                confidence: "high",
+                reason,
+              },
+            ],
+            uncertain: [],
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(matchesPath).toBeDefined();
+    await expect(stat(matchesPath!)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
     const findings = new Map([
@@ -321,6 +417,18 @@ describe("CLI workbench", () => {
                     confidence: "high",
                     reason: "Same root cause.",
                   },
+                  ...(input.before.some(
+                    ({ occurrenceId }) => occurrenceId === "b",
+                  )
+                    ? [
+                        {
+                          beforeOccurrenceIds: ["b"],
+                          afterOccurrenceIds: ["c"],
+                          confidence: "high" as const,
+                          reason: "Same root cause.",
+                        },
+                      ]
+                    : []),
                 ],
                 uncertain: [],
               };
@@ -340,13 +448,15 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(matcherCalls).toBe(3);
+    expect(matcherCalls).toBe(2);
     expect(calls[0]).toEqual([
       "list-unmatched-scan-pairs",
       "--repository",
       "/current/repository",
       "--offset",
       "0",
+      "--completed-before",
+      expect.any(String),
       "--force",
     ]);
     const saves = calls.filter(
@@ -390,6 +500,44 @@ describe("CLI workbench", () => {
       skippedPairs: 1,
       findingMatches: 4,
     });
+  });
+
+  test("freezes completed scans and skips cached pair pages in one workbench call", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, sqlite3, sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_scan_history import list_unmatched_scan_pairs",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.executescript('CREATE TABLE security_targets (id TEXT, current_path TEXT); CREATE TABLE scans (id TEXT, target_path TEXT, status TEXT, started_at TEXT, completed_at TEXT); CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);')",
+          "scans = [(f'scan-{index:03}', '/repo', 'complete', f'2026-01-01T00:{index:03}Z', '2026-01-01T00:00:00Z') for index in range(100)]",
+          "connection.executemany('INSERT INTO scans VALUES (?, ?, ?, ?, ?)', scans)",
+          "saved = [(before[0], after[0]) for position, after in enumerate(scans) for before in scans[:position]]",
+          "connection.executemany('INSERT INTO scan_comparisons VALUES (?, ?)', saved)",
+          "connection.execute(\"INSERT INTO scans VALUES ('new-scan', '/repo', 'complete', '2025-01-01T00:00:00Z', '2027-01-01T00:00:00Z')\")",
+          "args = argparse.Namespace(repository='/repo', force=False, offset=0, completed_before='2026-06-01T00:00:00Z')",
+          "result = list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: {})",
+          "assert result['scanCount'] == 100, result",
+          "assert result['skippedPairs'] == len(saved), result",
+          "assert result['pairs'] == [] and result['nextOffset'] is None, result",
+          "connection.execute('DELETE FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?', (scans[-2][0], scans[-1][0]))",
+          "result = list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: {})",
+          "assert result['pairs'] == [{'beforeScanId': scans[-2][0], 'afterScanId': scans[-1][0]}], result",
+          "assert result['nextOffset'] is None, result",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    expect(result.status, result.stderr).toBe(0);
   });
 
   test("pages match-all history and reconciles bounded finding batches", async () => {

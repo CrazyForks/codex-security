@@ -9,7 +9,16 @@ import {
   realpathSync,
   writeSync,
 } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -253,6 +262,8 @@ type MatchingInputPage = JsonObject & {
 };
 
 const MAX_MATCH_RESULT_BYTES = 1024 * 1024;
+const MAX_INLINE_MATCH_RESULT_BYTES = 16 * 1024;
+const MAX_GROUPED_MATCH_INPUT_BYTES = 512 * 1024;
 
 interface SkillCommandOutput {
   readonly command: "validate" | "patch";
@@ -633,23 +644,22 @@ export async function main(
         beforeId,
         "--after-scan-id",
         afterId,
-        "--include-matching-inputs",
+        "--include-matching-status",
       ],
       async ({ matchingCached, matchingInputs, ...comparison }) => {
         if (matchingCached && !force) return comparison;
-        return await dependencies.runWorkbench([
-          "save-scan-comparison",
-          "--before-scan-id",
+        const matching =
+          matchingInputs === undefined
+            ? await matchScanPairInBatches(dependencies, beforeId, afterId)
+            : await dependencies.matchFindings(
+                matchingInputs as JsonObject & ScanComparisonInput,
+              );
+        return await saveScanComparison(
+          dependencies,
           beforeId,
-          "--after-scan-id",
           afterId,
-          "--matches-json",
-          JSON.stringify(
-            await dependencies.matchFindings(
-              matchingInputs as JsonObject & ScanComparisonInput,
-            ),
-          ),
-        ]);
+          matching,
+        );
       },
     );
   const presentHistory = (
@@ -1983,6 +1993,7 @@ async function matchAllScans(
   let firstFailure: unknown;
   let offset = 0;
   let firstPage = true;
+  const completedBefore = new Date().toISOString();
   while (true) {
     const page = (await dependencies.runWorkbench([
       "list-unmatched-scan-pairs",
@@ -1990,32 +2001,46 @@ async function matchAllScans(
       dependencies.currentDirectory(),
       "--offset",
       String(offset),
+      "--completed-before",
+      completedBefore,
       ...(force ? ["--force"] : []),
     ])) as MatchingPlanPage;
     if (firstPage) {
       ({ repository, scanCount, unavailableScans, skippedPairs } = page);
       firstPage = false;
     }
+    const groupedPairs = new Map<string, MatchingPair[]>();
+    for (const pair of page.pairs) {
+      const group = groupedPairs.get(pair.afterScanId) ?? [];
+      group.push(pair);
+      groupedPairs.set(pair.afterScanId, group);
+    }
+    const groupedMatching = new Map<
+      string,
+      Promise<Map<string, ScanComparisonResult> | null>
+    >();
     for (const { beforeScanId, afterScanId } of page.pairs) {
       try {
-        const matching = await matchScanPairInBatches(
+        const group = groupedPairs.get(afterScanId)!;
+        if (group.length > 1 && !groupedMatching.has(afterScanId)) {
+          groupedMatching.set(
+            afterScanId,
+            matchScanGroupInOneBatch(dependencies, group, afterScanId),
+          );
+        }
+        const matching =
+          (await groupedMatching.get(afterScanId))?.get(beforeScanId) ??
+          (await matchScanPairInBatches(
+            dependencies,
+            beforeScanId,
+            afterScanId,
+          ));
+        await saveScanComparison(
           dependencies,
           beforeScanId,
           afterScanId,
+          matching,
         );
-        const serialized = JSON.stringify(matching);
-        if (Buffer.byteLength(serialized) > MAX_MATCH_RESULT_BYTES) {
-          throw oversizedAutomaticMatchError();
-        }
-        await dependencies.runWorkbench([
-          "save-scan-comparison",
-          "--before-scan-id",
-          beforeScanId,
-          "--after-scan-id",
-          afterScanId,
-          "--matches-json",
-          serialized,
-        ]);
         matchedPairs += 1;
         findingMatches += matching.matches.reduce(
           (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
@@ -2051,6 +2076,102 @@ async function matchAllScans(
     findingMatches,
     ...(unmatchedBatches === 0 ? {} : { unmatchedBatches }),
   };
+}
+
+async function matchScanGroupInOneBatch(
+  dependencies: CliDependencies,
+  pairs: readonly MatchingPair[],
+  afterScanId: string,
+): Promise<Map<string, ScanComparisonResult> | null> {
+  const after = await matchingInputPage(dependencies, afterScanId, 0);
+  const previous = await Promise.all(
+    pairs.map(async ({ beforeScanId }) => ({
+      scanId: beforeScanId,
+      page: await matchingInputPage(dependencies, beforeScanId, 0),
+    })),
+  );
+  if (
+    after.nextOffset !== null ||
+    previous.some(({ page }) => page.nextOffset !== null)
+  ) {
+    return null;
+  }
+  const input = {
+    before: previous.flatMap(({ page }) => page.findings),
+    after: after.findings,
+  };
+  if (
+    Buffer.byteLength(JSON.stringify(input)) > MAX_GROUPED_MATCH_INPUT_BYTES
+  ) {
+    return null;
+  }
+  const matching =
+    input.before.length === 0 || input.after.length === 0
+      ? { matches: [], uncertain: [] }
+      : await dependencies.matchFindings(input, {
+          allowHistoricalUncertainty: true,
+        });
+  if (Buffer.byteLength(JSON.stringify(matching)) > MAX_MATCH_RESULT_BYTES) {
+    throw oversizedAutomaticMatchError();
+  }
+  return new Map(
+    previous.map(({ scanId, page }) => {
+      const occurrenceIds = new Set(
+        page.findings.map(({ occurrenceId }) => occurrenceId),
+      );
+      const confirmed = matching.matches
+        .map((match) => ({
+          ...match,
+          beforeOccurrenceIds: match.beforeOccurrenceIds.filter((id) =>
+            occurrenceIds.has(id),
+          ),
+        }))
+        .filter(({ beforeOccurrenceIds }) => beforeOccurrenceIds.length > 0);
+      const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
+        occurrenceIds.has(beforeOccurrenceId),
+      );
+      return [scanId, reconcileMatchingBatches(confirmed, uncertain)];
+    }),
+  );
+}
+
+async function saveScanComparison(
+  dependencies: CliDependencies,
+  beforeScanId: string,
+  afterScanId: string,
+  matching: ScanComparisonResult,
+): Promise<JsonObject> {
+  const serialized = JSON.stringify(matching);
+  const bytes = Buffer.byteLength(serialized);
+  if (bytes > MAX_MATCH_RESULT_BYTES) throw oversizedAutomaticMatchError();
+
+  const arguments_ = [
+    "save-scan-comparison",
+    "--before-scan-id",
+    beforeScanId,
+    "--after-scan-id",
+    afterScanId,
+  ];
+  if (bytes <= MAX_INLINE_MATCH_RESULT_BYTES) {
+    return await dependencies.runWorkbench([
+      ...arguments_,
+      "--matches-json",
+      serialized,
+    ]);
+  }
+
+  const temporary = await mkdtemp(join(tmpdir(), "codex-security-matches-"));
+  const path = join(temporary, "matches.json");
+  try {
+    await writeFile(path, serialized, { mode: 0o600, flag: "wx" });
+    return await dependencies.runWorkbench([
+      ...arguments_,
+      "--matches-file",
+      path,
+    ]);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
 }
 
 async function matchScanPairInBatches(

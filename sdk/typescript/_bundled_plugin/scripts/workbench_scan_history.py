@@ -287,11 +287,15 @@ def list_unmatched_scan_pairs(
         """,
         (str(repository), str(repository)),
     ).fetchone()
+    completed = connection.execute(
+        "SELECT * FROM scans WHERE status = 'complete'"
+        + (" AND completed_at <= ?" if args.completed_before is not None else "")
+        + " ORDER BY started_at, id",
+        (() if args.completed_before is None else (args.completed_before,)),
+    )
     selected = [
         scan
-        for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
-        )
+        for scan in completed
         if Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested)
     ]
 
@@ -320,12 +324,11 @@ def list_unmatched_scan_pairs(
         )
     )
     pair_count = len(available) * (len(available) - 1) // 2
-    page_end = min(args.offset + MATCHING_PAIR_PAGE_MAX, pair_count)
     pair_index = min(args.offset, pair_count)
     after_index = (1 + math.isqrt(1 + 8 * pair_index)) // 2
     before_index = pair_index - after_index * (after_index - 1) // 2
     pairs = []
-    while pair_index < page_end:
+    while pair_index < pair_count and len(pairs) < MATCHING_PAIR_PAGE_MAX:
         before = available[before_index]
         after = available[after_index]
         if args.force or (before["id"], after["id"]) not in saved_pairs:
@@ -341,7 +344,7 @@ def list_unmatched_scan_pairs(
             after_index += 1
             before_index = 0
     return {
-        "nextOffset": page_end if page_end < pair_count else None,
+        "nextOffset": pair_index if pair_index < pair_count else None,
         "pairs": pairs,
         "repository": str(repository),
         "scanCount": len(selected),
@@ -428,6 +431,7 @@ def compare_scans(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
     include_matching_inputs: bool = False,
+    include_matching_status: bool = False,
     require_matches: bool = False,
 ) -> dict[str, Any]:
     before = require_scan(connection, args.before_scan_id)
@@ -553,8 +557,9 @@ def compare_scans(
         "repository": before["target_path"],
         "summary": summary,
     }
-    if include_matching_inputs:
+    if include_matching_inputs or include_matching_status:
         result["matchingCached"] = cached is not None
+    if include_matching_inputs:
         result["matchingInputs"] = {
             "before": [_matching_input(row) for row in before_findings.values()],
             "after": [_matching_input(row) for row in after_findings.values()],
@@ -582,8 +587,15 @@ def save_scan_comparison(
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     try:
-        payload = json.loads(args.matches_json)
-    except (TypeError, ValueError) as exc:
+        if args.matches_file is None:
+            serialized = args.matches_json
+        else:
+            with open(args.matches_file, "rb") as matches:
+                serialized = matches.read(1024 * 1024 + 1)
+        if len(serialized) > 1024 * 1024:
+            raise ValueError("Scan comparison matches exceed the 1 MiB safety limit.")
+        payload = json.loads(serialized)
+    except (OSError, TypeError, ValueError) as exc:
         raise SystemExit("Scan comparison matches must be a valid JSON object.") from exc
     if not isinstance(payload, dict) or set(payload) != {"matches", "uncertain"}:
         raise SystemExit("Scan comparison matches must contain matches and uncertain arrays.")
