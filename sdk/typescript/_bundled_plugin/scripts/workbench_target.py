@@ -664,7 +664,6 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
         )
         if (
             worktree_content_digest(target) != expected_digest
-            and worktree_content_digest(target, include_conflicted_index=False) != expected_digest
             and worktree_content_digest(target, legacy=True) != expected_digest
         ):
             return (

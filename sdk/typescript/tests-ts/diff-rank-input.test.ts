@@ -1332,17 +1332,22 @@ describe("diff rank input", () => {
         "-B",
         "-c",
         [
-          "import json, sys",
+          "import json, sqlite3, sys",
           "from pathlib import Path",
           "sys.path.insert(0, sys.argv[1])",
+          "from filesystem_identity import serialize_filesystem_identity",
           "from workbench_db import require_diff_target",
-          "from workbench_target import worktree_content_digest",
+          "from workbench_target import scan_target_warning, worktree_content_digest",
           "target = Path(sys.argv[2])",
           "revision = sys.argv[3]",
           "previous = worktree_content_digest(target, include_conflicted_index=False)",
           "current = worktree_content_digest(target)",
           "selected = require_diff_target(target, 'working_tree', revision, revision, previous)",
-          "print(json.dumps({'previous': previous, 'current': current, 'selected': selected['contentDigest']}))",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "metadata = target.stat()",
+          "scan = connection.execute('SELECT ? AS diff_target_kind, ? AS target_snapshot_digest, ? AS target_path, ? AS target_device, ? AS target_inode, ? AS target_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS scan_dir', ('working_tree', previous, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), revision, revision, previous, str(target.parent / 'scan'))).fetchone()",
+          "print(json.dumps({'previous': previous, 'current': current, 'selected': selected['contentDigest'], 'warning': scan_target_warning(scan)}))",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
         fixture.repository,
@@ -1354,10 +1359,12 @@ describe("diff rank input", () => {
       previous: string;
       current: string;
       selected: string;
+      warning: string | null;
     };
 
     expect(snapshots.current).not.toBe(snapshots.previous);
     expect(snapshots.selected).toBe(snapshots.current);
+    expect(snapshots.warning).toContain("Working-tree contents changed");
   });
 
   test("preserves legacy working-tree snapshots while binding new index digests", async () => {
