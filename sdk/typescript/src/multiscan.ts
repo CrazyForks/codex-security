@@ -168,9 +168,23 @@ async function runCampaign(
         ? recorded
         : undefined;
     if (receipt?.status === "completed") {
+      const expectedOutput = join(
+        output,
+        "artifacts",
+        task.id,
+        `attempt-${receipt.attempt}`,
+      );
+      const matchesOutput =
+        receipt.outputDir === expectedOutput ||
+        (await Promise.all([
+          realpath(receipt.outputDir).catch(() => undefined),
+          realpath(expectedOutput).catch(() => undefined),
+        ]).then(
+          ([recorded, expected]) =>
+            recorded !== undefined && recorded === expected,
+        ));
       if (
-        receipt.outputDir ===
-          join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
+        matchesOutput &&
         (await hasArtifacts(
           receipt.outputDir,
           await resumePluginRoot(),

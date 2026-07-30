@@ -12,6 +12,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   symlink,
   truncate,
@@ -653,6 +654,45 @@ describe("multiscan", () => {
       ledgerPath,
       `${receipts.map((receipt) => JSON.stringify(receipt)).join("\n")}\n`,
     );
+
+    expect(await runMultiscan(options(paths, security))).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(scans).toBe(1);
+  });
+
+  test("resumes completed artifacts through equivalent filesystem path casing", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "artifact-directory-casing");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nscoped,${source.path},${source.revision}\n`,
+    );
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const initial = await runMultiscan(options(paths, security));
+    const [receipt] = await results(initial.resultsPath);
+    const changedCase = (receipt!["outputDir"] as string).replace(
+      `${paths.output}/`,
+      `${join(dirname(paths.output), basename(paths.output).toUpperCase())}/`,
+    );
+    try {
+      if (
+        (await realpath(changedCase)) !==
+        (await realpath(receipt!["outputDir"] as string))
+      ) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    receipt!["outputDir"] = changedCase;
+    await writeFile(initial.resultsPath, `${JSON.stringify(receipt)}\n`);
 
     expect(await runMultiscan(options(paths, security))).toMatchObject({
       completed: 1,
