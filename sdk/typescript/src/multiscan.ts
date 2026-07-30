@@ -386,7 +386,7 @@ async function readReceipts(
 ): Promise<Map<string, MultiscanReceipt>> {
   let file: FileHandle;
   try {
-    file = await openReceiptLedger(path, constants.O_RDWR);
+    file = await openReceiptLedger(path, constants.O_RDONLY);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
     throw error;
@@ -396,10 +396,20 @@ async function readReceipts(
     const lines = contents.split("\n");
     if (!contents.endsWith("\n")) {
       const partial = lines.pop()!;
-      await file.truncate(
-        Buffer.byteLength(contents) - Buffer.byteLength(partial),
-      );
-      await file.sync();
+      const repair = await openReceiptLedger(path, constants.O_RDWR);
+      try {
+        if ((await repair.readFile("utf8")) !== contents) {
+          throw new Error(
+            "Multiscan results ledger changed during interrupted receipt repair.",
+          );
+        }
+        await repair.truncate(
+          Buffer.byteLength(contents) - Buffer.byteLength(partial),
+        );
+        await repair.sync();
+      } finally {
+        await repair.close();
+      }
     }
     return new Map(
       lines.filter(Boolean).map((line): [string, MultiscanReceipt] => {

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
+  chmod,
   link,
   mkdir,
   mkdtemp,
@@ -503,6 +504,33 @@ describe("multiscan", () => {
     );
     expect(calls).toBe(2);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "resumes a completed campaign when its receipt ledger is read-only",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "readonly-ledger");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nreadonly,${source.path},${source.revision}\n`,
+      );
+      let scans = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        scans += 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+      const initial = await runMultiscan(options(paths, security));
+      await chmod(initial.resultsPath, 0o400);
+      try {
+        const resumed = await runMultiscan(options(paths, security));
+
+        expect(resumed).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+        expect(scans).toBe(1);
+      } finally {
+        await chmod(initial.resultsPath, 0o600);
+      }
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "rejects symlinked receipt ledgers without reading or changing external files",
