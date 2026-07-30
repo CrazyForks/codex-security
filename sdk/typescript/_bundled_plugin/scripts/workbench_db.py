@@ -97,6 +97,7 @@ from workbench_target import (
     copy_directory_excluding,
     copy_git_worktree_files,
     directory_content_digest,
+    directory_snapshot_file_count,
     directory_snapshot_regular_file_count,
     directory_snapshot_reviewable_file_count,
     git_bytes,
@@ -611,6 +612,18 @@ def workbench_completion_binding(
     if progress_row is None:
         raise SystemExit("Codex Security scan is missing authoritative scope progress.")
     scope_file_count = progress_row["scope_file_count"]
+    scope_paths = requested_scan_paths(scan)
+    standard_review_file_count = (
+        directory_snapshot_file_count(
+            Path(scan["target_path"]),
+            include_symlinks=False,
+            count_scopes=tuple(Path(scan["target_path"]) / path for path in scope_paths)
+            if scope_paths != ["."]
+            else None,
+        )
+        if scan["mode"] == "standard"
+        else scope_file_count
+    )
 
     return {
         "scanId": scan["id"],
@@ -622,6 +635,7 @@ def workbench_completion_binding(
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
         "scopeFileCount": scope_file_count,
+        "standardReviewFileCount": standard_review_file_count,
         "reviewItemsTotal": progress_row["review_items_total"],
         "reviewItemsCompleted": progress_row["review_items_completed"],
         **(

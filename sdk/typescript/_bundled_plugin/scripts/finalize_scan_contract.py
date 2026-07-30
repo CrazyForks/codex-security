@@ -1373,18 +1373,18 @@ def _validate_coverage(
             raise ContractError(
                 "coverage.surfaces: reported surfaces must match completed findings"
             )
-    has_verified_review = has_reviewed_surface and (
+    has_verified_standard_review = _has_verified_standard_scan_review(
+        scan_dir, scan, coverage, authoritative_review_progress
+    )
+    has_verified_review = has_verified_standard_review or has_reviewed_surface and (
         has_findings
-        or _has_verified_standard_scan_review(
-            scan_dir, scan, coverage, authoritative_review_progress
-        )
         or any(
             isinstance(surface, dict)
             and surface.get("disposition") != "not_applicable"
             and isinstance(surface.get("receiptRefs"), list)
             and any(
                 isinstance(reference, str)
-                and _has_verified_review_receipt(scan_dir, reference)
+                and _has_verified_review_receipt(scan_dir, reference, scan)
                 for reference in surface["receiptRefs"]
             )
             for surface in surfaces
@@ -1458,10 +1458,23 @@ def _validate_coverage(
     _require_safe_json_value(coverage, "coverage.json")
 
 
-def _has_verified_review_receipt(scan_dir: Path, reference: str) -> bool:
+def _has_verified_review_receipt(
+    scan_dir: Path, reference: str, scan: dict[str, Any] | None = None
+) -> bool:
     if reference != "artifacts/02_discovery/work_ledger.jsonl":
         return False
     try:
+        if scan is not None and scan.get("artifacts") is not None:
+            sealed_paths = {
+                artifact.get("path")
+                for artifact in scan["artifacts"]
+                if isinstance(artifact, dict)
+            }
+            if not {
+                reference,
+                "artifacts/02_discovery/deep_review_input.jsonl",
+            }.issubset(sealed_paths):
+                return False
         expected_paths = {
             _review_row_path(row)
             for row in _review_jsonl_rows(
@@ -1519,8 +1532,13 @@ def _has_verified_standard_scan_review(
     scan: dict[str, Any],
     coverage: dict[str, Any],
     authoritative_review_progress: dict[str, Any] | None,
+    *,
+    allow_reportable_candidates: bool = False,
 ) -> bool:
-    if coverage.get("mode") not in {"repository", "scoped_path"}:
+    if (
+        coverage.get("mode") not in {"repository", "scoped_path"}
+        or authoritative_review_progress is None
+    ):
         return False
 
     ledger_path = "artifacts/02_discovery/candidate_ledger.jsonl"
@@ -1553,18 +1571,17 @@ def _has_verified_standard_scan_review(
         if not scope_paths:
             return False
 
-        if authoritative_review_progress is not None:
-            scope_count = authoritative_review_progress.get("scopeFileCount")
-            review_total = authoritative_review_progress.get("reviewItemsTotal")
-            review_completed = authoritative_review_progress.get("reviewItemsCompleted")
-            if (
-                not isinstance(scope_count, int)
-                or isinstance(scope_count, bool)
-                or scope_count != len(scope_paths)
-                or review_total != scope_count
-                or review_completed != scope_count
-            ):
-                return False
+        scope_count = authoritative_review_progress.get("standardReviewFileCount")
+        review_total = authoritative_review_progress.get("reviewItemsTotal")
+        review_completed = authoritative_review_progress.get("reviewItemsCompleted")
+        if (
+            not isinstance(scope_count, int)
+            or isinstance(scope_count, bool)
+            or scope_count != len(scope_paths)
+            or review_total != scope_count
+            or review_completed != scope_count
+        ):
+            return False
 
         for candidate in _review_jsonl_rows(scan_dir, ledger_path):
             candidate_id = candidate.get("candidate_id")
@@ -1590,7 +1607,9 @@ def _has_verified_standard_scan_review(
                 return False
             if disposition == "reportable":
                 attack_path = candidate.get("attack_path")
-                if not isinstance(attack_path, dict) or attack_path.get("decision") != "ignore":
+                if not isinstance(attack_path, dict) or attack_path.get("decision") not in (
+                    {"ignore", "reportable"} if allow_reportable_candidates else {"ignore"}
+                ):
                     return False
         return True
     except (ContractError, OSError, UnicodeError, ValueError):
@@ -2698,7 +2717,11 @@ def _prepare_scan_finalization(
                         ]
                         if coverage.get("completeness") == "complete"
                         and _has_verified_standard_scan_review(
-                            scan_dir, scan, coverage, completion_binding
+                            scan_dir,
+                            scan,
+                            coverage,
+                            completion_binding,
+                            allow_reportable_candidates=True,
                         )
                         else []
                     ),

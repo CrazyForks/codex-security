@@ -626,6 +626,99 @@ describe("canonical scan contract", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
+  test("rejects sealed standard ledgers without host-owned review progress", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const discovery = join(scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    const findings = await readJson(findingsPath);
+    const coverage = await readJson(coveragePath);
+    const manifest = await readJson(manifestPath);
+    findings["findings"] = [];
+    coverage["surfaces"][0]["disposition"] = "no_issue_found";
+    coverage["surfaces"][0]["receiptRefs"] = [];
+    for (const [path, contents] of [
+      ["artifacts/02_discovery/candidate_ledger.jsonl", ""],
+      ["artifacts/02_discovery/in_scope_files.txt", "src/example.py\n"],
+    ] as const) {
+      await writeFile(join(scanDir, path), contents);
+      manifest["scan"]["artifacts"].push({
+        path,
+        sha256: "",
+        mediaType: "application/x-ndjson",
+      });
+    }
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeJson(manifestPath, manifest),
+    ]);
+    await reseal(scanDir);
+
+    const validation = runPythonContractTool(
+      scanDir,
+      "validate_scan_contract.py",
+    );
+
+    expect(validation.status).toBe(2);
+    expect(validation.stderr).toContain(
+      "complete coverage requires a reviewed surface",
+    );
+  });
+
+  test("rejects a review worklist omitted from the sealed artifact set", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const receipt = "artifacts/02_discovery/work_ledger.jsonl";
+    const worklist = "artifacts/02_discovery/deep_review_input.jsonl";
+    await mkdir(join(scanDir, "artifacts", "02_discovery"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(scanDir, receipt),
+      `${JSON.stringify({
+        path: "src/example.py",
+        status: "reviewed",
+        evidence: "Read all lines.",
+      })}\n`,
+    );
+    await writeFile(
+      join(scanDir, worklist),
+      `${JSON.stringify({ path: "src/example.py" })}\n`,
+    );
+    const findings = await readJson(findingsPath);
+    const coverage = await readJson(coveragePath);
+    const manifest = await readJson(manifestPath);
+    findings["findings"] = [];
+    coverage["surfaces"][0]["disposition"] = "no_issue_found";
+    coverage["surfaces"][0]["receiptRefs"] = [receipt];
+    manifest["scan"]["artifacts"].push({
+      path: receipt,
+      sha256: "",
+      mediaType: "application/x-ndjson",
+    });
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeJson(manifestPath, manifest),
+    ]);
+    await reseal(scanDir);
+
+    const validation = runPythonContractTool(
+      scanDir,
+      "validate_scan_contract.py",
+    );
+
+    expect(validation.status).toBe(2);
+    expect(validation.stderr).toContain(
+      "complete coverage requires a reviewed surface",
+    );
+  });
+
   test("honors cancellation during contract validation", async () => {
     const scanDir = await copyExample();
     const controller = new AbortController();

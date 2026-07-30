@@ -410,6 +410,106 @@ describe("malformed scan artifact recovery", () => {
     );
   });
 
+  test("preserves authoritative standard coverage for all-not-applicable surfaces", async () => {
+    const fixture = await startDraftScan();
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const discovery = join(fixture.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+    surface.disposition = "not_applicable";
+    surface.receiptRefs = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeFile(join(discovery, "in_scope_files.txt"), "src/extract.py\n"),
+      writeFile(join(discovery, "candidate_ledger.jsonl"), ""),
+      workbench(fixture, [
+        "update-progress",
+        "--scan-id",
+        fixture.scanId,
+        "--review-items-total",
+        "1",
+        "--review-items-completed",
+        "1",
+      ]),
+    ]);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+  });
+
+  test("reconciles regular-file review progress with symlink-inclusive scope counts", async () => {
+    const fixture = await startDraftScan("directory", false, true);
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const discovery = join(fixture.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    findings.findings = [];
+    const surface = (coverage.surfaces as CoverageSurface[])[0]!;
+    surface.disposition = "no_issue_found";
+    surface.receiptRefs = [];
+    await Promise.all([
+      writeJson(findingsPath, findings),
+      writeJson(coveragePath, coverage),
+      writeFile(join(discovery, "in_scope_files.txt"), "src/extract.py\n"),
+      writeFile(join(discovery, "candidate_ledger.jsonl"), ""),
+      workbench(fixture, [
+        "update-progress",
+        "--scan-id",
+        fixture.scanId,
+        "--review-items-total",
+        "1",
+        "--review-items-completed",
+        "1",
+      ]),
+    ]);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+  });
+
+  test("seals the canonical standard ledger when candidates become reported findings", async () => {
+    const fixture = await startDraftScan();
+    const discovery = join(fixture.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    await Promise.all([
+      writeFile(join(discovery, "in_scope_files.txt"), "src/extract.py\n"),
+      writeFile(
+        join(discovery, "candidate_ledger.jsonl"),
+        `${JSON.stringify({
+          candidate_id: "candidate-example",
+          locations: [{ path: "src/extract.py" }],
+          validation: { disposition: "reportable" },
+          attack_path: { decision: "reportable" },
+        })}\n`,
+      ),
+      workbench(fixture, [
+        "update-progress",
+        "--scan-id",
+        fixture.scanId,
+        "--review-items-total",
+        "1",
+        "--review-items-completed",
+        "1",
+      ]),
+    ]);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+    const manifest = await readJson<{
+      scan: { artifacts: Array<{ path: string }> };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(manifest.scan.artifacts.map((artifact) => artifact.path)).toEqual(
+      expect.arrayContaining([
+        "artifacts/02_discovery/candidate_ledger.jsonl",
+        "artifacts/02_discovery/in_scope_files.txt",
+      ]),
+    );
+  });
+
   test("exports trusted receiptless legacy scans to SARIF without weakening fresh validation", async () => {
     const fixture = await startDraftScan();
     await completeScan(fixture);
