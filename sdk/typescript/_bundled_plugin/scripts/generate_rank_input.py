@@ -143,6 +143,37 @@ SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES = {
     "workflows",
 }
 
+SECURITY_RELEVANT_DIFF_EXCLUDED_DIRS = {
+    ".git",
+    "doc",
+    "docs",
+    "example",
+    "examples",
+    "external",
+    "extern",
+    "fixture",
+    "fixtures",
+    "node_modules",
+    "sample",
+    "samples",
+    "third-party",
+    "third_party",
+    "vendor",
+}
+
+SECURITY_RELEVANT_DIFF_EXTENSIONS = {
+    *TEXT_CODE_EXTENSIONS,
+    ".cjs",
+    ".conf",
+    ".env",
+    ".hcl",
+    ".ini",
+    ".properties",
+    ".rego",
+    ".tf",
+    ".tfvars",
+}
+
 SECURITY_RELEVANT_GITHUB_DIFF_FILENAMES = {
     "CODEOWNERS",
     "copilot-instructions.md",
@@ -322,6 +353,8 @@ def diff_path_is_security_relevant(path: Path) -> bool:
         and path.parts[0] == ".github"
         and (
             path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES
+            or path.parts[1] == "instructions"
+            and path.name.endswith(".instructions.md")
             or len(path.parts) == 2
             and path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_FILENAMES
         )
@@ -330,25 +363,38 @@ def diff_path_is_security_relevant(path: Path) -> bool:
 
 def diff_path_is_included(path: Path) -> bool:
     if diff_path_is_security_relevant(path):
-        return not any(part in EXCLUDED_DIRS and part != ".github" for part in path.parts)
-    return not path_is_excluded(path)
+        return not any(part in SECURITY_RELEVANT_DIFF_EXCLUDED_DIRS for part in path.parts)
+    return (
+        not path_is_excluded(path)
+        and (
+            path.suffix.lower() in SECURITY_RELEVANT_DIFF_EXTENSIONS
+            or path.name == ".env"
+            or path.name.startswith(".env.")
+        )
+    )
 
 
 def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[str, bool]:
+    def reject_unsafe_path(cause: BaseException | None = None) -> None:
+        message = f"Unsafe changed repository path cannot be safely reviewed: {path.relative_to(repo)}"
+        if cause is None:
+            raise SystemExit(message)
+        raise SystemExit(message) from cause
+
     try:
         if path.is_symlink():
-            return "", False
+            reject_unsafe_path()
 
         expected = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(expected.st_mode):
-            return "", False
+            reject_unsafe_path()
 
         resolved = path.resolve(strict=True)
         resolved.relative_to(repo)
         resolved_stat = resolved.stat()
         expected_identity = (expected.st_dev, expected.st_ino)
         if (resolved_stat.st_dev, resolved_stat.st_ino) != expected_identity:
-            return "", False
+            reject_unsafe_path()
 
         flags = os.O_RDONLY
         flags |= getattr(os, "O_BINARY", 0)
@@ -362,15 +408,15 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
                 not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino) != expected_identity
             ):
-                return "", False
+                reject_unsafe_path()
 
             sample = source.read(4096)
             if is_binary_sample(sample):
                 return "", True
 
             remaining = source.read(max(0, DIRECT_SCOPE_PREVIEW_READ_BYTES - len(sample)))
-    except (OSError, ValueError):
-        return "", False
+    except (OSError, ValueError) as error:
+        reject_unsafe_path(error)
 
     data = sample + remaining
     if is_binary_sample(data):

@@ -164,14 +164,19 @@ describe("diff rank input", () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
       ".dockerignore": "node_modules\nvendor\n",
+      ".github/actions/build/action.yml": "runs:\n  using: composite\n",
       ".github/actions/security/action.yml": "runs:\n  using: composite\n",
       ".github/actions/security/index.js": "export const secure = true;\n",
       ".github/actions/security/script.py": "print('review action')\n",
+      ".github/actions/test/action.yml": "runs:\n  using: composite\n",
       ".github/CODEOWNERS": "* @security-reviewers\n",
       ".github/copilot-instructions.md":
         "Review changes before running code.\n",
       ".github/dependabot.yml": "version: 2\nupdates: []\n",
+      ".github/instructions/security.instructions.md":
+        "Review every authentication boundary.\n",
       ".github/ISSUE_TEMPLATE/bug.yml": "name: Bug report\n",
+      ".github/scripts/ci/check.py": "print('review CI helper')\n",
       ".github/scripts/security.py": "print('review first-party changes')\n",
       ".github/workflows/security.yml": "name: Security\non: pull_request\n",
       ".github/workflows/scripts/check.py": "print('check workflow')\n",
@@ -181,6 +186,7 @@ describe("diff rank input", () => {
       CODEOWNERS: "* @repository-owners\n",
       Containerfile: "FROM scratch\n",
       Dockerfile: "FROM node:24-alpine\n",
+      "build/Dockerfile": "FROM node:24-alpine\n",
       "compose.yaml": "services:\n  app:\n    image: app\n",
       "config/nginx.conf": "server { listen 443 ssl; }\n",
       "docker-compose.yml": "services:\n  app:\n    image: app\n",
@@ -224,12 +230,16 @@ describe("diff rank input", () => {
     expect(rows.map((row) => row.path)).toEqual(
       [
         ".dockerignore",
+        ".github/actions/build/action.yml",
         ".github/actions/security/action.yml",
         ".github/actions/security/index.js",
         ".github/actions/security/script.py",
+        ".github/actions/test/action.yml",
         ".github/CODEOWNERS",
         ".github/copilot-instructions.md",
         ".github/dependabot.yml",
+        ".github/instructions/security.instructions.md",
+        ".github/scripts/ci/check.py",
         ".github/scripts/security.py",
         ".github/workflows/security.yml",
         ".github/workflows/scripts/check.py",
@@ -239,6 +249,7 @@ describe("diff rank input", () => {
         "CODEOWNERS",
         "Containerfile",
         "Dockerfile",
+        "build/Dockerfile",
         "compose.yaml",
         "config/nginx.conf",
         "docker-compose.yml",
@@ -355,22 +366,9 @@ describe("diff rank input", () => {
         "dir",
       );
 
-      const rows = await runDiffRankInput(fixture, "revisions");
-
-      expect(rows.map((row) => row.path)).toEqual(
-        [
-          ".github/workflows/linked.yml",
-          "src/app.ts",
-          "src/linked.py",
-          "src/parent/escaped.py",
-        ].sort(),
+      await expect(runDiffRankInput(fixture, "revisions")).rejects.toThrow(
+        /unsafe changed repository path/iu,
       );
-      expect(
-        rows
-          .filter((row) => row.path !== "src/app.ts")
-          .every((row) => row.preview === ""),
-      ).toBe(true);
-      expect(JSON.stringify(rows)).not.toContain(canary);
       expect(await readFile(externalFile, "utf8")).toContain(canary);
     },
   );
@@ -390,16 +388,9 @@ describe("diff rank input", () => {
         "export const value = 2;\n",
       );
 
-      const rows = await runDiffRankInput(fixture, "local-patch");
-
-      expect(rows.map((row) => row.path)).toEqual([
-        "src/app.ts",
-        "src/linked.py",
-      ]);
-      expect(rows.find((row) => row.path === "src/linked.py")?.preview).toBe(
-        "",
+      await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
+        /unsafe changed repository path/iu,
       );
-      expect(JSON.stringify(rows)).not.toContain(canary);
       expect(await readFile(externalFile, "utf8")).toContain(canary);
     },
   );
@@ -426,12 +417,9 @@ describe("diff rank input", () => {
           );
         }
 
-        const rows = await runDiffRankInput(fixture, mode);
-
-        expect(rows).toEqual([
-          { path: "src/app.ts", area: "diff", preview: "" },
-        ]);
-        expect(JSON.stringify(rows)).not.toContain(canary);
+        await expect(runDiffRankInput(fixture, mode)).rejects.toThrow(
+          /unsafe changed repository path/iu,
+        );
         expect(await readFile(externalFile, "utf8")).toContain(canary);
       }
     },
@@ -452,13 +440,12 @@ describe("diff rank input", () => {
       git(fixture.repository, "add", "src/app.ts");
       git(fixture.repository, "commit", "-qm", "update reviewed source");
 
-      const rows = await runDiffRankInput(fixture, "revisions", {
-        path: "src/app.ts",
-        replacement: externalFile,
-      });
-
-      expect(rows).toEqual([{ path: "src/app.ts", area: "diff", preview: "" }]);
-      expect(JSON.stringify(rows)).not.toContain(canary);
+      await expect(
+        runDiffRankInput(fixture, "revisions", {
+          path: "src/app.ts",
+          replacement: externalFile,
+        }),
+      ).rejects.toThrow(/unsafe changed repository path/iu);
       expect(await readFile(externalFile, "utf8")).toContain(canary);
     },
   );
@@ -479,9 +466,9 @@ describe("diff rank input", () => {
       await rm(trackedFile);
       execFileSync("mkfifo", [trackedFile], { stdio: "pipe" });
 
-      const rows = await runDiffRankInput(fixture, "revisions");
-
-      expect(rows).toEqual([{ path: "src/app.ts", area: "diff", preview: "" }]);
+      await expect(runDiffRankInput(fixture, "revisions")).rejects.toThrow(
+        /unsafe changed repository path/iu,
+      );
     },
   );
 
@@ -545,5 +532,43 @@ describe("diff rank input", () => {
 
     expect(rows.map((row) => row.path)).toEqual(["src/app.ts"]);
     expect(rows[0]?.preview).toContain("value = 2");
+  });
+
+  test("excludes changed and deleted non-source binary assets", async () => {
+    const fixture = await createRepository();
+    await Promise.all([
+      writeRepositoryFile(
+        fixture.repository,
+        "assets/deleted.png",
+        Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      ),
+      writeRepositoryFile(
+        fixture.repository,
+        "assets/changed.png",
+        Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      ),
+    ]);
+    git(fixture.repository, "add", "assets");
+    git(fixture.repository, "commit", "-qm", "add image assets");
+    const base = git(fixture.repository, "rev-parse", "HEAD");
+    await Promise.all([
+      rm(join(fixture.repository, "assets", "deleted.png")),
+      writeRepositoryFile(
+        fixture.repository,
+        "assets/changed.png",
+        Buffer.from([0x89, 0x50, 0x4e, 0x48]),
+      ),
+      writeRepositoryFile(
+        fixture.repository,
+        "src/app.ts",
+        "export const value = 2;\n",
+      ),
+    ]);
+    git(fixture.repository, "add", "-A");
+    git(fixture.repository, "commit", "-qm", "change source and image assets");
+
+    const rows = await runDiffRankInput({ ...fixture, base }, "revisions");
+
+    expect(rows.map((row) => row.path)).toEqual(["src/app.ts"]);
   });
 });
