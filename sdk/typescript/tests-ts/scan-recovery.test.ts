@@ -257,7 +257,9 @@ describe("malformed scan artifact recovery", () => {
   test("binds standard inventory exclusions into the sealed scan contract", async () => {
     const fixture = await startDraftScan();
     const expectedPaths = [
+      "**/.git",
       "**/.git/**",
+      "**/node_modules",
       "**/node_modules/**",
       ".git",
       "node_modules",
@@ -305,7 +307,9 @@ describe("malformed scan artifact recovery", () => {
       };
     };
     const expectedExclusions = [
+      "src/**/.git",
       "src/**/.git/**",
+      "src/**/node_modules",
       "src/**/node_modules/**",
       "src/.git",
       "src/node_modules",
