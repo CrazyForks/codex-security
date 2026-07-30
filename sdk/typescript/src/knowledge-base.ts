@@ -59,7 +59,13 @@ type PdfCrossReferenceEntry =
 
 const pdfObjectStreamCache = new WeakMap<
   ReadonlyMap<string, PdfCrossReferenceEntry>,
-  { streams: Map<number, Buffer | null>; remaining: number }
+  {
+    streams: Map<
+      number,
+      ReadonlyArray<{ number: number; value: string | undefined }> | null
+    >;
+    remaining: number;
+  }
 >();
 
 export interface PreparedKnowledgeBase {
@@ -529,7 +535,10 @@ function pdfStreamDictionary(
       minimum = offset;
     }
   }
-  const lexical = pdfDictionaryLexicalValues(contents.slice(minimum, end));
+  const lexical = pdfDictionaryLexicalValues(
+    contents.slice(minimum, end),
+    false,
+  );
   for (let index = lexical.length - 3; index >= 0; index -= 1) {
     if (--work.remaining < 0) {
       throw new KnowledgeBaseLimitError(
@@ -543,15 +552,7 @@ function pdfStreamDictionary(
     } else if (token === "<<") {
       depth -= 1;
       if (depth === 0) {
-        return contents
-          .slice(minimum + index, end)
-          .replace(
-            /\/([^\s<>()\[\]{}/%]+)/gu,
-            (_match, name: string) =>
-              `/${name.replace(/#([0-9a-f]{2})/giu, (_escape, value: string) =>
-                String.fromCharCode(Number.parseInt(value, 16)),
-              )}`,
-          );
+        return contents.slice(minimum + index, end);
       }
       index -= 1;
     }
@@ -574,10 +575,15 @@ function pdfIndirectValue(
   const offset = offsets?.get(`${object}:${generation}`);
   if (offset === null || offset === undefined) return undefined;
   if (typeof offset === "number") {
-    return new RegExp(
-      `^${object}\\s+${generation}\\s+obj\\s*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)\\s*endobj`,
+    const value = new RegExp(
+      `^${object}\\s+${generation}\\s+obj\\s*(\\[[^\\]]*\\]|\\/[^\\s<>[\\]()%/]+|\\d+)`,
       "u",
-    ).exec(contents.slice(offset))?.[1];
+    ).exec(contents.slice(offset));
+    if (value?.[1] === undefined) return undefined;
+    const remainder = contents.slice(offset + value[0].length);
+    return /^(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*endobj(?=\s|$)/u.test(remainder)
+      ? value[1]
+      : undefined;
   }
   if (offsets === null || generation !== "0") return undefined;
   const streamOffset = offsets.get(`${offset.stream}:0`);
@@ -587,9 +593,9 @@ function pdfIndirectValue(
     cache = { streams: new Map(), remaining: MAX_PDF_DECODE_WORK_BYTES };
     pdfObjectStreamCache.set(offsets, cache);
   }
-  let stream = cache.streams.get(offset.stream);
-  if (stream === null) return undefined;
-  if (stream === undefined) {
+  let objects = cache.streams.get(offset.stream);
+  if (objects === null) return undefined;
+  if (objects === undefined) {
     cache.streams.set(offset.stream, null);
     const decoded = pdfCrossReferenceStream(
       contents,
@@ -610,46 +616,45 @@ function pdfIndirectValue(
     ) {
       return undefined;
     }
-    stream = decoded.contents;
-    cache.streams.set(offset.stream, stream);
+    const stream = decoded.contents;
+    const header = stream
+      .subarray(0, first)
+      .toString("latin1")
+      .trim()
+      .split(/\s+/u);
+    if (header.length !== 2 * count) return undefined;
+    const parsed: Array<{ number: number; value: string | undefined }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const number = Number(header[index * 2]);
+      const start = Number(header[index * 2 + 1]);
+      const next =
+        index + 1 < count
+          ? Number(header[(index + 1) * 2 + 1])
+          : stream.byteLength - first;
+      if (
+        !Number.isSafeInteger(number) ||
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(next) ||
+        number < 0 ||
+        start < 0 ||
+        next < 0 ||
+        start > next ||
+        first + next > stream.byteLength
+      ) {
+        return undefined;
+      }
+      parsed.push({
+        number,
+        value: /^\s*(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)\s*$/u.exec(
+          stream.subarray(first + start, first + next).toString("latin1"),
+        )?.[1],
+      });
+    }
+    objects = parsed;
+    cache.streams.set(offset.stream, objects);
   }
-  const dictionary = pdfObjectStreamDictionary(contents, streamOffset);
-  if (dictionary === null) return undefined;
-  const lexical = pdfDictionaryLexicalValues(dictionary);
-  const count = Number(/\/N\s+(\d+)(?=[\s/>])/u.exec(lexical)?.[1]);
-  const first = Number(/\/First\s+(\d+)(?=[\s/>])/u.exec(lexical)?.[1]);
-  if (
-    !Number.isSafeInteger(count) ||
-    !Number.isSafeInteger(first) ||
-    offset.index >= count ||
-    first > stream.byteLength
-  ) {
-    return undefined;
-  }
-  const header = stream
-    .subarray(0, first)
-    .toString("latin1")
-    .trim()
-    .split(/\s+/u);
-  if (header.length !== 2 * count) return undefined;
-  const objectNumber = Number(header[offset.index * 2]);
-  const start = Number(header[offset.index * 2 + 1]);
-  const next =
-    offset.index + 1 < count
-      ? Number(header[(offset.index + 1) * 2 + 1])
-      : stream.byteLength - first;
-  if (
-    objectNumber !== Number(object) ||
-    !Number.isSafeInteger(start) ||
-    !Number.isSafeInteger(next) ||
-    start > next ||
-    first + next > stream.byteLength
-  ) {
-    return undefined;
-  }
-  return /^\s*(\[[^\]]*\]|\/[^\s<>[\]()%/]+|\d+)\s*$/u.exec(
-    stream.subarray(first + start, first + next).toString("latin1"),
-  )?.[1];
+  const selected = objects[offset.index];
+  return selected?.number === Number(object) ? selected.value : undefined;
 }
 
 function pdfCrossReferenceOffsets(
@@ -697,7 +702,9 @@ function pdfCrossReferenceOffsets(
         .map(Number);
       if (
         widths?.length !== 3 ||
-        widths.some((width) => !Number.isSafeInteger(width) || width > 6)
+        widths.some(
+          (width) => !Number.isSafeInteger(width) || width < 0 || width > 6,
+        )
       ) {
         return null;
       }
@@ -806,18 +813,6 @@ function pdfCrossReferenceOffsets(
     }
   }
   return entries;
-}
-
-function pdfObjectStreamDictionary(
-  contents: string,
-  offset: number,
-): string | null {
-  const header = /^\d+\s+\d+\s+obj\s*/u.exec(contents.slice(offset));
-  if (header === null) return null;
-  const tail = contents.slice(offset + header[0].length);
-  const marker =
-    />>(?:(?:\s+|%[^\r\n]*(?:\r\n|\r|\n))*)stream(?:\r\n|\r|\n)/u.exec(tail);
-  return marker === null ? null : tail.slice(0, marker.index + 2);
 }
 
 function pdfCrossReferenceStream(
@@ -958,7 +953,10 @@ function pdfCrossReferenceStream(
   return { dictionary, contents: decoded };
 }
 
-function pdfDictionaryLexicalValues(dictionary: string): string {
+function pdfDictionaryLexicalValues(
+  dictionary: string,
+  normalizeNames = true,
+): string {
   let output = "";
   let literalDepth = 0;
   let escaped = false;
@@ -1009,7 +1007,15 @@ function pdfDictionaryLexicalValues(dictionary: string): string {
       output += character;
     }
   }
-  return output;
+  return normalizeNames
+    ? output.replace(
+        /\/([^\s<>()\[\]{}/%]+)/gu,
+        (_match, name: string) =>
+          `/${name.replace(/#([0-9a-f]{2})/giu, (_escape, value: string) =>
+            String.fromCharCode(Number.parseInt(value, 16)),
+          )}`,
+      )
+    : output;
 }
 
 function pdfStreamFilters(

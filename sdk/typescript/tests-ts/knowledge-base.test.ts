@@ -64,6 +64,7 @@ function pdf(
     extraStreams?: number;
     indirectLength?: boolean;
     indirectFilter?: boolean;
+    indirectValueComment?: string;
     headerComment?: string;
     dictionaryPrefix?: string;
     streamComment?: string;
@@ -101,8 +102,14 @@ function pdf(
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     streamObject,
     ...Array.from({ length: extraStreams }, () => streamObject),
-    ...(options.indirectLength ? [String(streamBytes.byteLength)] : []),
-    ...(options.indirectFilter ? [directFilter ?? "/FlateDecode"] : []),
+    ...(options.indirectLength
+      ? [`${streamBytes.byteLength}${options.indirectValueComment ?? ""}`]
+      : []),
+    ...(options.indirectFilter
+      ? [
+          `${directFilter ?? "/FlateDecode"}${options.indirectValueComment ?? ""}`,
+        ]
+      : []),
   ];
   let output = `%PDF-1.4\n${options.headerComment === undefined ? "" : `% ${options.headerComment}\n`}`;
   const offsets = [0];
@@ -122,6 +129,7 @@ function pdf(
 function xrefStreamPdf(
   document: Uint8Array,
   compressIndirectObjects = false,
+  objectHeaderPadding = 0,
 ): Buffer {
   const original = Buffer.from(document).toString("latin1");
   const table = original.lastIndexOf("\nxref\n");
@@ -165,6 +173,7 @@ function xrefStreamPdf(
       header += `${number} ${objectBody.length} `;
       objectBody += `${values[index]} `;
     }
+    header += " ".repeat(objectHeaderPadding);
     const encoded = deflateSync(Buffer.from(header + objectBody, "latin1"));
     body += `${streamObject} 0 obj\n<< /Type /ObjStm /N ${references.length} /First ${header.length} /Length ${encoded.byteLength} /Filter /FlateDecode >>\nstream\n${encoded.toString("latin1")}\nendstream\nendobj\n`;
   }
@@ -599,6 +608,7 @@ describe("scan knowledge bases", () => {
     const chained = join(root, "chained.pdf");
     const indirect = join(root, "indirect.pdf");
     const indirectFilter = join(root, "indirect-filter.pdf");
+    const commentedIndirect = join(root, "commented-indirect.pdf");
     const escaped = join(root, "escaped.pdf");
     const lzw = join(root, "lzw.pdf");
     const earlyChange = join(root, "lzw-early-change.pdf");
@@ -616,6 +626,14 @@ describe("scan knowledge bases", () => {
     await writeFile(
       indirectFilter,
       pdf("Indirect stream filter", 1, true, "", { indirectFilter: true }),
+    );
+    await writeFile(
+      commentedIndirect,
+      pdf("Commented indirect values", 1, true, "", {
+        indirectLength: true,
+        indirectFilter: true,
+        indirectValueComment: " % valid comment\n",
+      }),
     );
     await writeFile(
       escaped,
@@ -643,6 +661,7 @@ describe("scan knowledge bases", () => {
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
       [
         "ASCII85 then Flate",
+        "Commented indirect values",
         "Escaped PDF filter",
         "Indirect stream length",
         "Indirect stream filter",
@@ -676,6 +695,48 @@ describe("scan knowledge bases", () => {
       "PDF object-stream.pdf",
       "PDF xref-stream.pdf",
     ]);
+  });
+
+  test("caches large compressed object-stream headers across repeated references", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "large-object-header.pdf");
+    await writeFile(
+      document,
+      xrefStreamPdf(
+        pdf("Cached object stream header", 1, true, "", {
+          extraStreams: 12,
+          indirectLength: true,
+          indirectFilter: true,
+        }),
+        true,
+        512 * 1024,
+      ),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([document]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Cached object stream header",
+    ]);
+  });
+
+  test("rejects negative cross-reference stream field widths", async () => {
+    const root = await temporaryDirectory();
+    const document = join(root, "negative-xref-width.pdf");
+    const malformed = xrefStreamPdf(
+      pdf("Malformed cross-reference", 1, true, "", {
+        indirectLength: true,
+        indirectFilter: true,
+      }),
+      true,
+    )
+      .toString("latin1")
+      .replace("/W [1 4 2]", "/W [-1 0 0]");
+    await writeFile(document, Buffer.from(malformed, "latin1"));
+
+    await expect(prepareKnowledgeBase([document])).rejects.toThrow(
+      "Cannot extract text from knowledge base PDF",
+    );
   });
 
   test("counts unique objects across overlapping incremental cross-reference tables", async () => {
@@ -728,6 +789,10 @@ describe("scan knowledge bases", () => {
       ],
       ["literal-dictionary-close", { dictionaryPrefix: "/Note (>>) " }],
       ["literal-dictionary-open", { dictionaryPrefix: "/Note (<<) " }],
+      [
+        "escaped-literal-dictionary-close",
+        { dictionaryPrefix: "/Note (/A#29 /Filter /DCTDecode) " },
+      ],
       [
         "comment-dictionary-delimiters",
         { dictionaryPrefix: "% << >> ignored\n" },
