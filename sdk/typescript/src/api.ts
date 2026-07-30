@@ -637,6 +637,9 @@ export class CodexSecurity {
       const registeredScopeExclusions = isRecord(contractScope)
         ? contractScope["requiredExcludePaths"]
         : undefined;
+      const registeredExplicitScopeExclusions = isRecord(contractScope)
+        ? contractScope["requiredExplicitExclusions"]
+        : undefined;
       const expectedScopeExclusions =
         Array.isArray(registeredScopeExclusions) &&
         registeredScopeExclusions.every(
@@ -644,6 +647,25 @@ export class CodexSecurity {
             typeof pattern === "string" && pattern.length > 0,
         )
           ? registeredScopeExclusions
+          : undefined;
+      const expectedExplicitScopeExclusions =
+        Array.isArray(registeredExplicitScopeExclusions) &&
+        registeredExplicitScopeExclusions.every(
+          (exclusion): exclusion is { pattern: string; reason: string } =>
+            isRecord(exclusion) &&
+            typeof exclusion["pattern"] === "string" &&
+            exclusion["pattern"].length > 0 &&
+            typeof exclusion["reason"] === "string" &&
+            exclusion["reason"].trim().length > 0,
+        ) &&
+        expectedScopeExclusions !== undefined &&
+        registeredExplicitScopeExclusions.length ===
+          expectedScopeExclusions.length &&
+        registeredExplicitScopeExclusions.every(
+          (exclusion, index) =>
+            exclusion.pattern === expectedScopeExclusions[index],
+        )
+          ? registeredExplicitScopeExclusions
           : undefined;
       const allowedKinds = isRecord(contractTarget)
         ? contractTarget["allowedKinds"]
@@ -679,6 +701,8 @@ export class CodexSecurity {
           typeof snapshotDigest !== "string") ||
         (registeredScopeExclusions !== undefined &&
           expectedScopeExclusions === undefined) ||
+        (registeredExplicitScopeExclusions !== undefined &&
+          expectedExplicitScopeExclusions === undefined) ||
         typeof registeredRevision !== "string"
       ) {
         throw new CodexSecurityError(
@@ -799,7 +823,7 @@ export class CodexSecurity {
         );
         await writeFile(
           scopeExclusionsFile,
-          `${JSON.stringify(expectedScopeExclusions ?? [])}\n`,
+          `${JSON.stringify(expectedExplicitScopeExclusions ?? [])}\n`,
           { flag: "wx", mode: 0o400, signal },
         );
         await chmod(scopeExclusionsFile, 0o400);

@@ -518,12 +518,21 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
 def registered_standard_scope_exclusions(scan: sqlite3.Row) -> list[dict[str, str]]:
     """Use the host-owned exclusions captured before the scan started."""
 
+    attestation = os.environ.get("CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE")
     if "scope_exclusions_json" not in scan.keys():
+        if attestation:
+            raise SystemExit(
+                "Stored standard scope exclusions do not match their protected snapshot."
+            )
         return standard_scope_exclusions(
             Path(scan["target_path"]), requested_scan_paths(scan)
         )
     serialized = scan["scope_exclusions_json"]
     if serialized is None:
+        if attestation:
+            raise SystemExit(
+                "Stored standard scope exclusions do not match their protected snapshot."
+            )
         return standard_scope_exclusions(
             Path(scan["target_path"]), requested_scan_paths(scan)
         )
@@ -546,7 +555,6 @@ def registered_standard_scope_exclusions(scan: sqlite3.Row) -> list[dict[str, st
     patterns = [exclusion["pattern"] for exclusion in exclusions]
     if patterns != sorted(set(patterns)):
         raise SystemExit("Stored standard scope exclusions are invalid.")
-    attestation = os.environ.get("CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE")
     if attestation:
         try:
             expected = json.loads(
@@ -557,8 +565,7 @@ def registered_standard_scope_exclusions(scan: sqlite3.Row) -> list[dict[str, st
             raise SystemExit("Protected standard scope exclusions are invalid.") from exc
         if (
             not isinstance(expected, list)
-            or any(not isinstance(pattern, str) for pattern in expected)
-            or patterns != expected
+            or exclusions != expected
         ):
             raise SystemExit("Stored standard scope exclusions do not match their protected snapshot.")
     return exclusions

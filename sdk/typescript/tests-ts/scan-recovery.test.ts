@@ -244,46 +244,65 @@ describe("malformed scan artifact recovery", () => {
     const fixture = await startDraftScan();
     const scope = (
       fixture.registration["contract"] as {
-        scope: { requiredExcludePaths: string[] };
+        scope: {
+          requiredExplicitExclusions: Array<{
+            pattern: string;
+            reason: string;
+          }>;
+        };
       }
-    ).scope.requiredExcludePaths;
+    ).scope.requiredExplicitExclusions;
     const attestation = join(
       fixture.stateDir,
       "expected-scope-exclusions.json",
     );
     await writeFile(attestation, JSON.stringify(scope));
-    const tamper = spawnSync(
-      fixture.python,
-      [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import sqlite3, sys",
-          "with sqlite3.connect(sys.argv[1]) as connection:",
-          "    connection.execute('UPDATE scans SET scope_exclusions_json = ? WHERE id = ?', ('[]', sys.argv[2]))",
-        ].join("\n"),
-        join(fixture.stateDir, "workbench.sqlite3"),
-        fixture.scanId,
-      ],
-      { encoding: "utf8" },
-    );
-    expect(tamper.status, tamper.stderr).toBe(0);
-
-    await expect(
-      runWorkbench(
-        {
-          python: fixture.python,
-          pluginRoot: PLUGIN_ROOT,
-          environment: {
-            PATH: process.env["PATH"],
-            CODEX_SECURITY_STATE_DIR: fixture.stateDir,
-            CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE: attestation,
-          },
-        },
-        ["get-scan", "--scan-id", fixture.scanId],
+    for (const tampered of [
+      "[]",
+      null,
+      JSON.stringify(
+        scope.map((exclusion, index) =>
+          index === 0
+            ? { ...exclusion, reason: "fabricated reason" }
+            : exclusion,
+        ),
       ),
-    ).rejects.toThrow(/protected snapshot/iu);
+    ]) {
+      const tamper = spawnSync(
+        fixture.python,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "with sqlite3.connect(sys.argv[1]) as connection:",
+            "    value = None if sys.argv[3] == 'NULL' else sys.argv[3]",
+            "    connection.execute('UPDATE scans SET scope_exclusions_json = ? WHERE id = ?', (value, sys.argv[2]))",
+          ].join("\n"),
+          join(fixture.stateDir, "workbench.sqlite3"),
+          fixture.scanId,
+          tampered ?? "NULL",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(tamper.status, tamper.stderr).toBe(0);
+
+      await expect(
+        runWorkbench(
+          {
+            python: fixture.python,
+            pluginRoot: PLUGIN_ROOT,
+            environment: {
+              PATH: process.env["PATH"],
+              CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+              CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE: attestation,
+            },
+          },
+          ["get-scan", "--scan-id", fixture.scanId],
+        ),
+      ).rejects.toThrow(/protected snapshot/iu);
+    }
   });
 
   test("returns the authoritative directory snapshot contract at registration", async () => {
