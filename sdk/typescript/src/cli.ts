@@ -2973,7 +2973,7 @@ async function protectedHookExecutableRoots(
     const [head, configuration, objects] = await Promise.all([
       lstat(join(repository, "HEAD")),
       lstat(join(repository, "config")),
-      lstat(join(repository, "objects")),
+      stat(join(repository, "objects")),
     ]);
     if (head.isFile() && configuration.isFile() && objects.isDirectory()) {
       gitDirectories.add(repository);
@@ -3046,9 +3046,18 @@ async function protectedHookExecutableRoots(
   for (const gitDirectory of gitDirectories) {
     let commonGitDirectory = selectedCommonRoot ?? gitDirectory;
     try {
-      const commonDirectory = (
-        await readFile(join(gitDirectory, "commondir"), "utf8")
-      ).replace(/\r?\n$/u, "");
+      const commonDirectoryContents = await readFile(
+        join(gitDirectory, "commondir"),
+        "utf8",
+      );
+      const commonDirectory = /^([^\r\n]+?)(?=\r?\n|$)(?:\r?\n[\t ]*)*$/u.exec(
+        commonDirectoryContents,
+      )?.[1];
+      if (commonDirectory === undefined) {
+        throw new Error(
+          "Git common-directory pointer cannot be parsed safely.",
+        );
+      }
       if (commonDirectory.length > 0) {
         const canonical = await canonicalProtectedHookRoot(
           resolve(gitDirectory, commonDirectory),
@@ -3065,6 +3074,25 @@ async function protectedHookExecutableRoots(
     let worktreeConfigEnabled = false;
     let configuredWorktree: string | undefined;
     let configuredHookPath: string | undefined;
+    const globalConfigurationPaths = gitGlobalConfigurationPaths(environment);
+    const remoteUrls = new Set<string>();
+    for (const configurationPath of new Set([
+      ...globalConfigurationPaths,
+      join(commonGitDirectory, "config"),
+      join(gitDirectory, "config.worktree"),
+    ])) {
+      try {
+        const metadata = await stat(configurationPath);
+        if (!metadata.isFile() || metadata.size > 1_024 * 1_024) continue;
+        for (const entry of gitConfigEntries(
+          await readFile(configurationPath, "utf8"),
+        )) {
+          if (entry.kind === "remoteUrl") remoteUrls.add(entry.value);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     const readConfiguration = async (path: string): Promise<void> => {
       try {
         const canonicalPath = await canonicalProtectedHookRoot(path);
@@ -3091,12 +3119,15 @@ async function protectedHookExecutableRoots(
               configuredHookPath = entry.value;
             } else if (entry.kind === "worktreeConfig") {
               worktreeConfigEnabled = entry.value;
+            } else if (entry.kind === "remoteUrl") {
+              remoteUrls.add(entry.value);
             } else if (
               entry.condition === undefined ||
               (await gitIncludeConditionMatches(
                 entry.condition,
                 gitDirectory,
                 path,
+                remoteUrls,
               ))
             ) {
               await readConfiguration(
@@ -3114,7 +3145,7 @@ async function protectedHookExecutableRoots(
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     };
-    for (const globalPath of gitGlobalConfigurationPaths(environment)) {
+    for (const globalPath of globalConfigurationPaths) {
       await readConfiguration(globalPath);
     }
     await readConfiguration(join(commonGitDirectory, "config"));
@@ -3208,7 +3239,12 @@ async function protectedHookExecutableRoots(
       );
     }
     const hooksPath = await expandGitConfigIncludePath(environmentHookPath);
-    roots.add(await canonicalProtectedHookRoot(resolve(repository, hooksPath)));
+    for (const base of new Set([
+      repository,
+      ...discoveredWorktreeRoots.values(),
+    ])) {
+      roots.add(await canonicalProtectedHookRoot(resolve(base, hooksPath)));
+    }
   }
   if (!selectedWorktree) {
     for (const [gitDirectory, configured] of configuredWorktrees) {
@@ -3230,22 +3266,40 @@ function gitGlobalConfigurationPaths(
     "GIT_CONFIG_NOSYSTEM",
   );
   const home =
-    hookGitEnvironmentValue(
-      environment,
-      process.platform === "win32" ? "USERPROFILE" : "HOME",
-    ) ?? userInfo().homedir;
+    hookGitEnvironmentValue(environment, "HOME") ??
+    (process.platform === "win32"
+      ? hookGitEnvironmentValue(environment, "USERPROFILE")
+      : undefined) ??
+    userInfo().homedir;
   const xdg =
-    hookGitEnvironmentValue(environment, "XDG_CONFIG_HOME") ??
+    hookGitEnvironmentValue(environment, "XDG_CONFIG_HOME") ||
     join(home, ".config");
   const global = hookGitEnvironmentValue(environment, "GIT_CONFIG_GLOBAL");
+  const pathEntries = (
+    hookGitEnvironmentValue(environment, "PATH") ?? ""
+  ).split(delimiter);
+  if (pathEntries.length > 128) {
+    throw new Error("Too many Git executable search directories.");
+  }
+  const installationConfigurations = pathEntries.flatMap((entry) => {
+    if (!isAbsolute(entry)) return [];
+    const prefix = dirname(entry);
+    return [
+      join(prefix, "etc", "gitconfig"),
+      join(prefix, "mingw64", "etc", "gitconfig"),
+      join(prefix, "mingw32", "etc", "gitconfig"),
+    ];
+  });
   return [
-    ...(disableSystem === undefined ||
-    ["0", "false", "no"].includes(disableSystem)
+    ...(disableSystem === undefined || !gitConfigurationBoolean(disableSystem)
       ? system === undefined
         ? [
-            "/etc/gitconfig",
-            "/usr/local/etc/gitconfig",
-            "/opt/homebrew/etc/gitconfig",
+            ...new Set([
+              "/etc/gitconfig",
+              "/usr/local/etc/gitconfig",
+              "/opt/homebrew/etc/gitconfig",
+              ...installationConfigurations,
+            ]),
           ]
         : [system]
       : []),
@@ -3253,6 +3307,20 @@ function gitGlobalConfigurationPaths(
       ? [join(xdg, "git", "config"), join(home, ".gitconfig")]
       : [global]),
   ];
+}
+
+function gitConfigurationBoolean(value: string): boolean {
+  const normalized = value.toLowerCase();
+  if (["true", "yes", "on"].includes(normalized)) return true;
+  if (["false", "no", "off"].includes(normalized)) return false;
+  if (/^[+-]?(?:0x[0-9a-f]+|\d+)[kmg]?$/iu.test(normalized)) {
+    const digits = normalized
+      .replace(/^[+-]/u, "")
+      .replace(/^0x/iu, "")
+      .replace(/[kmg]$/iu, "");
+    return /[1-9a-f]/iu.test(digits);
+  }
+  throw new Error("Invalid Git system-configuration boolean.");
 }
 
 function hookGitEnvironmentValue(
@@ -3270,6 +3338,7 @@ type GitHookConfigurationEntry =
   | { kind: "worktree"; value: string }
   | { kind: "hooksPath"; value: string }
   | { kind: "worktreeConfig"; value: boolean }
+  | { kind: "remoteUrl"; value: string }
   | { kind: "include"; path: string; condition?: string };
 
 function gitConfigEntries(contents: string): GitHookConfigurationEntry[] {
@@ -3299,10 +3368,12 @@ function gitConfigEntries(contents: string): GitHookConfigurationEntry[] {
         ? "(?:worktree|hookspath)"
         : sectionName === "extensions" && subsection === undefined
           ? "worktreeconfig"
-          : (sectionName === "include" && subsection === undefined) ||
-              (sectionName === "includeif" && subsection !== undefined)
-            ? "path"
-            : null;
+          : sectionName === "remote" && subsection !== undefined
+            ? "url"
+            : (sectionName === "include" && subsection === undefined) ||
+                (sectionName === "includeif" && subsection !== undefined)
+              ? "path"
+              : null;
     if (key === null) continue;
     const matched = new RegExp(
       `^\\s*${key}(?:\\s*=\\s*(.*?))?\\s*$`,
@@ -3317,6 +3388,10 @@ function gitConfigEntries(contents: string): GitHookConfigurationEntry[] {
       continue;
     }
     const value = gitConfigValue(configured);
+    if (sectionName === "remote") {
+      entries.push({ kind: "remoteUrl", value });
+      continue;
+    }
     if (sectionName === "extensions") {
       const normalized = value.toLowerCase();
       if (["true", "yes", "on", "1"].includes(normalized)) {
@@ -3432,6 +3507,7 @@ async function gitIncludeConditionMatches(
   condition: string,
   gitDirectory: string,
   configurationPath: string,
+  remoteUrls: ReadonlySet<string>,
 ): Promise<boolean> {
   const separator = condition.indexOf(":");
   if (separator < 0) {
@@ -3439,7 +3515,7 @@ async function gitIncludeConditionMatches(
   }
   const kind = condition.slice(0, separator).toLowerCase();
   let pattern = condition.slice(separator + 1).replaceAll("\\", "/");
-  let candidate: string;
+  let candidates: readonly string[];
   if (kind === "gitdir" || kind === "gitdir/i") {
     if (pattern.startsWith("./")) {
       pattern = resolve(dirname(configurationPath), pattern).replaceAll(
@@ -3455,7 +3531,7 @@ async function gitIncludeConditionMatches(
       pattern = `**/${pattern}`;
     }
     if (pattern.endsWith("/")) pattern += "**";
-    candidate = gitDirectory.replaceAll("\\", "/");
+    candidates = [gitDirectory.replaceAll("\\", "/")];
   } else if (kind === "onbranch") {
     let head: string;
     try {
@@ -3467,7 +3543,14 @@ async function gitIncludeConditionMatches(
     const branch = /^ref:[\t ]*refs\/heads\/(.+?)(?:\r?\n)?$/u.exec(head)?.[1];
     if (branch === undefined) return false;
     if (pattern.endsWith("/")) pattern += "**";
-    candidate = branch;
+    candidates = [branch];
+  } else if (kind === "hasconfig") {
+    const remotePrefix = "remote.*.url:";
+    if (!pattern.toLowerCase().startsWith(remotePrefix)) {
+      throw new Error("Unsupported conditional Git configuration include.");
+    }
+    pattern = pattern.slice(remotePrefix.length);
+    candidates = [...remoteUrls];
   } else {
     throw new Error("Unsupported conditional Git configuration include.");
   }
@@ -3550,7 +3633,9 @@ async function gitIncludeConditionMatches(
   }
   expression += "$";
   const matcher = new RegExp(expression, kind === "gitdir/i" ? "iu" : "u");
-  return matcher.test(candidate) || matcher.test(`${candidate}/`);
+  return candidates.some(
+    (candidate) => matcher.test(candidate) || matcher.test(`${candidate}/`),
+  );
 }
 
 function gitAlternateObjectDirectoryLine(value: string): string {

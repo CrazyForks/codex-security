@@ -1382,17 +1382,24 @@ describe("CLI", () => {
   test("protects active conditional and enabled Git worktree configuration", async () => {
     for (const mode of [
       "active-include",
+      "hasconfig-include",
       "character-class-include",
       "posix-character-class-include",
       "environment-config-override",
       "external-hooks-path",
       "environment-hooks-path",
+      "environment-relative-subdirectory-hooks-path",
       "included-hooks-path",
       "relative-subdirectory-hooks-path",
       "global-hooks-path",
       "xdg-hooks-path",
+      "xdg-empty-hooks-path",
       "system-hooks-path",
+      "system-hooks-path-off",
+      "system-hooks-path-uppercase",
+      "system-hooks-path-signed-zero",
       "bare-hooks-path",
+      "bare-symlink-hooks-path",
       "prefix-hooks-path",
       "enabled-worktree-config",
       "integer-worktree-config",
@@ -1400,6 +1407,9 @@ describe("CLI", () => {
       "ordered-worktree-config",
       "common-directory",
     ] as const) {
+      if (mode === "bare-symlink-hooks-path" && process.platform === "win32") {
+        continue;
+      }
       const root = await realpath(
         await mkdtemp(join(tmpdir(), `codex-security-cli-${mode}-`)),
       );
@@ -1410,7 +1420,7 @@ describe("CLI", () => {
         const marker = join(root, "git-shim-executed");
         execFileSync(
           "git",
-          mode === "bare-hooks-path"
+          mode === "bare-hooks-path" || mode === "bare-symlink-hooks-path"
             ? ["init", "--bare", "-q", repository]
             : ["init", "-q", repository],
           { timeout: 10_000 },
@@ -1419,10 +1429,13 @@ describe("CLI", () => {
         const configuredWorktree = worktree.replaceAll("\\", "/");
         const config = join(
           repository,
-          ...(mode === "bare-hooks-path" ? ["config"] : [".git", "config"]),
+          ...(mode === "bare-hooks-path" || mode === "bare-symlink-hooks-path"
+            ? ["config"]
+            : [".git", "config"]),
         );
         const invocation =
-          mode === "relative-subdirectory-hooks-path"
+          mode === "relative-subdirectory-hooks-path" ||
+          mode === "environment-relative-subdirectory-hooks-path"
             ? join(repository, "nested")
             : repository;
         if (invocation !== repository) await mkdir(invocation);
@@ -1430,6 +1443,7 @@ describe("CLI", () => {
         let globalConfiguration: Record<string, string> = {};
         if (
           mode === "active-include" ||
+          mode === "hasconfig-include" ||
           mode === "character-class-include" ||
           mode === "posix-character-class-include" ||
           mode === "included-hooks-path"
@@ -1437,24 +1451,40 @@ describe("CLI", () => {
           const included = join(root, "active.gitconfig");
           await writeFile(
             included,
-            `[core]\n\t${mode === "included-hooks-path" ? "hooksPath" : "worktree"} = ${configuredWorktree}\n`,
+            `[core]\n\t${mode === "included-hooks-path" || mode === "hasconfig-include" ? "hooksPath" : "worktree"} = ${configuredWorktree}\n`,
           );
           const gitDirectory = join(repository, ".git").replaceAll("\\", "/");
           const condition =
-            mode === "character-class-include"
-              ? gitDirectory.replace("repository", "repositor[y]")
-              : mode === "posix-character-class-include"
-                ? gitDirectory.replace("repository", "repositor[[:alpha:]]")
-                : gitDirectory;
+            mode === "hasconfig-include"
+              ? "hasconfig:remote.*.url:https://github.com/**"
+              : mode === "character-class-include"
+                ? gitDirectory.replace("repository", "repositor[y]")
+                : mode === "posix-character-class-include"
+                  ? gitDirectory.replace("repository", "repositor[[:alpha:]]")
+                  : gitDirectory;
+          if (mode === "hasconfig-include") {
+            execFileSync(
+              "git",
+              [
+                "-C",
+                repository,
+                "config",
+                "remote.origin.url",
+                "https://github.com/openai/codex-security",
+              ],
+              { timeout: 10_000 },
+            );
+          }
           await writeFile(
             config,
-            `${await readFile(config, "utf8")}[includeIf "gitdir:${condition}/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
+            `${await readFile(config, "utf8")}[includeIf "${mode === "hasconfig-include" ? condition : `gitdir:${condition}/`}"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
           );
         } else if (
           mode === "environment-config-override" ||
           mode === "external-hooks-path" ||
           mode === "relative-subdirectory-hooks-path" ||
           mode === "bare-hooks-path" ||
+          mode === "bare-symlink-hooks-path" ||
           mode === "prefix-hooks-path"
         ) {
           execFileSync(
@@ -1466,6 +1496,7 @@ describe("CLI", () => {
               mode === "external-hooks-path" ||
               mode === "relative-subdirectory-hooks-path" ||
               mode === "bare-hooks-path" ||
+              mode === "bare-symlink-hooks-path" ||
               mode === "prefix-hooks-path"
                 ? "core.hooksPath"
                 : "core.worktree",
@@ -1477,18 +1508,32 @@ describe("CLI", () => {
             ],
             { timeout: 10_000 },
           );
-        } else if (mode === "environment-hooks-path") {
+          if (mode === "bare-symlink-hooks-path") {
+            const objectStore = join(root, "symlinked-objects");
+            await rename(join(repository, "objects"), objectStore);
+            await symlink(objectStore, join(repository, "objects"), "dir");
+          }
+        } else if (
+          mode === "environment-hooks-path" ||
+          mode === "environment-relative-subdirectory-hooks-path"
+        ) {
           // This late configuration changes Git's hook path without affecting
           // repository setup, so it must be protected before resolving Git.
         } else if (
           mode === "global-hooks-path" ||
           mode === "xdg-hooks-path" ||
-          mode === "system-hooks-path"
+          mode === "xdg-empty-hooks-path" ||
+          mode === "system-hooks-path" ||
+          mode === "system-hooks-path-off" ||
+          mode === "system-hooks-path-uppercase" ||
+          mode === "system-hooks-path-signed-zero"
         ) {
           const path =
             mode === "xdg-hooks-path"
               ? join(root, "xdg", "git", "config")
-              : join(root, `${mode}.gitconfig`);
+              : mode === "xdg-empty-hooks-path"
+                ? join(root, "home", ".config", "git", "config")
+                : join(root, `${mode}.gitconfig`);
           await mkdir(dirname(path), { recursive: true });
           await writeFile(
             path,
@@ -1497,15 +1542,26 @@ describe("CLI", () => {
           globalConfiguration =
             mode === "global-hooks-path"
               ? { GIT_CONFIG_GLOBAL: path }
-              : mode === "system-hooks-path"
+              : mode === "system-hooks-path" ||
+                  mode === "system-hooks-path-off" ||
+                  mode === "system-hooks-path-uppercase" ||
+                  mode === "system-hooks-path-signed-zero"
                 ? {
                     GIT_CONFIG_SYSTEM: path,
-                    GIT_CONFIG_NOSYSTEM: "0",
+                    GIT_CONFIG_NOSYSTEM:
+                      mode === "system-hooks-path-off"
+                        ? "off"
+                        : mode === "system-hooks-path-uppercase"
+                          ? "FALSE"
+                          : mode === "system-hooks-path-signed-zero"
+                            ? "+0"
+                            : "0",
                     GIT_CONFIG_GLOBAL: "/dev/null",
                   }
                 : {
                     HOME: join(root, "home"),
-                    XDG_CONFIG_HOME: join(root, "xdg"),
+                    XDG_CONFIG_HOME:
+                      mode === "xdg-empty-hooks-path" ? "" : join(root, "xdg"),
                   };
         } else if (mode === "common-directory") {
           selectedCommonDirectory = join(root, "selected-common");
@@ -1592,11 +1648,15 @@ describe("CLI", () => {
                     GIT_CONFIG_KEY_0: "core.worktree",
                     GIT_CONFIG_VALUE_0: join(root, "other-worktree"),
                   }
-                : mode === "environment-hooks-path"
+                : mode === "environment-hooks-path" ||
+                    mode === "environment-relative-subdirectory-hooks-path"
                   ? {
                       GIT_CONFIG_COUNT: "1",
                       GIT_CONFIG_KEY_0: "core.hooksPath",
-                      GIT_CONFIG_VALUE_0: configuredWorktree,
+                      GIT_CONFIG_VALUE_0:
+                        mode === "environment-relative-subdirectory-hooks-path"
+                          ? "../configured-worktree"
+                          : configuredWorktree,
                     }
                   : {}),
               PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
@@ -2038,7 +2098,7 @@ describe("CLI", () => {
         ).trimEnd();
         await writeFile(
           join(linkedGitDirectory, "commondir"),
-          `${commonDirectory}\n`,
+          `${commonDirectory}\n\n`,
         );
         const binaries = join(commonDirectory, "node_modules", ".bin");
         const marker = join(root, "git-shim-executed");
