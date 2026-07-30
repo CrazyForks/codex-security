@@ -359,15 +359,84 @@ def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     return scope_path
 
 
+def record_overlapping_scope_exclusions(
+    repository: Path,
+    excluded_root: Path,
+    requested_scopes: list[Path],
+    reason: str,
+    exclusions: dict[str, dict[str, str]],
+) -> None:
+    """Carve directly requested scopes out of a broader excluded directory."""
+
+    pending = [excluded_root]
+    while pending:
+        current = pending.pop()
+        requested = [
+            scope
+            for scope in requested_scopes
+            if scope == current or scope.is_relative_to(current)
+        ]
+        if not requested:
+            pattern = current.relative_to(repository).as_posix()
+            exclusions[pattern] = {"pattern": pattern, "reason": reason}
+            continue
+        if any(scope == current and scope.is_dir() for scope in requested):
+            continue
+        if not current.is_dir():
+            continue
+        try:
+            for child in current.iterdir():
+                if not child.is_symlink():
+                    pending.append(child)
+        except OSError as exc:
+            raise SystemExit(f"Unable to safely inventory scope path: {current}") from exc
+
+
 def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, str]]:
-    """Declare the exact directory exclusions used for each inventoried scope."""
+    """Declare exact inventory exclusions without excluding directly requested paths."""
 
     repository = repo.resolve()
+    resolved_scopes = [
+        resolve_scope(repository, scope, expand_user=False) for scope in scopes
+    ]
     exclusions: dict[str, dict[str, str]] = {}
-    for scope in scopes:
-        scope_path = resolve_scope(repository, scope, expand_user=False)
+    for scope_path in resolved_scopes:
         if not scope_path.is_dir():
             continue
+        narrower_scopes = [
+            selected
+            for selected in resolved_scopes
+            if selected != scope_path
+            and selected.is_relative_to(scope_path)
+            and any(
+                part in STANDARD_SCOPE_EXCLUDED_DIRS
+                for part in selected.relative_to(scope_path).parts
+            )
+        ]
+        if narrower_scopes:
+            pending = [scope_path]
+            while pending:
+                directory = pending.pop()
+                try:
+                    for child in directory.iterdir():
+                        if child.is_symlink():
+                            continue
+                        if child.name in STANDARD_SCOPE_EXCLUDED_DIRS:
+                            record_overlapping_scope_exclusions(
+                                repository,
+                                child,
+                                narrower_scopes,
+                                STANDARD_SCOPE_EXCLUDED_DIRS[child.name],
+                                exclusions,
+                            )
+                        elif child.is_dir():
+                            pending.append(child)
+                except OSError as exc:
+                    raise SystemExit(
+                        f"Unable to safely inventory scope path: {directory}"
+                    ) from exc
+            continue
+
         scope_prefix = PurePosixPath(scope_path.relative_to(repository).as_posix())
         for directory, reason in STANDARD_SCOPE_EXCLUDED_DIRS.items():
             for pattern in (

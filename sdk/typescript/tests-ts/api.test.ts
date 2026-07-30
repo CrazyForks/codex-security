@@ -3333,6 +3333,221 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("preserves explicitly requested dependencies across overlapping scopes", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const packageDirectory = join(repository, "package");
+    const dependency = join(packageDirectory, "node_modules", "dependency");
+    const sibling = join(packageDirectory, "node_modules", "sibling");
+    const manifest = join(root, "scan-manifest.json");
+    const coverage = join(root, "coverage.json");
+    const scopes = join(root, "target-paths.json");
+    const inventory = join(root, "scope_inventory.jsonl");
+
+    await Promise.all([
+      mkdir(join(packageDirectory, ".git"), { recursive: true }),
+      mkdir(join(dependency, "node_modules", "transitive"), {
+        recursive: true,
+      }),
+      mkdir(sibling, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(packageDirectory, "app.ts"), "export {};\n"),
+      writeFile(join(packageDirectory, ".git", "config"), "[core]\n"),
+      writeFile(join(dependency, "index.js"), "module.exports = {};\n"),
+      writeFile(
+        join(dependency, "node_modules", "transitive", "index.js"),
+        "module.exports = {};\n",
+      ),
+      writeFile(join(sibling, "index.js"), "module.exports = {};\n"),
+    ]);
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
+    const expectedExclusions = [
+      "package/.git",
+      "package/node_modules/dependency/**/.git/**",
+      "package/node_modules/dependency/**/node_modules/**",
+      "package/node_modules/dependency/.git",
+      "package/node_modules/dependency/node_modules",
+      "package/node_modules/sibling",
+    ];
+
+    for (const broaderScope of [".", "package"]) {
+      const requestedPaths = [
+        broaderScope,
+        "package/node_modules/dependency",
+        "package/node_modules/dependency/index.js",
+      ];
+      await Promise.all([
+        writeFile(scopes, JSON.stringify(requestedPaths)),
+        writeFile(
+          manifest,
+          JSON.stringify({
+            scan: {
+              scope: { includePaths: requestedPaths, excludePaths: [] },
+            },
+          }),
+        ),
+        writeFile(
+          coverage,
+          JSON.stringify({
+            includePaths: requestedPaths,
+            excludePaths: [],
+            explicitExclusions: [],
+          }),
+        ),
+      ]);
+
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          generator,
+          "make-scope-inventory",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          inventory,
+        ],
+        { stdio: "pipe" },
+      );
+      expect(
+        (await readFile(inventory, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((row) => JSON.parse(row)),
+      ).toEqual([
+        { path: "package/app.ts" },
+        { path: "package/node_modules/dependency/index.js" },
+      ]);
+
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          generator,
+          "bind-scope-exclusions",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--manifest",
+          manifest,
+          "--coverage",
+          coverage,
+        ],
+        { stdio: "pipe" },
+      );
+
+      const boundManifest = JSON.parse(await readFile(manifest, "utf8")) as {
+        scan: { scope: { includePaths: string[]; excludePaths: string[] } };
+      };
+      const boundCoverage = JSON.parse(await readFile(coverage, "utf8")) as {
+        includePaths: string[];
+        excludePaths: string[];
+        explicitExclusions: Array<{ pattern: string; reason: string }>;
+      };
+      expect(boundManifest.scan.scope.includePaths).toEqual(requestedPaths);
+      expect(boundCoverage.includePaths).toEqual(requestedPaths);
+      expect(boundManifest.scan.scope.excludePaths).toEqual(expectedExclusions);
+      expect(boundCoverage.excludePaths).toEqual(expectedExclusions);
+      expect(
+        boundCoverage.explicitExclusions.map((item) => item.pattern),
+      ).toEqual(expectedExclusions);
+
+      const historyCoverage = JSON.parse(
+        execFileSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            "-c",
+            [
+              "import json, runpy, sys",
+              "from pathlib import Path",
+              "sys.path.insert(0, sys.argv[1])",
+              "module = runpy.run_path(str(Path(sys.argv[1]) / 'workbench_scan_history.py'))",
+              "with open(sys.argv[2], encoding='utf-8') as source: coverage = json.load(source)",
+              "coverage['completeness'] = 'complete'",
+              "scan = {'status': 'complete', 'target_id': 'target'}",
+              "paths = {'firstParty': 'package/app.ts', 'requestedDependency': 'package/node_modules/dependency/index.js', 'siblingDependency': 'package/node_modules/sibling/index.js', 'transitiveDependency': 'package/node_modules/dependency/node_modules/transitive/index.js', 'gitMetadata': 'package/.git/config'}",
+              "print(json.dumps({label: module['scan_covers_path'](scan, target_id='target', path=path, coverage=coverage) for label, path in paths.items()}))",
+            ].join("\n"),
+            join(PLUGIN_ROOT, "scripts"),
+            coverage,
+          ],
+          { encoding: "utf8" },
+        ),
+      ) as Record<string, boolean>;
+      expect(historyCoverage).toEqual({
+        firstParty: true,
+        requestedDependency: true,
+        siblingDependency: false,
+        transitiveDependency: false,
+        gitMetadata: false,
+      });
+
+      const scanDir = join(
+        root,
+        broaderScope === "." ? "repository-scan" : "package-scan",
+      );
+      await mkdir(scanDir, { mode: 0o700 });
+      const registration = JSON.parse(
+        execFileSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+            "register-cli-scan",
+            "--repository",
+            repository,
+            "--scan-dir",
+            scanDir,
+            "--recipe-json",
+            JSON.stringify({
+              config: {},
+              mode: "standard",
+              repository,
+              target: { kind: "paths", paths: requestedPaths },
+            }),
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              PATH: process.env["PATH"],
+              CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            },
+          },
+        ),
+      ) as {
+        contract: {
+          scope: {
+            requiredExcludePaths: string[];
+            requiredExplicitExclusions: Array<{
+              pattern: string;
+              reason: string;
+            }>;
+          };
+        };
+      };
+      expect(registration.contract.scope.requiredExcludePaths).toEqual(
+        expectedExclusions,
+      );
+      expect(
+        registration.contract.scope.requiredExplicitExclusions.map(
+          (item) => item.pattern,
+        ),
+      ).toEqual(expectedExclusions);
+    }
+  });
+
   test("aligns the bundled standard workflow with the authoritative inventory", async () => {
     const [skill, workflow, artifacts, capabilities] = await Promise.all([
       readFile(
