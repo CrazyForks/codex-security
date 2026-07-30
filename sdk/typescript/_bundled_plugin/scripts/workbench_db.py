@@ -97,6 +97,7 @@ from workbench_target import (
     copy_git_worktree_files,
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    git_bytes,
     git_command,
     git_output,
     git_revision,
@@ -622,6 +623,44 @@ def workbench_completion_binding(
     }
 
 
+def authoritative_scope_file_count(
+    target: Path, scope: str, diff_target: dict[str, str] | None
+) -> int:
+    if diff_target is None:
+        return directory_snapshot_regular_file_count(target if scope == "." else target / scope)
+    base = diff_target["baseRevision"]
+    if diff_target["kind"] == "working_tree":
+        changes = [
+            git_bytes(target, "diff", "--name-only", "-z", base, "--", "."),
+            git_bytes(target, "diff", "--cached", "--name-only", "-z", base, "--", "."),
+            git_bytes(
+                target,
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+            ),
+        ]
+    else:
+        changes = [
+            git_bytes(
+                target,
+                "diff",
+                "--name-only",
+                "-z",
+                base,
+                diff_target["headRevision"],
+                "--",
+                ".",
+            )
+        ]
+    if any(change is None for change in changes):
+        raise SystemExit("Could not enumerate the selected Git diff scope.")
+    return len({path for change in changes if change is not None for path in change.split(b"\0") if path})
+
+
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
     manifest_scan = manifest.get("scan")
     if not isinstance(manifest_scan, dict):
@@ -1127,9 +1166,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         )
         if diff_target is not None and not target_summary:
             target_summary = diff_target_summary(diff_target)
-        scope_file_count = directory_snapshot_regular_file_count(
-            target if scope == "." else target / scope
-        )
+        scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
         target_identity = scan_target_identity(
             target,
             diff_target,
@@ -1220,9 +1257,7 @@ def start_prompt_only_scan(
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
-    scope_file_count = directory_snapshot_regular_file_count(
-        target if scope == "." else target / scope
-    )
+    scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
     target_root = scan_target_root(args.scan_root, target)
@@ -1560,8 +1595,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
-        directory_snapshot_regular_file_count(repository)
-        if not paths
+        authoritative_scope_file_count(repository, scope, diff_target)
+        if diff_target is not None or not paths
         else sum(
             1
             if (repository / path).is_file()
@@ -2350,6 +2385,7 @@ def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) ->
         manifest, _, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
+            trusted_sealed_scan=True,
         )
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
@@ -3083,6 +3119,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
         manifest, findings_document, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
+            trusted_sealed_scan=True,
         )
         verify_manifest_binding(scan, manifest)
         manifest_digest = published_manifest_digest(scan_dir, manifest)

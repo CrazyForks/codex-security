@@ -261,6 +261,17 @@ describe("malformed scan artifact recovery", () => {
       sha256:
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     });
+    await expect(
+      workbench(fixture, [
+        "export-findings",
+        "--scan-id",
+        fixture.scanId,
+        "--format",
+        "json",
+      ]),
+    ).resolves.toMatchObject({
+      export: { path: join(fixture.scanDir, "findings.json") },
+    });
   });
 
   test("rejects a self-sealed empty inventory for a nonempty running scan", async () => {
@@ -400,6 +411,80 @@ describe("malformed scan artifact recovery", () => {
         expect(copied.status, copied.stderr).toBe(0);
       }
     }
+  });
+
+  test("counts deleted diff files before minting an empty-scope proof", async () => {
+    const fixture = await startDraftScan("clean");
+    const git = (args: string[]): string => {
+      const result = spawnSync("git", ["-C", fixture.repository, ...args], {
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    const base = git(["rev-parse", "HEAD"]);
+    git(["rm", "--quiet", "src/extract.py"]);
+    git([
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "remove final source file",
+    ]);
+    const head = git(["rev-parse", "HEAD"]);
+    const scanDir = join(fixture.stateDir, "deletion-scan");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const registration = await workbench(fixture, [
+      "register-cli-scan",
+      "--repository",
+      fixture.repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository: fixture.repository,
+        target: { kind: "refs", paths: [], base, head },
+      }),
+    ]);
+    fixture.scanDir = scanDir;
+    fixture.scanId = String(registration["scanId"]);
+    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+      recursive: true,
+    });
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson<{
+      scan: {
+        id: string;
+        target: { kind: string };
+        sealedAt?: string;
+        artifacts?: unknown[];
+      };
+    }>(manifestPath);
+    manifest.scan.id = fixture.scanId;
+    manifest.scan.target.kind = "git_diff";
+    delete manifest.scan.sealedAt;
+    delete manifest.scan.artifacts;
+    await writeJson(manifestPath, manifest);
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    findings.scanId = fixture.scanId;
+    findings.findings = [];
+    await writeJson(findingsPath, findings);
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    coverage.scanId = fixture.scanId;
+    coverage["mode"] = "branch_diff";
+    coverage.surfaces = [];
+    await writeJson(coveragePath, coverage);
+
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "complete coverage requires a reviewed surface or an authoritatively empty scope inventory",
+    );
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {
@@ -837,6 +922,26 @@ describe("malformed scan artifact recovery", () => {
       explicitExclusions: [],
       deferred: [],
     });
+  });
+
+  test("avoids collisions with existing recovered coverage-surface IDs", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "coverage.json");
+    const document = await readJson<CoverageDocument>(path);
+    const surface = (document.surfaces as CoverageSurface[])[0]!;
+    surface.id = "surface_recovered_reported_findings";
+    surface.disposition = "reviewed";
+    await writeJson(path, document);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+    const recovered = await readJson<CoverageDocument>(path);
+    expect(recovered.completeness).toBe("partial");
+    expect(
+      (recovered.surfaces as CoverageSurface[]).map(({ id }) => id),
+    ).toEqual([
+      "surface_recovered_reported_findings",
+      "surface_recovered_reported_findings_2",
+    ]);
   });
 
   test("discards unsafe hardening portfolios without discarding findings", async () => {

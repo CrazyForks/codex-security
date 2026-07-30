@@ -1008,9 +1008,14 @@ def _recover_unsealed_coverage(
         surface.get("disposition") == "reported" for surface in coverage["surfaces"]
     )
     if has_findings and not has_reported_surface:
+        recovered_id = "surface_recovered_reported_findings"
+        suffix = 2
+        while recovered_id in surface_ids:
+            recovered_id = f"surface_recovered_reported_findings_{suffix}"
+            suffix += 1
         coverage["surfaces"].append(
             {
-                "id": "surface_recovered_reported_findings",
+                "id": recovered_id,
                 "label": "Recovered reportable findings",
                 "disposition": "reported",
                 "receiptRefs": [],
