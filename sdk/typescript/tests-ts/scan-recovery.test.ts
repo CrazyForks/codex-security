@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -116,6 +117,8 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
 
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" = "directory",
+  requestedPaths?: string[],
+  beforeRegistration?: (repository: string) => Promise<void>,
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -155,6 +158,8 @@ async function startDraftScan(
     }
   }
 
+  await beforeRegistration?.(target);
+
   const fixture: ScanFixture = {
     python: python!,
     repository: target,
@@ -174,7 +179,10 @@ async function startDraftScan(
       config: {},
       mode: "standard",
       repository: target,
-      target: { kind: "repository", paths: [] },
+      target:
+        requestedPaths === undefined
+          ? { kind: "repository", paths: [] }
+          : { kind: "paths", paths: requestedPaths },
     }),
   ]);
   fixture.scanId = String(registration["scanId"]);
@@ -286,6 +294,208 @@ describe("malformed scan artifact recovery", () => {
     expect(coverage.explicitExclusions).toEqual(
       contract.scope.requiredExplicitExclusions,
     );
+  });
+
+  test("preserves registered exclusions when a requested scope disappears", async () => {
+    const fixture = await startDraftScan("directory", ["src"]);
+    const contract = fixture.registration["contract"] as {
+      scope: {
+        requiredExcludePaths: string[];
+        requiredExplicitExclusions: Array<{ pattern: string; reason: string }>;
+      };
+    };
+    const expectedExclusions = [
+      "src/**/.git/**",
+      "src/**/node_modules/**",
+      "src/.git",
+      "src/node_modules",
+    ];
+
+    expect(contract.scope.requiredExcludePaths).toEqual(expectedExclusions);
+    await rm(join(fixture.repository, "src"), {
+      recursive: true,
+      force: true,
+    });
+
+    const prepared = await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+
+    expect((prepared["scan"] as ScanSummary).progress.status).toBe("running");
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+
+    const manifest = await readJson<{
+      scan: { scope: { includePaths: string[]; excludePaths: string[] } };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    const coverage = await readJson<{
+      includePaths: string[];
+      excludePaths: string[];
+      explicitExclusions: Array<{ pattern: string; reason: string }>;
+    }>(join(fixture.scanDir, "coverage.json"));
+
+    expect(manifest.scan.scope.includePaths).toEqual(["src"]);
+    expect(manifest.scan.scope.excludePaths).toEqual(expectedExclusions);
+    expect(coverage.includePaths).toEqual(["src"]);
+    expect(coverage.excludePaths).toEqual(expectedExclusions);
+    expect(coverage.explicitExclusions).toEqual(
+      contract.scope.requiredExplicitExclusions,
+    );
+  });
+
+  test("preserves a registered symlink exclusion after the link disappears", async () => {
+    if (process.platform === "win32") return;
+
+    const fixture = await startDraftScan(
+      "directory",
+      undefined,
+      async (repository) => {
+        await symlink("src/extract.py", join(repository, "source-link.py"));
+      },
+    );
+    const contract = fixture.registration["contract"] as {
+      scope: {
+        requiredExcludePaths: string[];
+        requiredExplicitExclusions: Array<{ pattern: string; reason: string }>;
+      };
+    };
+
+    expect(contract.scope.requiredExcludePaths).toContain("source-link.py");
+    expect(contract.scope.requiredExplicitExclusions).toContainEqual({
+      pattern: "source-link.py",
+      reason:
+        "Symbolic links are not followed during standard scope inventory.",
+    });
+    await rm(join(fixture.repository, "source-link.py"));
+
+    const prepared = await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+
+    expect((prepared["scan"] as ScanSummary).progress.status).toBe("running");
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+
+    const coverage = await readJson<{
+      excludePaths: string[];
+      explicitExclusions: Array<{ pattern: string; reason: string }>;
+    }>(join(fixture.scanDir, "coverage.json"));
+
+    expect(coverage.excludePaths).toEqual(contract.scope.requiredExcludePaths);
+    expect(coverage.explicitExclusions).toEqual(
+      contract.scope.requiredExplicitExclusions,
+    );
+  });
+
+  test("migrates existing scan state without changing its saved recipe", async () => {
+    const fixture = await startDraftScan();
+    const recipeArguments = ["get-scan-recipe", "--scan-id", fixture.scanId];
+    const originalRecipe = await workbench(fixture, recipeArguments);
+    const database = join(fixture.stateDir, "workbench.sqlite3");
+    const downgrade = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sqlite3, sys",
+          "with sqlite3.connect(sys.argv[1]) as connection:",
+          "    connection.execute('ALTER TABLE scans DROP COLUMN scope_exclusions_json')",
+          "    connection.execute('DELETE FROM schema_migrations WHERE version = 26')",
+        ].join("\n"),
+        database,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(downgrade.status, downgrade.stderr).toBe(0);
+
+    expect(await workbench(fixture, recipeArguments)).toEqual(originalRecipe);
+
+    const migration = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sqlite3, sys",
+          "with sqlite3.connect(sys.argv[1]) as connection:",
+          "    version = connection.execute('SELECT version FROM schema_migrations WHERE version = 26').fetchone()",
+          "    exclusions = connection.execute('SELECT scope_exclusions_json FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
+          "    print(json.dumps({'version': None if version is None else version[0], 'exclusions': None if exclusions is None else exclusions[0]}))",
+        ].join("\n"),
+        database,
+        fixture.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(migration.status, migration.stderr).toBe(0);
+    expect(JSON.parse(migration.stdout)).toEqual({
+      version: 26,
+      exclusions: null,
+    });
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+  });
+
+  test("rejects tampered registered scope exclusions without sealing a scan", async () => {
+    for (const tamperedExclusions of [
+      "{}",
+      JSON.stringify([
+        { pattern: "src", reason: "duplicate" },
+        { pattern: "src", reason: "duplicate" },
+      ]),
+    ]) {
+      const fixture = await startDraftScan();
+      const database = join(fixture.stateDir, "workbench.sqlite3");
+      const tamper = spawnSync(
+        fixture.python,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "with sqlite3.connect(sys.argv[1]) as connection:",
+            "    connection.execute('UPDATE scans SET scope_exclusions_json = ? WHERE id = ?', (sys.argv[2], sys.argv[3]))",
+          ].join("\n"),
+          database,
+          tamperedExclusions,
+          fixture.scanId,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(tamper.status, tamper.stderr).toBe(0);
+
+      await expect(
+        workbench(fixture, [
+          "prepare-scan-completion",
+          "--scan-id",
+          fixture.scanId,
+        ]),
+      ).rejects.toThrow("Stored standard scope exclusions are invalid.");
+
+      const persisted = spawnSync(
+        fixture.python,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "with sqlite3.connect(sys.argv[1]) as connection:",
+            "    print(connection.execute('SELECT status FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()[0])",
+          ].join("\n"),
+          database,
+          fixture.scanId,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(persisted.status, persisted.stderr).toBe(0);
+      expect(persisted.stdout.trim()).toBe("running");
+    }
   });
 
   test("returns authoritative clean and dirty Git target contracts", async () => {

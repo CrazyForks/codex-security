@@ -515,10 +515,44 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     return [scan["scope"]]
 
 
+def registered_standard_scope_exclusions(scan: sqlite3.Row) -> list[dict[str, str]]:
+    """Use the host-owned exclusions captured before the scan started."""
+
+    if "scope_exclusions_json" not in scan.keys():
+        return standard_scope_exclusions(
+            Path(scan["target_path"]), requested_scan_paths(scan)
+        )
+    serialized = scan["scope_exclusions_json"]
+    if serialized is None:
+        return standard_scope_exclusions(
+            Path(scan["target_path"]), requested_scan_paths(scan)
+        )
+    try:
+        exclusions: Any = json.loads(
+            serialized, parse_constant=reject_non_finite_json
+        )
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Stored standard scope exclusions are invalid.") from exc
+    if not isinstance(exclusions, list) or any(
+        not isinstance(exclusion, dict)
+        or set(exclusion) != {"pattern", "reason"}
+        or not isinstance(exclusion.get("pattern"), str)
+        or not exclusion["pattern"]
+        or not isinstance(exclusion.get("reason"), str)
+        or not exclusion["reason"].strip()
+        for exclusion in exclusions
+    ):
+        raise SystemExit("Stored standard scope exclusions are invalid.")
+    patterns = [exclusion["pattern"] for exclusion in exclusions]
+    if patterns != sorted(set(patterns)):
+        raise SystemExit("Stored standard scope exclusions are invalid.")
+    return exclusions
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
     explicit_exclusions = (
-        standard_scope_exclusions(target, requested_scan_paths(scan))
+        registered_standard_scope_exclusions(scan)
         if scan["mode"] == "standard"
         else []
     )
@@ -1129,6 +1163,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         scope_file_count = directory_snapshot_regular_file_count(
             target if scope == "." else target / scope
         )
+        scope_exclusions = (
+            standard_scope_exclusions(target, [scope])
+            if workspace["default_mode"] == "standard"
+            else None
+        )
         target_identity = scan_target_identity(
             target,
             diff_target,
@@ -1186,6 +1225,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             target_summary=target_summary,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            scope_exclusions=scope_exclusions,
         )
         if manages_transaction:
             connection.commit()
@@ -1221,6 +1261,9 @@ def start_prompt_only_scan(
         target_summary = diff_target_summary(diff_target)
     scope_file_count = directory_snapshot_regular_file_count(
         target if scope == "." else target / scope
+    )
+    scope_exclusions = (
+        standard_scope_exclusions(target, [scope]) if args.mode == "standard" else None
     )
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
@@ -1322,6 +1365,7 @@ def start_prompt_only_scan(
             target_summary=target_summary,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            scope_exclusions=scope_exclusions,
             handoff_status="delivered",
         )
         connection.commit()
@@ -1554,6 +1598,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
+    scope_exclusions = (
+        standard_scope_exclusions(repository, paths or ["."])
+        if mode == "standard"
+        else None
+    )
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
         directory_snapshot_regular_file_count(repository)
@@ -1616,6 +1665,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             target_summary=None,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            scope_exclusions=scope_exclusions,
             handoff_status="delivered",
             scan_dir=scan_dir,
         )

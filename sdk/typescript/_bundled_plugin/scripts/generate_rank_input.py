@@ -49,6 +49,9 @@ STANDARD_SCOPE_EXCLUDED_DIRS = {
         "Installed dependency trees are excluded unless directly requested as a scan scope."
     ),
 }
+STANDARD_SCOPE_SYMLINK_REASON = (
+    "Symbolic links are not followed during standard scope inventory."
+)
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -359,6 +362,41 @@ def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     return scope_path
 
 
+def record_scope_symlink_exclusion(
+    repository: Path,
+    path: Path,
+    exclusions: dict[str, dict[str, str]],
+) -> None:
+    pattern = path.relative_to(repository).as_posix()
+    exclusions[pattern] = {
+        "pattern": pattern,
+        "reason": STANDARD_SCOPE_SYMLINK_REASON,
+    }
+
+
+def record_scope_symlink_exclusions(
+    repository: Path,
+    scope: Path,
+    exclusions: dict[str, dict[str, str]],
+) -> None:
+    """Declare symlinks skipped by the authoritative scope inventory."""
+
+    pending = [scope]
+    while pending:
+        directory = pending.pop()
+        try:
+            for child in directory.iterdir():
+                if child.is_symlink():
+                    record_scope_symlink_exclusion(repository, child, exclusions)
+                elif (
+                    child.name not in STANDARD_SCOPE_EXCLUDED_DIRS
+                    and child.is_dir()
+                ):
+                    pending.append(child)
+        except OSError as exc:
+            raise SystemExit(f"Unable to safely inventory scope path: {directory}") from exc
+
+
 def record_overlapping_scope_exclusions(
     repository: Path,
     excluded_root: Path,
@@ -386,7 +424,9 @@ def record_overlapping_scope_exclusions(
             continue
         try:
             for child in current.iterdir():
-                if not child.is_symlink():
+                if child.is_symlink():
+                    record_scope_symlink_exclusion(repository, child, exclusions)
+                else:
                     pending.append(child)
         except OSError as exc:
             raise SystemExit(f"Unable to safely inventory scope path: {current}") from exc
@@ -420,6 +460,9 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
                 try:
                     for child in directory.iterdir():
                         if child.is_symlink():
+                            record_scope_symlink_exclusion(
+                                repository, child, exclusions
+                            )
                             continue
                         if child.name in STANDARD_SCOPE_EXCLUDED_DIRS:
                             record_overlapping_scope_exclusions(
@@ -444,6 +487,7 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
                 (scope_prefix / "**" / directory / "**").as_posix(),
             ):
                 exclusions[pattern] = {"pattern": pattern, "reason": reason}
+        record_scope_symlink_exclusions(repository, scope_path, exclusions)
     return [exclusions[pattern] for pattern in sorted(exclusions)]
 
 

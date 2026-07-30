@@ -610,6 +610,13 @@ MIGRATIONS = (
         ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';
         """,
     ),
+    (
+        26,
+        "persist authoritative standard scope exclusions",
+        """
+        ALTER TABLE scans ADD COLUMN scope_exclusions_json TEXT;
+        """,
+    ),
 )
 
 
