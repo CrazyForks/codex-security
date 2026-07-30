@@ -8,7 +8,8 @@
 
 ## Quick start
 
-Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security.
+Requires Node.js 22.13.0 or later in the 22.x release line, Node.js 24.x, or
+Node.js 26.x; Python 3.10 or later; and access to Codex Security.
 
 ```bash
 npm install @openai/codex-security
