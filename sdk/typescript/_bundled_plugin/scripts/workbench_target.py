@@ -305,6 +305,15 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
 
 
 def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -> str:
+    return directory_snapshot_digest_and_reviewable_count(target, excluded=excluded)[0]
+
+
+def directory_snapshot_digest_and_reviewable_count(
+    target: Path,
+    *,
+    excluded: tuple[Path, ...] = (),
+    count_scope: Path | None = None,
+) -> tuple[str, int]:
     excluded_relative = []
     for path in excluded:
         try:
@@ -312,8 +321,11 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
         except ValueError:
             continue
     paths = git_directory_snapshot_paths(target)
+    is_git_snapshot = paths is not None
     if paths is None:
         paths = sorted(target.rglob("*"))
+    scope = target if count_scope is None else count_scope
+    count = 0
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
@@ -333,6 +345,8 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
         if stat.S_ISLNK(metadata.st_mode):
             update_digest_field(digest, b"kind", b"symlink")
             update_digest_field(digest, b"content", os.fsencode(os.readlink(path)))
+            if path == scope or scope in path.parents:
+                count += 1
         elif stat.S_ISDIR(metadata.st_mode):
             update_digest_field(digest, b"kind", b"directory")
         elif stat.S_ISREG(metadata.st_mode):
@@ -348,9 +362,17 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
             update_digest_field(digest, b"kind", b"file")
             update_digest_field(digest, b"size", str(content_size).encode())
             update_digest_field(digest, b"content-sha256", content_digest.digest())
+            if path == scope or scope in path.parents:
+                count += 1
         else:
             raise SystemExit(f"Unsupported local file type: {relative_path}")
-    return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
+    if is_git_snapshot:
+        count += sum(
+            1
+            for path, _ in git_submodule_entries(target)
+            if not path.exists() and (path == scope or scope in path.parents)
+        )
+    return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}", count
 
 
 def directory_snapshot_regular_file_count(target: Path) -> int:
@@ -363,6 +385,7 @@ def directory_snapshot_reviewable_file_count(target: Path) -> int:
 
 def directory_snapshot_file_count(target: Path, *, include_symlinks: bool) -> int:
     paths = git_directory_snapshot_paths(target)
+    is_git_snapshot = paths is not None
     if paths is None:
         paths = sorted(target.rglob("*"))
     count = 0
@@ -375,6 +398,8 @@ def directory_snapshot_file_count(target: Path, *, include_symlinks: bool) -> in
             include_symlinks and stat.S_ISLNK(metadata.st_mode)
         ):
             count += 1
+    if include_symlinks and is_git_snapshot:
+        count += sum(1 for path, _ in git_submodule_entries(target) if not path.exists())
     return count
 
 

@@ -88,6 +88,7 @@ from workbench_scan_start import (
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
+    verify_empty_scope_identity,
 )
 from workbench_schema import MIGRATIONS, normalize_pre_release_migrations, sql_statements
 from workbench_source_excerpt import finding_source_excerpt
@@ -677,18 +678,6 @@ def authoritative_scope_file_count(
     return len({path for change in changes if change is not None for path in change.split(b"\0") if path})
 
 
-def verify_empty_scope_identity(
-    target: Path,
-    diff_target: dict[str, str] | None,
-    scope_file_count: int,
-    target_identity: tuple[str, str | None, int | str, int | str],
-) -> None:
-    if scope_file_count == 0 and scan_target_identity(target, diff_target) != target_identity:
-        raise SystemExit(
-            "The selected scan target changed while its empty scope was being verified."
-        )
-
-
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
     manifest_scan = manifest.get("scan")
     if not isinstance(manifest_scan, dict):
@@ -1200,7 +1189,9 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             metadata=target_metadata,
         )
         scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
-        verify_empty_scope_identity(target, diff_target, scope_file_count, target_identity)
+        verify_empty_scope_identity(
+            target, diff_target, scope_file_count, target_identity, scope=scope
+        )
         target_root = scan_target_root(args.scan_root, target)
         target_root.mkdir(parents=True, exist_ok=True)
         if manages_transaction:
@@ -1289,7 +1280,7 @@ def start_prompt_only_scan(
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
     scope_file_count = authoritative_scope_file_count(target, scope, diff_target)
-    verify_empty_scope_identity(target, diff_target, scope_file_count, target_identity)
+    verify_empty_scope_identity(target, diff_target, scope_file_count, target_identity, scope=scope)
     target_root = scan_target_root(args.scan_root, target)
 
     connection.execute("BEGIN IMMEDIATE")
@@ -1634,7 +1625,9 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             for path in paths
         )
     )
-    verify_empty_scope_identity(repository, diff_target, scope_file_count, target_identity)
+    verify_empty_scope_identity(
+        repository, diff_target, scope_file_count, target_identity, scope=scope
+    )
     parent_scan_id = (
         require_uuid(args.parent_scan_id, "parent-scan-id")
         if args.parent_scan_id is not None

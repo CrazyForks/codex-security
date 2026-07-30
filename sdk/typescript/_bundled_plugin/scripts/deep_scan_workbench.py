@@ -14,13 +14,10 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
-from filesystem_identity import serialize_filesystem_identity
 from workbench.handoff import require_current_continuation
+from workbench_scan_start import scan_target_identity, verify_empty_scope_identity
 from workbench_target import (
-    directory_content_digest,
-    directory_snapshot_regular_file_count,
-    git_revision,
-    worktree_content_digest,
+    directory_snapshot_reviewable_file_count,
 )
 from workbench_validation import optional_text, require_uuid
 
@@ -575,17 +572,12 @@ def begin_deep_scan_for_target(
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
     target_metadata = target.stat()
-    revision = git_revision(target)
-    target_snapshot_digest = (
-        directory_content_digest(target)
-        if revision == "unversioned"
-        else worktree_content_digest(target)
-    )
-    target_device = serialize_filesystem_identity(target_metadata.st_dev)
-    target_inode = serialize_filesystem_identity(target_metadata.st_ino)
-    scope_file_count = directory_snapshot_regular_file_count(
+    target_identity = scan_target_identity(target, None, metadata=target_metadata)
+    revision, target_snapshot_digest, target_device, target_inode = target_identity
+    scope_file_count = directory_snapshot_reviewable_file_count(
         target if scope == "." else target / scope
     )
+    verify_empty_scope_identity(target, None, scope_file_count, target_identity, scope=scope)
     connection.execute("BEGIN IMMEDIATE")
     try:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)

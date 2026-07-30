@@ -18,7 +18,10 @@ from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
+    clean_worktree_content_digest,
     directory_content_digest,
+    directory_snapshot_digest_and_reviewable_count,
+    git_bytes,
     git_revision,
     worktree_content_digest,
 )
@@ -57,6 +60,47 @@ def scan_target_identity(
         serialize_filesystem_identity(metadata.st_dev),
         serialize_filesystem_identity(metadata.st_ino),
     )
+
+
+def verify_empty_scope_identity(
+    target: Path,
+    diff_target: dict[str, str] | None,
+    scope_file_count: int,
+    target_identity: tuple[str, str | None, int | str, int | str],
+    *,
+    scope: str = ".",
+) -> None:
+    if scope_file_count != 0:
+        return
+    changed_message = (
+        "The selected scan target changed while its empty scope was being verified."
+    )
+    if scan_target_identity(target, diff_target) != target_identity:
+        raise SystemExit(changed_message)
+    if diff_target is not None:
+        if diff_target["kind"] == "working_tree" and (
+            diff_target.get("contentDigest") != clean_worktree_content_digest()
+            or worktree_content_digest(target) != diff_target.get("contentDigest")
+        ):
+            raise SystemExit(changed_message)
+        return
+
+    snapshot_digest, captured_count = directory_snapshot_digest_and_reviewable_count(
+        target,
+        count_scope=target if scope == "." else target / scope,
+    )
+    if captured_count != 0:
+        raise SystemExit(changed_message)
+    revision, recorded_digest, _, _ = target_identity
+    if revision == "unversioned":
+        if snapshot_digest != recorded_digest:
+            raise SystemExit(changed_message)
+        return
+    if recorded_digest != clean_worktree_content_digest():
+        raise SystemExit(changed_message)
+    tracked_scope = git_bytes(target, "ls-files", "--cached", "-z", "--", scope)
+    if tracked_scope is None or tracked_scope:
+        raise SystemExit(changed_message)
 
 
 def scan_diff_identity(

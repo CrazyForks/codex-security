@@ -299,6 +299,27 @@ describe("malformed scan artifact recovery", () => {
     );
   });
 
+  test("counts symlinks when a Deep Scan starts directly from a target", async () => {
+    const fixture = await startDraftScan("directory", true, true);
+    const started = await workbench(fixture, [
+      "begin-deep-scan",
+      "--thread-id",
+      "direct-deep-symlink-review",
+      "--target-path",
+      fixture.repository,
+    ]);
+    const scanId = String((started["deepScan"] as { scanId: string }).scanId);
+    const context = await workbench(fixture, ["get-scan", "--scan-id", scanId]);
+
+    expect(
+      (
+        context["scan"] as {
+          progress: { coverage: { filesTotal: number } };
+        }
+      ).progress.coverage,
+    ).toMatchObject({ filesTotal: 1 });
+  });
+
   test("rejects an empty scope that changes during snapshot capture", async () => {
     const fixture = await startDraftScan("directory", true);
     const scanDir = join(fixture.stateDir, "racing-scan");
@@ -340,6 +361,65 @@ describe("malformed scan artifact recovery", () => {
         scanDir,
         "--recipe-json",
         recipe,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "The selected scan target changed while its empty scope was being verified.",
+    );
+  });
+
+  test("rejects files that disappear and return around an empty-scope count", async () => {
+    const fixture = await startDraftScan();
+    const scanDir = join(fixture.stateDir, "aba-scan");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const script = [
+      "import sys",
+      "from pathlib import Path",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_db",
+      "repository = Path(sys.argv[2])",
+      "original = workbench_db.authoritative_scope_file_count",
+      "def racing_count(*args, **kwargs):",
+      "    path = repository / 'src' / 'extract.py'",
+      "    original_contents = path.read_bytes()",
+      "    path.unlink()",
+      "    count = original(*args, **kwargs)",
+      "    path.write_bytes(original_contents)",
+      "    return count",
+      "workbench_db.authoritative_scope_file_count = racing_count",
+      "sys.argv = [workbench_db.__file__, *sys.argv[3:]]",
+      "workbench_db.main()",
+    ].join("\n");
+    const result = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        script,
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        "register-cli-scan",
+        "--repository",
+        fixture.repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository: fixture.repository,
+          target: { kind: "repository", paths: [] },
+        }),
       ],
       {
         encoding: "utf8",
@@ -622,6 +702,124 @@ describe("malformed scan artifact recovery", () => {
         }
       ).progress.coverage,
     ).toMatchObject({ filesTotal: 1 });
+  });
+
+  test("counts an uninitialized tracked Git submodule as reviewable", async () => {
+    const fixture = await startDraftScan("clean");
+    const git = (args: string[]): string => {
+      const result = spawnSync("git", ["-C", fixture.repository, ...args], {
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    const revision = git(["rev-parse", "HEAD"]);
+    git(["rm", "--quiet", "src/extract.py"]);
+    git([
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${revision},deps/linked`,
+    ]);
+    git([
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "leave only an uninitialized linked repository",
+    ]);
+    const scanDir = join(fixture.stateDir, "uninitialized-submodule-scan");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const registration = await workbench(fixture, [
+      "register-cli-scan",
+      "--repository",
+      fixture.repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository: fixture.repository,
+        target: { kind: "repository", paths: [] },
+      }),
+    ]);
+    const context = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      String(registration["scanId"]),
+    ]);
+
+    expect(
+      (
+        context["scan"] as {
+          progress: { coverage: { filesTotal: number } };
+        }
+      ).progress.coverage,
+    ).toMatchObject({ filesTotal: 1 });
+  });
+
+  test("rejects a working-tree diff that disappears before its empty count", async () => {
+    const fixture = await startDraftScan("dirty");
+    const scanDir = join(fixture.stateDir, "working-tree-race");
+    await mkdir(scanDir, { recursive: true, mode: 0o700 });
+    const script = [
+      "import sys",
+      "from pathlib import Path",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_db",
+      "repository = Path(sys.argv[2])",
+      "original = workbench_db.authoritative_scope_file_count",
+      "def racing_count(*args, **kwargs):",
+      "    (repository / 'src' / 'extract.py').write_text('# fixture\\n')",
+      "    return original(*args, **kwargs)",
+      "workbench_db.authoritative_scope_file_count = racing_count",
+      "sys.argv = [workbench_db.__file__, *sys.argv[3:]]",
+      "workbench_db.main()",
+    ].join("\n");
+    const result = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        script,
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        "register-cli-scan",
+        "--repository",
+        fixture.repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository: fixture.repository,
+          target: {
+            kind: "working_tree",
+            paths: [],
+            base: "HEAD",
+            head: "HEAD",
+          },
+        }),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "The selected scan target changed while its empty scope was being verified.",
+    );
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {
