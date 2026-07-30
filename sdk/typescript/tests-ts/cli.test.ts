@@ -1037,6 +1037,55 @@ describe("CLI", () => {
     }
   });
 
+  test("parses blank-line Git worktree pointers before trusting Git", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-blank-gitfile-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      const gitDirectory = join(root, "external-git");
+      execFileSync(
+        "git",
+        ["init", "-q", "--separate-git-dir", gitDirectory, repository],
+        { timeout: 10_000 },
+      );
+      const pointer = join(repository, ".git");
+      await writeFile(pointer, `${await readFile(pointer, "utf8")}\n`);
+      const binaries = join(gitDirectory, "node_modules", ".bin");
+      await mkdir(binaries, { recursive: true });
+      const marker = join(root, "git-shim-executed");
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      await writeFile(
+        join(binaries, gitName),
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker}'\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      const stderr = capture();
+      const exitCode = await main(
+        ["install-hook", repository, "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: repository,
+          environment: {
+            ...process.env,
+            PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+          },
+        }),
+      );
+
+      expect([0, 2]).toContain(exitCode);
+      if (exitCode === 2) {
+        expect(stderr.text()).toContain("A pre-commit hook already exists");
+      }
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("ignores Git shims in a config-selected worktree", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-cli-config-worktree-")),
@@ -1097,6 +1146,72 @@ describe("CLI", () => {
           },
         }),
       );
+      expect([0, 2]).toContain(exitCode);
+      if (exitCode === 2) {
+        expect(stderr.text()).toContain("A pre-commit hook already exists");
+      }
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("follows Git configuration includes before trusting a worktree Git shim", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-included-worktree-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      const gitDirectory = join(root, "git-directory");
+      const worktree = join(root, "included-worktree");
+      const binaries = join(worktree, "node_modules", ".bin");
+      await Promise.all([
+        mkdir(repository, { recursive: true }),
+        mkdir(binaries, { recursive: true }),
+      ]);
+      execFileSync("git", ["init", "--bare", "-q", gitDirectory], {
+        timeout: 10_000,
+      });
+      execFileSync(
+        "git",
+        ["-C", gitDirectory, "config", "core.bare", "false"],
+        {
+          timeout: 10_000,
+        },
+      );
+      const included = join(root, "included.gitconfig");
+      await writeFile(included, `[core]\n\tworktree = ${worktree}\n`);
+      execFileSync(
+        "git",
+        ["-C", gitDirectory, "config", "include.path", included],
+        {
+          timeout: 10_000,
+        },
+      );
+      const marker = join(root, "git-shim-executed");
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      await writeFile(
+        join(binaries, gitName),
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker}'\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      const stderr = capture();
+      const exitCode = await main(
+        ["install-hook", repository, "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: repository,
+          environment: {
+            ...process.env,
+            GIT_DIR: gitDirectory,
+            PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+          },
+        }),
+      );
+
       expect([0, 2]).toContain(exitCode);
       if (exitCode === 2) {
         expect(stderr.text()).toContain("A pre-commit hook already exists");
@@ -1215,6 +1330,59 @@ describe("CLI", () => {
     }
   });
 
+  test.skipIf(process.platform === "win32")(
+    "treats a colon-containing alternate-file line as one pathname",
+    async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-cli-colon-alternate-")),
+      );
+      try {
+        const repository = join(root, "repository");
+        const alternate = join(root, "objects:with-colon");
+        const binaries = join(alternate, "node_modules", ".bin");
+        const pathEntry = join(root, "safe-path-entry");
+        const marker = join(root, "git-shim-executed");
+        execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
+        await Promise.all([
+          mkdir(binaries, { recursive: true }),
+          mkdir(join(alternate, "info"), { recursive: true }),
+          mkdir(join(alternate, "pack"), { recursive: true }),
+        ]);
+        await writeFile(
+          join(repository, ".git", "objects", "info", "alternates"),
+          `${alternate}\n`,
+        );
+        await writeFile(
+          join(binaries, "git"),
+          `#!/bin/sh\nprintf '%s' hijacked > '${marker}'\nexit 1\n`,
+          { mode: 0o755 },
+        );
+        await symlink(binaries, pathEntry, "dir");
+        const stderr = capture();
+        const exitCode = await main(
+          ["install-hook", repository, "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: repository,
+            environment: {
+              ...process.env,
+              PATH: [pathEntry, process.env["PATH"] ?? ""].join(delimiter),
+            },
+          }),
+        );
+
+        expect([0, 2]).toContain(exitCode);
+        if (exitCode === 2) {
+          expect(stderr.text()).toContain("A pre-commit hook already exists");
+        }
+        await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("ignores alternate object stores selected through GIT_COMMON_DIR", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-cli-common-alternates-")),
@@ -1273,6 +1441,35 @@ describe("CLI", () => {
         expect(stderr.text()).toContain("A pre-commit hook already exists");
       }
       await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects truncated environment Git configuration before trusting Git", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-config-count-")),
+    );
+    try {
+      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
+      const stderr = capture();
+      expect(
+        await main(
+          ["install-hook", root, "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: root,
+            environment: { ...process.env, GIT_CONFIG_COUNT: "1025" },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("protected-worktree safety limit");
+      await expect(
+        stat(join(root, ".git", "hooks", "pre-commit")),
+      ).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
