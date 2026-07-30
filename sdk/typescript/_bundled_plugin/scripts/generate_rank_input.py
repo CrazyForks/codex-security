@@ -29,6 +29,7 @@ This script stays deliberately model-free:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import re
@@ -184,6 +185,10 @@ def parse_args() -> argparse.Namespace:
     inventory.add_argument(
         "--scopes-file",
         help="JSON array of repository-relative files and directories to scan together.",
+    )
+    inventory.add_argument(
+        "--expected-exclusions-json",
+        help="Host-registered JSON array of exclusion patterns to attest during traversal.",
     )
     inventory.add_argument(
         "--max-files",
@@ -484,6 +489,7 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
         for directory, reason in STANDARD_SCOPE_EXCLUDED_DIRS.items():
             for pattern in (
                 (scope_prefix / directory).as_posix(),
+                (scope_prefix / "**" / directory).as_posix(),
                 (scope_prefix / "**" / directory / "**").as_posix(),
             ):
                 exclusions[pattern] = {"pattern": pattern, "reason": reason}
@@ -670,6 +676,26 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
     if not 1 <= args.max_bytes <= MAX_SCOPE_COVERAGE_BYTES:
         raise SystemExit("Invalid standard scan scope inventory limit: --max-bytes")
 
+    expected_exclusions: list[str] | None = None
+    if args.expected_exclusions_json is not None:
+        try:
+            decoded: object = json.loads(args.expected_exclusions_json)
+        except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            raise SystemExit("Invalid host-registered standard scan scope exclusions") from exc
+        if not isinstance(decoded, list) or any(
+            not isinstance(pattern, str) or not pattern for pattern in decoded
+        ):
+            raise SystemExit("Invalid host-registered standard scan scope exclusions")
+        expected_exclusions = decoded
+
+    def excluded_from_registered_scope(path: str) -> bool:
+        return expected_exclusions is not None and any(
+            PurePosixPath(pattern) == PurePosixPath(path)
+            or PurePosixPath(pattern) in PurePosixPath(path).parents
+            or fnmatch.fnmatchcase(path, pattern)
+            for pattern in expected_exclusions
+        )
+
     explicit_scopes = args.scopes_file is not None
     scoped_exclusions = explicit_scopes or args.scope != "."
     scopes = (
@@ -698,7 +724,14 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
             except OSError as exc:
                 raise SystemExit(f"Unable to safely inventory scope path: {directory}") from exc
             try:
+                candidate_path = path.relative_to(repo).as_posix()
                 if path.is_symlink():
+                    if expected_exclusions is not None and not excluded_from_registered_scope(
+                        candidate_path
+                    ):
+                        raise SystemExit(
+                            "Standard scan scope exclusions changed during inventory preparation"
+                        )
                     continue
                 relative = path.resolve(strict=True).relative_to(repo)
                 excluded_path = (
@@ -707,11 +740,21 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     else relative
                 )
                 if any(part in STANDARD_SCOPE_EXCLUDED_DIRS for part in excluded_path.parts):
+                    if expected_exclusions is not None and not excluded_from_registered_scope(
+                        relative.as_posix()
+                    ):
+                        raise SystemExit(
+                            "Standard scan scope exclusions changed during inventory preparation"
+                        )
                     continue
                 if path.is_dir():
                     pending.append((path, path.iterdir()))
                 elif path.is_file():
                     relative_path = relative.as_posix()
+                    if excluded_from_registered_scope(relative_path):
+                        raise SystemExit(
+                            "Standard scan scope exclusions changed during inventory preparation"
+                        )
                     if relative_path in paths:
                         continue
                     row_bytes = len(

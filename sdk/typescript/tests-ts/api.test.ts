@@ -3249,7 +3249,9 @@ describe("CodexSecurity orchestration", () => {
         args: ["--scope", "."],
         includePaths: ["."],
         excludePaths: [
+          "**/.git",
           "**/.git/**",
+          "**/node_modules",
           "**/node_modules/**",
           ".git",
           "node_modules",
@@ -3262,7 +3264,9 @@ describe("CodexSecurity orchestration", () => {
           "package/node_modules/dependency/index.js",
         ],
         excludePaths: [
+          "package/node_modules/dependency/**/.git",
           "package/node_modules/dependency/**/.git/**",
+          "package/node_modules/dependency/**/node_modules",
           "package/node_modules/dependency/**/node_modules/**",
           "package/node_modules/dependency/.git",
           "package/node_modules/dependency/node_modules",
@@ -3333,6 +3337,103 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("does not claim coverage for nested excluded-directory marker files", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const submodule = join(repository, "submodule");
+    const manifest = join(root, "scan-manifest.json");
+    const coverage = join(root, "coverage.json");
+    const inventory = join(root, "scope_inventory.jsonl");
+    await mkdir(submodule, { recursive: true });
+    await Promise.all([
+      writeFile(join(submodule, ".git"), "gitdir: ../.git/modules/submodule\n"),
+      writeFile(join(submodule, "node_modules"), "excluded marker\n"),
+      writeFile(join(submodule, "app.ts"), "export {};\n"),
+      writeFile(
+        manifest,
+        JSON.stringify({
+          scan: { scope: { includePaths: ["."], excludePaths: [] } },
+        }),
+      ),
+      writeFile(
+        coverage,
+        JSON.stringify({
+          completeness: "complete",
+          includePaths: ["."],
+          excludePaths: [],
+          explicitExclusions: [],
+        }),
+      ),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
+
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        generator,
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--out",
+        inventory,
+      ],
+      { stdio: "pipe" },
+    );
+    expect(await readFile(inventory, "utf8")).toBe(
+      `${JSON.stringify({ path: "submodule/app.ts" })}\n`,
+    );
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        generator,
+        "bind-scope-exclusions",
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--manifest",
+        manifest,
+        "--coverage",
+        coverage,
+      ],
+      { stdio: "pipe" },
+    );
+    const covered = JSON.parse(
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "module = runpy.run_path(str(Path(sys.argv[1]) / 'workbench_scan_history.py'))",
+            "with open(sys.argv[2], encoding='utf-8') as source: coverage = json.load(source)",
+            "scan = {'status': 'complete', 'target_id': 'target'}",
+            "paths = {'source': 'submodule/app.ts', 'gitMarker': 'submodule/.git', 'dependencyMarker': 'submodule/node_modules'}",
+            "print(json.dumps({label: module['scan_covers_path'](scan, target_id='target', path=path, coverage=coverage) for label, path in paths.items()}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          coverage,
+        ],
+        { encoding: "utf8" },
+      ),
+    ) as Record<string, boolean>;
+    expect(covered).toEqual({
+      source: true,
+      gitMarker: false,
+      dependencyMarker: false,
+    });
+  });
+
   test("preserves explicitly requested dependencies across overlapping scopes", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -3367,7 +3468,9 @@ describe("CodexSecurity orchestration", () => {
     const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
     const expectedExclusions = [
       "package/.git",
+      "package/node_modules/dependency/**/.git",
       "package/node_modules/dependency/**/.git/**",
+      "package/node_modules/dependency/**/node_modules",
       "package/node_modules/dependency/**/node_modules/**",
       "package/node_modules/dependency/.git",
       "package/node_modules/dependency/node_modules",
@@ -3601,7 +3704,9 @@ describe("CodexSecurity orchestration", () => {
         includePaths: ["."],
         inventoryPaths: ["package/app.ts"],
         excludePaths: [
+          "**/.git",
           "**/.git/**",
+          "**/node_modules",
           "**/node_modules/**",
           ".git",
           "node_modules",
@@ -3622,7 +3727,9 @@ describe("CodexSecurity orchestration", () => {
         excludePaths: [
           "package/broken-link.ts",
           "package/directory-link",
+          "package/node_modules/dependency/**/.git",
           "package/node_modules/dependency/**/.git/**",
+          "package/node_modules/dependency/**/node_modules",
           "package/node_modules/dependency/**/node_modules/**",
           "package/node_modules/dependency/.git",
           "package/node_modules/dependency/dependency-link.js",
@@ -4117,6 +4224,77 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(codexStarted).toBe(false);
     await client.close();
+  });
+
+  test("rejects scope exclusions that change before inventory attestation", async () => {
+    if (process.platform === "win32") return;
+
+    for (const transition of ["symlink-to-file", "file-to-symlink"] as const) {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const stable = join(repository, "stable.ts");
+      const changing = join(repository, "changing.ts");
+      const stateDirectory = join(root, "state");
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+      ]);
+      await writeFile(stable, "export const stable = true;\n");
+      if (transition === "symlink-to-file") {
+        await symlink("stable.ts", changing);
+      } else {
+        await writeFile(changing, "export const changing = true;\n");
+      }
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const environment = {
+        PATH: process.env["PATH"],
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      };
+      let started = false;
+      const client = new TestClient(
+        {},
+        {
+          environment,
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment,
+          }),
+          resolvePluginPython: async () => python!,
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => null,
+          prepareScopeInventory,
+          runWorkbench: async (
+            options: Parameters<typeof runWorkbench>[0],
+            args: readonly string[],
+          ) => {
+            const result = await runWorkbench(options, args);
+            if (args[0] === "register-cli-scan") {
+              await rm(changing);
+              if (transition === "symlink-to-file") {
+                await writeFile(changing, "export const changed = true;\n");
+              } else {
+                await symlink("stable.ts", changing);
+              }
+            }
+            return result;
+          },
+          createCodex: () => {
+            started = true;
+            throw new Error("Codex must not start after a scope change");
+          },
+        },
+      );
+
+      await expect(client.run(repository)).rejects.toThrow(
+        /scope exclusions changed during inventory preparation/iu,
+      );
+      expect(started).toBe(false);
+      await client.close();
+    }
   });
 
   test("does not start Codex when no inventory root can be protected", async () => {

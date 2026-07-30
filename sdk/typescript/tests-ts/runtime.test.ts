@@ -1787,6 +1787,46 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "normalizes candidate source lines without loading sparse files",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const source = join(repository, "large.ts");
+      await mkdir(repository);
+      await writeFile(source, "export const reviewed = true;\r\n");
+      await truncate(source, 96 * 1024 * 1024);
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const normalized = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "module = runpy.run_path(sys.argv[1])",
+            "def reject_unbounded_read(self): raise RuntimeError('source files must be streamed')",
+            "Path.read_bytes = reject_unbounded_read",
+            "row = {'locations': [{'path': 'large.ts', 'start_line': 1, 'role': 'evidence'}]}",
+            "print(json.dumps(module['normalize_locations'](row, Path(sys.argv[2]), {})))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+          repository,
+        ],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+
+      expect(normalized.status, normalized.stderr).toBe(0);
+      expect(JSON.parse(normalized.stdout)).toEqual([
+        { path: "large.ts", start_line: 1, end_line: 1, role: "evidence" },
+      ]);
+    },
+  );
+
   test("bounds exhaustive review receipts separately from inventory bytes", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

@@ -632,6 +632,18 @@ export class CodexSecurity {
       const contractTarget = isRecord(contract)
         ? contract["target"]
         : undefined;
+      const contractScope = isRecord(contract) ? contract["scope"] : undefined;
+      const registeredScopeExclusions = isRecord(contractScope)
+        ? contractScope["requiredExcludePaths"]
+        : undefined;
+      const expectedScopeExclusions =
+        Array.isArray(registeredScopeExclusions) &&
+        registeredScopeExclusions.every(
+          (pattern): pattern is string =>
+            typeof pattern === "string" && pattern.length > 0,
+        )
+          ? registeredScopeExclusions
+          : undefined;
       const allowedKinds = isRecord(contractTarget)
         ? contractTarget["allowedKinds"]
         : undefined;
@@ -664,6 +676,8 @@ export class CodexSecurity {
         ((targetKind === "git_worktree" ||
           targetKind === "directory_snapshot") &&
           typeof snapshotDigest !== "string") ||
+        (registeredScopeExclusions !== undefined &&
+          expectedScopeExclusions === undefined) ||
         typeof registeredRevision !== "string"
       ) {
         throw new CodexSecurityError(
@@ -756,6 +770,9 @@ export class CodexSecurity {
           repository: repo,
           scanDir,
           ...(targetPathsFile === null ? {} : { scopesFile: targetPathsFile }),
+          ...(expectedScopeExclusions === undefined
+            ? {}
+            : { expectedExclusions: expectedScopeExclusions }),
           environment: selectedScanEnvironment(
             runtime.environment,
             options.auth,

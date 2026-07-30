@@ -104,6 +104,7 @@ export interface ScopeInventoryOptions {
   repository: string;
   scanDir: string;
   scopesFile?: string;
+  expectedExclusions?: readonly string[];
   environment: ProcessEnvironment;
   signal?: AbortSignal;
 }
@@ -575,6 +576,12 @@ export async function prepareScopeInventory(
         ...(options.scopesFile === undefined
           ? []
           : ["--scopes-file", options.scopesFile]),
+        ...(options.expectedExclusions === undefined
+          ? []
+          : [
+              "--expected-exclusions-json",
+              JSON.stringify(options.expectedExclusions),
+            ]),
         "--out",
         output,
       ],
