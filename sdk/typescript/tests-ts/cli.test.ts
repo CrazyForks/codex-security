@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import {
   delimiter,
   dirname,
@@ -38,7 +38,12 @@ import {
   ScanInterruptedError,
   VERSION,
 } from "../src/index.js";
-import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import {
+  expandGitConfigIncludePath,
+  main,
+  parseCodexOverrides,
+  Progress,
+} from "../src/cli.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import {
   FakeSignals,
@@ -1292,9 +1297,12 @@ describe("CLI", () => {
 
     for (const mode of [
       "inactive-include",
+      "uppercase-posix-class-include",
+      "invalid-double-star-include",
       "core-subsection",
       "disabled-worktree-config",
       "overridden-worktree",
+      "late-environment-worktree",
     ] as const) {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), `codex-security-cli-${mode}-`)),
@@ -1303,15 +1311,26 @@ describe("CLI", () => {
         const repository = join(root, "repository");
         execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
         const config = join(repository, ".git", "config");
-        if (mode === "inactive-include") {
+        if (
+          mode === "inactive-include" ||
+          mode === "uppercase-posix-class-include" ||
+          mode === "invalid-double-star-include"
+        ) {
           const included = join(root, "inactive.gitconfig");
           await writeFile(
             included,
             `[core]\n\tworktree = ${trustedDirectory}\n`,
           );
+          const gitDirectory = join(repository, ".git").replaceAll("\\", "/");
+          const condition =
+            mode === "uppercase-posix-class-include"
+              ? gitDirectory.replace("repository", "repositor[[:ALPHA:]]")
+              : mode === "invalid-double-star-include"
+                ? gitDirectory.replace("repository", "repo**sitory")
+                : "/never/selected";
           await writeFile(
             config,
-            `${await readFile(config, "utf8")}[includeIf "gitdir:/never/selected/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
+            `${await readFile(config, "utf8")}[includeIf "gitdir:${condition}/"]\n\tpath = ${included.replaceAll("\\", "/")}\n`,
           );
         } else if (mode === "core-subsection") {
           await writeFile(
@@ -1338,6 +1357,13 @@ describe("CLI", () => {
             currentDirectory: repository,
             environment: {
               ...process.env,
+              ...(mode === "late-environment-worktree"
+                ? {
+                    GIT_CONFIG_COUNT: "1",
+                    GIT_CONFIG_KEY_0: "core.worktree",
+                    GIT_CONFIG_VALUE_0: trustedDirectory,
+                  }
+                : {}),
               PATH: dirname(trustedGit!),
             },
           }),
@@ -1360,6 +1386,7 @@ describe("CLI", () => {
       "posix-character-class-include",
       "environment-config-override",
       "enabled-worktree-config",
+      "integer-worktree-config",
       "implicit-worktree-config",
       "ordered-worktree-config",
       "common-directory",
@@ -1430,7 +1457,12 @@ describe("CLI", () => {
             { timeout: 10_000 },
           );
         } else {
-          if (mode === "ordered-worktree-config") {
+          if (mode === "integer-worktree-config") {
+            await writeFile(
+              config,
+              `${await readFile(config, "utf8")}[extensions]\n\tworktreeConfig = 2\n`,
+            );
+          } else if (mode === "ordered-worktree-config") {
             const included = join(root, "disabled-worktree.gitconfig");
             await writeFile(
               included,
@@ -1499,6 +1531,24 @@ describe("CLI", () => {
       }
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "expands current and named-user homes in Git configuration includes",
+    async () => {
+      const current = userInfo().username;
+      expect(await expandGitConfigIncludePath(`~${current}/.gitconfig`)).toBe(
+        join(homedir(), ".gitconfig"),
+      );
+      const root = (await readFile("/etc/passwd", "utf8"))
+        .split(/\r?\n/u)
+        .map((entry) => entry.split(":"))
+        .find((entry) => entry[0] === "root")?.[5];
+      expect(root).toBeDefined();
+      expect(await expandGitConfigIncludePath("~root/.gitconfig")).toBe(
+        join(root!, ".gitconfig"),
+      );
+    },
+  );
 
   test("ignores Git shims in externally selected Git object stores", async () => {
     const root = await realpath(

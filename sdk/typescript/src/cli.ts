@@ -17,6 +17,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { homedir, userInfo } from "node:os";
 import {
   basename,
   delimiter,
@@ -3072,7 +3073,10 @@ async function protectedHookExecutableRoots(
               ))
             ) {
               await readConfiguration(
-                resolve(dirname(path), expandHome(entry.path)),
+                resolve(
+                  dirname(path),
+                  await expandGitConfigIncludePath(entry.path),
+                ),
               );
             }
           }
@@ -3129,53 +3133,10 @@ async function protectedHookExecutableRoots(
       "Git environment configuration exceeds the protected-worktree safety limit.",
     );
   }
-  const count = Number(configuredCount);
-  let configuredEnvironmentWorktree: string | undefined;
-  if (Number.isSafeInteger(count) && count > 0) {
-    for (let index = 0; index < count; index += 1) {
-      if (
-        hookGitEnvironmentValue(
-          environment,
-          `GIT_CONFIG_KEY_${index}`,
-        )?.toLowerCase() !== "core.worktree"
-      ) {
-        continue;
-      }
-      const worktree = hookGitEnvironmentValue(
-        environment,
-        `GIT_CONFIG_VALUE_${index}`,
-      );
-      if (worktree) configuredEnvironmentWorktree = worktree;
-    }
-  }
   if (!selectedWorktree) {
     for (const [gitDirectory, configured] of configuredWorktrees) {
-      for (const worktree of new Set([
-        configured,
-        ...(configuredEnvironmentWorktree === undefined
-          ? []
-          : [configuredEnvironmentWorktree]),
-      ])) {
-        for (const base of [repository, gitDirectory]) {
-          roots.add(await canonicalProtectedHookRoot(resolve(base, worktree)));
-        }
-      }
-    }
-    if (
-      configuredEnvironmentWorktree !== undefined &&
-      configuredWorktrees.size === 0
-    ) {
-      roots.add(
-        await canonicalProtectedHookRoot(
-          resolve(repository, configuredEnvironmentWorktree),
-        ),
-      );
-      for (const gitDirectory of gitDirectories) {
-        roots.add(
-          await canonicalProtectedHookRoot(
-            resolve(gitDirectory, configuredEnvironmentWorktree),
-          ),
-        );
+      for (const base of [repository, gitDirectory]) {
+        roots.add(await canonicalProtectedHookRoot(resolve(base, configured)));
       }
     }
   }
@@ -3250,6 +3211,15 @@ function gitConfigEntries(contents: string): GitHookConfigurationEntry[] {
         entries.push({ kind: "worktreeConfig", value: true });
       } else if (["", "false", "no", "off", "0"].includes(normalized)) {
         entries.push({ kind: "worktreeConfig", value: false });
+      } else if (/^[+-]?(?:0x[0-9a-f]+|\d+)[kmg]?$/iu.test(normalized)) {
+        const digits = normalized
+          .replace(/^[+-]/u, "")
+          .replace(/^0x/iu, "")
+          .replace(/[kmg]$/iu, "");
+        entries.push({
+          kind: "worktreeConfig",
+          value: /[1-9a-f]/iu.test(digits),
+        });
       } else {
         throw new Error(
           "Git worktree configuration extension cannot be parsed safely.",
@@ -3268,6 +3238,31 @@ function gitConfigEntries(contents: string): GitHookConfigurationEntry[] {
     }
   }
   return entries;
+}
+
+export async function expandGitConfigIncludePath(
+  path: string,
+): Promise<string> {
+  const named = /^~([^/\\]+)(?:[/\\](.*))?$/u.exec(path);
+  if (named === null) return expandHome(path);
+  const account = named[1]!;
+  let home: string;
+  if (account === userInfo().username) {
+    home = homedir();
+  } else {
+    const records = await readFile("/etc/passwd", "utf8");
+    const entry = records
+      .split(/\r?\n/u)
+      .map((line) => line.split(":"))
+      .find((fields) => fields[0] === account);
+    if (entry?.[5] === undefined || !isAbsolute(entry[5])) {
+      throw new Error(
+        "Named-user Git configuration include cannot be resolved safely.",
+      );
+    }
+    home = entry[5];
+  }
+  return named[2] === undefined ? home : resolve(home, named[2]);
 }
 
 function gitConfigValue(value: string): string {
@@ -3336,8 +3331,11 @@ async function gitIncludeConditionMatches(
         "\\",
         "/",
       );
-    } else if (pattern.startsWith("~/")) {
-      pattern = expandHome(pattern).replaceAll("\\", "/");
+    } else if (pattern.startsWith("~")) {
+      pattern = (await expandGitConfigIncludePath(pattern)).replaceAll(
+        "\\",
+        "/",
+      );
     } else if (!isAbsolute(pattern) && !pattern.startsWith("**/")) {
       pattern = `**/${pattern}`;
     }
@@ -3364,8 +3362,12 @@ async function gitIncludeConditionMatches(
     const character = pattern[index]!;
     if (character === "*") {
       if (pattern[index + 1] === "*") {
+        const precededBySlash = index === 0 || pattern[index - 1] === "/";
+        const followedBySlash = pattern[index + 2] === "/";
+        const atEnd = index + 2 === pattern.length;
+        if (!precededBySlash || (!followedBySlash && !atEnd)) return false;
         index += 1;
-        if (pattern[index + 1] === "/") {
+        if (followedBySlash) {
           index += 1;
           expression += "(?:.*/)?";
         } else {
@@ -3416,7 +3418,7 @@ async function gitIncludeConditionMatches(
             upper: "A-Z",
             xdigit: "A-Fa-f0-9",
           };
-          const characters = classes[name.toLowerCase()];
+          const characters = classes[name];
           if (characters === undefined) {
             unsupportedClass = true;
             return "";
