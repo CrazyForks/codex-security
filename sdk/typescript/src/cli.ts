@@ -2926,6 +2926,8 @@ async function protectedHookExecutableRoots(
   environment: Readonly<Record<string, string | undefined>>,
 ): Promise<readonly string[]> {
   const roots = new Set([repository]);
+  let effectiveWorktree = repository;
+  let discoveredWorktree = false;
   const selectedGitDirectory = hookGitEnvironmentValue(environment, "GIT_DIR");
   const gitDirectories = new Set<string>();
   const objectDirectories = new Set<string>();
@@ -2952,27 +2954,10 @@ async function protectedHookExecutableRoots(
     "GIT_WORK_TREE",
   );
   if (selectedWorktree) {
-    roots.add(
-      await canonicalProtectedHookRoot(resolve(repository, selectedWorktree)),
+    effectiveWorktree = await canonicalProtectedHookRoot(
+      resolve(repository, selectedWorktree),
     );
-  }
-  const selectedObjectDirectory = hookGitEnvironmentValue(
-    environment,
-    "GIT_OBJECT_DIRECTORY",
-  );
-  if (selectedObjectDirectory) {
-    objectDirectories.add(resolve(repository, selectedObjectDirectory));
-  }
-  const selectedAlternates = hookGitEnvironmentValue(
-    environment,
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  );
-  if (selectedAlternates) {
-    for (const objectDirectory of gitAlternateObjectDirectories(
-      selectedAlternates,
-    )) {
-      objectDirectories.add(resolve(repository, objectDirectory));
-    }
+    roots.add(effectiveWorktree);
   }
 
   for (const directory of new Set([invocationDirectory, repository])) {
@@ -2985,16 +2970,21 @@ async function protectedHookExecutableRoots(
           ? await stat(marker)
           : markerMetadata;
         roots.add(current);
+        if (!selectedWorktree && !discoveredWorktree) {
+          effectiveWorktree = current;
+          discoveredWorktree = true;
+        }
         if (metadata.isFile()) {
           const contents = await readFile(marker, "utf8");
-          const matched = /^gitdir:[\t ]*([^\r\n]+?)(?:\r?\n[\t ]*)*$/u.exec(
-            contents,
-          );
+          const matched =
+            /^gitdir:[\t ]*([^\r\n]+?)(?=\r?\n|$)(?:\r?\n[\t ]*)*$/u.exec(
+              contents,
+            );
           if (matched?.[1] === undefined) {
             throw new Error("Git worktree pointer cannot be parsed safely.");
           }
           const selected = await canonicalProtectedHookRoot(
-            resolve(current, matched[1].trimEnd()),
+            resolve(current, matched[1]),
           );
           roots.add(selected);
           gitDirectories.add(selected);
@@ -3013,7 +3003,27 @@ async function protectedHookExecutableRoots(
     }
   }
 
+  const selectedObjectDirectory = hookGitEnvironmentValue(
+    environment,
+    "GIT_OBJECT_DIRECTORY",
+  );
+  if (selectedObjectDirectory) {
+    objectDirectories.add(resolve(effectiveWorktree, selectedObjectDirectory));
+  }
+  const selectedAlternates = hookGitEnvironmentValue(
+    environment,
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  );
+  if (selectedAlternates) {
+    for (const objectDirectory of gitAlternateObjectDirectories(
+      selectedAlternates,
+    )) {
+      objectDirectories.add(resolve(effectiveWorktree, objectDirectory));
+    }
+  }
+
   for (const gitDirectory of gitDirectories) {
+    let commonGitDirectory = gitDirectory;
     try {
       const commonDirectory = (
         await readFile(join(gitDirectory, "commondir"), "utf8")
@@ -3022,18 +3032,19 @@ async function protectedHookExecutableRoots(
         const canonical = await canonicalProtectedHookRoot(
           resolve(gitDirectory, commonDirectory),
         );
+        commonGitDirectory = canonical;
         roots.add(canonical);
         objectDirectories.add(join(canonical, "objects"));
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    const configuration = [
-      join(gitDirectory, "config"),
-      join(gitDirectory, "config.worktree"),
-    ];
+    const configuration = [join(commonGitDirectory, "config")];
     const visitedConfiguration = new Set<string>();
-    for (const path of configuration) {
+    let worktreeConfigEnabled = false;
+    let addedWorktreeConfiguration = false;
+    for (let index = 0; index < configuration.length; index += 1) {
+      const path = configuration[index]!;
       try {
         const canonicalPath = await canonicalProtectedHookRoot(path);
         if (visitedConfiguration.has(canonicalPath)) continue;
@@ -3049,6 +3060,9 @@ async function protectedHookExecutableRoots(
           );
         }
         const entries = gitConfigEntries(await readFile(path, "utf8"));
+        if (entries.worktreeConfig !== undefined) {
+          worktreeConfigEnabled = entries.worktreeConfig;
+        }
         for (const worktree of entries.worktrees) {
           for (const base of [repository, gitDirectory]) {
             roots.add(
@@ -3057,10 +3071,28 @@ async function protectedHookExecutableRoots(
           }
         }
         for (const included of entries.includes) {
-          configuration.push(resolve(dirname(path), expandHome(included)));
+          if (
+            included.condition !== undefined &&
+            !(await gitIncludeConditionMatches(
+              included.condition,
+              gitDirectory,
+              path,
+            ))
+          ) {
+            continue;
+          }
+          configuration.push(resolve(dirname(path), expandHome(included.path)));
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (
+        worktreeConfigEnabled &&
+        !addedWorktreeConfiguration &&
+        index === configuration.length - 1
+      ) {
+        addedWorktreeConfiguration = true;
+        configuration.push(join(gitDirectory, "config.worktree"));
       }
     }
     objectDirectories.add(join(gitDirectory, "objects"));
@@ -3145,11 +3177,14 @@ function hookGitEnvironmentValue(
 
 function gitConfigEntries(contents: string): {
   worktrees: string[];
-  includes: string[];
+  includes: Array<{ path: string; condition?: string }>;
+  worktreeConfig?: boolean;
 } {
   const worktrees: string[] = [];
-  const includes: string[] = [];
+  const includes: Array<{ path: string; condition?: string }> = [];
   let sectionName = "";
+  let subsection: string | undefined;
+  let worktreeConfig: boolean | undefined;
   let continuation = "";
   for (const segment of contents.split(/\r?\n/u)) {
     let line = continuation + segment;
@@ -3158,61 +3193,179 @@ function gitConfigEntries(contents: string): {
       continue;
     }
     continuation = "";
-    const section = /^\s*\[([^\]]+)\]/u.exec(line);
+    const section =
+      /^\s*\[([A-Za-z0-9.-]+)(?:\s+"((?:\\.|[^"\\])*)")?\s*\]/u.exec(line);
     if (section?.[1] !== undefined) {
-      sectionName = section[1].trim().split(/[\s"]/u, 1)[0]!.toLowerCase();
+      sectionName = section[1].toLowerCase();
+      subsection =
+        section[2] === undefined
+          ? undefined
+          : gitConfigValue(`"${section[2]}"`);
       continue;
     }
     const key =
-      sectionName === "core"
+      sectionName === "core" && subsection === undefined
         ? "worktree"
-        : sectionName === "include" || sectionName === "includeif"
-          ? "path"
-          : null;
+        : sectionName === "extensions" && subsection === undefined
+          ? "worktreeconfig"
+          : (sectionName === "include" && subsection === undefined) ||
+              (sectionName === "includeif" && subsection !== undefined)
+            ? "path"
+            : null;
     if (key === null) continue;
     const matched = new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*$`, "iu").exec(
       line,
     );
-    let configured = matched?.[1];
+    const configured = matched?.[1];
     if (configured === undefined) continue;
-    let quoted = false;
-    let escaped = false;
-    let value = "";
-    for (const character of configured) {
-      if (!escaped && character === '"') quoted = !quoted;
-      if (!quoted && !escaped && (character === "#" || character === ";")) {
-        break;
+    const value = gitConfigValue(configured);
+    if (value.length === 0) continue;
+    if (sectionName === "extensions") {
+      const normalized = value.toLowerCase();
+      if (["true", "yes", "on", "1"].includes(normalized)) {
+        worktreeConfig = true;
+      } else if (["false", "no", "off", "0"].includes(normalized)) {
+        worktreeConfig = false;
+      } else {
+        throw new Error(
+          "Git worktree configuration extension cannot be parsed safely.",
+        );
       }
-      value += character;
-      escaped = !escaped && character === "\\";
-    }
-    configured = value.trimEnd();
-    if (configured.startsWith('"') && configured.endsWith('"')) {
-      try {
-        const decoded: unknown = JSON.parse(configured);
-        if (typeof decoded === "string") configured = decoded;
-      } catch {
-        configured = configured.slice(1, -1);
-      }
-    }
-    if (configured.length > 0) {
-      (sectionName === "core" ? worktrees : includes).push(configured);
+    } else if (sectionName === "core") {
+      worktrees.push(value);
+    } else {
+      includes.push({
+        path: value,
+        ...(sectionName === "includeif" ? { condition: subsection! } : {}),
+      });
     }
   }
-  return { worktrees, includes };
+  return {
+    worktrees,
+    includes,
+    ...(worktreeConfig === undefined ? {} : { worktreeConfig }),
+  };
+}
+
+function gitConfigValue(value: string): string {
+  let decoded = "";
+  let quoted = false;
+  let significantLength = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (character === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (!quoted && (character === "#" || character === ";")) break;
+    if (character === "\\") {
+      const escaped = value[++index];
+      if (escaped === undefined) {
+        throw new Error("Invalid escaped Git configuration value.");
+      }
+      const special: Record<string, string> = {
+        b: "\b",
+        n: "\n",
+        t: "\t",
+        '"': '"',
+        "\\": "\\",
+      };
+      if (escaped in special) {
+        decoded += special[escaped];
+      } else if (/[0-7]/u.test(escaped)) {
+        let octal = escaped;
+        while (octal.length < 3 && /[0-7]/u.test(value[index + 1] ?? "")) {
+          octal += value[++index];
+        }
+        decoded += String.fromCharCode(Number.parseInt(octal, 8));
+      } else {
+        throw new Error("Invalid escaped Git configuration value.");
+      }
+      significantLength = decoded.length;
+      continue;
+    }
+    decoded += character;
+    if (quoted || !/[\t ]/u.test(character)) {
+      significantLength = decoded.length;
+    }
+  }
+  if (quoted) {
+    throw new Error("Invalid quoted Git configuration value.");
+  }
+  return decoded.slice(0, significantLength);
+}
+
+async function gitIncludeConditionMatches(
+  condition: string,
+  gitDirectory: string,
+  configurationPath: string,
+): Promise<boolean> {
+  const separator = condition.indexOf(":");
+  if (separator < 0) {
+    throw new Error("Unsupported conditional Git configuration include.");
+  }
+  const kind = condition.slice(0, separator).toLowerCase();
+  let pattern = condition.slice(separator + 1).replaceAll("\\", "/");
+  let candidate: string;
+  if (kind === "gitdir" || kind === "gitdir/i") {
+    if (pattern.startsWith("./")) {
+      pattern = resolve(dirname(configurationPath), pattern).replaceAll(
+        "\\",
+        "/",
+      );
+    } else if (pattern.startsWith("~/")) {
+      pattern = expandHome(pattern).replaceAll("\\", "/");
+    } else if (!isAbsolute(pattern) && !pattern.startsWith("**/")) {
+      pattern = `**/${pattern}`;
+    }
+    if (pattern.endsWith("/")) pattern += "**";
+    candidate = gitDirectory.replaceAll("\\", "/");
+  } else if (kind === "onbranch") {
+    let head: string;
+    try {
+      head = await readFile(join(gitDirectory, "HEAD"), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    const branch = /^ref:[\t ]*refs\/heads\/(.+?)(?:\r?\n)?$/u.exec(head)?.[1];
+    if (branch === undefined) return false;
+    if (pattern.endsWith("/")) pattern += "**";
+    candidate = branch;
+  } else {
+    throw new Error("Unsupported conditional Git configuration include.");
+  }
+
+  let expression = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index]!;
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        index += 1;
+        if (pattern[index + 1] === "/") {
+          index += 1;
+          expression += "(?:.*/)?";
+        } else {
+          expression += ".*";
+        }
+      } else {
+        expression += "[^/]*";
+      }
+    } else if (character === "?") {
+      expression += "[^/]";
+    } else {
+      expression += character.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    }
+  }
+  expression += "$";
+  const matcher = new RegExp(expression, kind === "gitdir/i" ? "iu" : "u");
+  return matcher.test(candidate) || matcher.test(`${candidate}/`);
 }
 
 function gitAlternateObjectDirectoryLine(value: string): string {
   if (!value.startsWith('"')) return value;
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(value);
-  } catch (error) {
-    throw new Error("Invalid quoted Git alternate object directory.", {
-      cause: error,
-    });
-  }
-  if (typeof decoded !== "string") {
+  const decoded = gitConfigValue(value);
+  if (!value.endsWith('"')) {
     throw new Error("Invalid quoted Git alternate object directory.");
   }
   return decoded;
@@ -3237,18 +3390,9 @@ function gitAlternateObjectDirectories(value: string): readonly string[] {
       if (end === value.length) {
         throw new Error("Invalid quoted Git alternate object directory.");
       }
-      let decoded: unknown;
-      try {
-        decoded = JSON.parse(value.slice(offset, end + 1));
-      } catch (error) {
-        throw new Error("Invalid quoted Git alternate object directory.", {
-          cause: error,
-        });
-      }
-      if (typeof decoded !== "string") {
-        throw new Error("Invalid quoted Git alternate object directory.");
-      }
-      entries.push(decoded);
+      entries.push(
+        gitAlternateObjectDirectoryLine(value.slice(offset, end + 1)),
+      );
       offset = end + 1;
       if (offset < value.length && value[offset] !== delimiter) {
         throw new Error("Invalid Git alternate object directory separator.");
