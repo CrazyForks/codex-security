@@ -19,6 +19,7 @@ import {
 } from "node:fs/promises";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -2925,12 +2926,7 @@ async function protectedHookExecutableRoots(
   environment: Readonly<Record<string, string | undefined>>,
 ): Promise<readonly string[]> {
   const roots = new Set([repository]);
-  const selectedGitDirectory =
-    process.platform === "win32"
-      ? Object.entries(environment).find(
-          ([name]) => name.toUpperCase() === "GIT_DIR",
-        )?.[1]
-      : environment["GIT_DIR"];
+  const selectedGitDirectory = hookGitEnvironmentValue(environment, "GIT_DIR");
   const gitDirectories = new Set<string>();
   if (selectedGitDirectory) {
     const selected = await canonicalProtectedHookRoot(
@@ -2939,12 +2935,10 @@ async function protectedHookExecutableRoots(
     roots.add(selected);
     gitDirectories.add(selected);
   }
-  const selectedCommonDirectory =
-    process.platform === "win32"
-      ? Object.entries(environment).find(
-          ([name]) => name.toUpperCase() === "GIT_COMMON_DIR",
-        )?.[1]
-      : environment["GIT_COMMON_DIR"];
+  const selectedCommonDirectory = hookGitEnvironmentValue(
+    environment,
+    "GIT_COMMON_DIR",
+  );
   if (selectedCommonDirectory) {
     roots.add(
       await canonicalProtectedHookRoot(
@@ -2952,16 +2946,26 @@ async function protectedHookExecutableRoots(
       ),
     );
   }
-  const selectedWorktree =
-    process.platform === "win32"
-      ? Object.entries(environment).find(
-          ([name]) => name.toUpperCase() === "GIT_WORK_TREE",
-        )?.[1]
-      : environment["GIT_WORK_TREE"];
+  const selectedWorktree = hookGitEnvironmentValue(
+    environment,
+    "GIT_WORK_TREE",
+  );
   if (selectedWorktree) {
     roots.add(
       await canonicalProtectedHookRoot(resolve(repository, selectedWorktree)),
     );
+  }
+  for (const name of [
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  ] as const) {
+    const selected = hookGitEnvironmentValue(environment, name);
+    for (const objectDirectory of selected?.split(delimiter) ?? []) {
+      if (objectDirectory.length === 0) continue;
+      roots.add(
+        await canonicalProtectedHookRoot(resolve(repository, objectDirectory)),
+      );
+    }
   }
 
   for (const directory of new Set([invocationDirectory, repository])) {
@@ -2969,7 +2973,10 @@ async function protectedHookExecutableRoots(
     while (true) {
       try {
         const marker = join(current, ".git");
-        const metadata = await lstat(marker);
+        const markerMetadata = await lstat(marker);
+        const metadata = markerMetadata.isSymbolicLink()
+          ? await stat(marker)
+          : markerMetadata;
         roots.add(current);
         if (metadata.isFile()) {
           const contents = await readFile(marker, "utf8");
@@ -2982,7 +2989,9 @@ async function protectedHookExecutableRoots(
             gitDirectories.add(selected);
           }
         } else if (metadata.isDirectory()) {
-          gitDirectories.add(await canonicalProtectedHookRoot(marker));
+          const selected = await canonicalProtectedHookRoot(marker);
+          roots.add(selected);
+          gitDirectories.add(selected);
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -3009,9 +3018,93 @@ async function protectedHookExecutableRoots(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    for (const name of ["config", "config.worktree"]) {
+      const path = join(gitDirectory, name);
+      try {
+        const metadata = await stat(path);
+        if (!metadata.isFile() || metadata.size > 1_024 * 1_024) continue;
+        for (const worktree of gitConfigWorktrees(
+          await readFile(path, "utf8"),
+        )) {
+          for (const base of [repository, gitDirectory]) {
+            roots.add(
+              await canonicalProtectedHookRoot(resolve(base, worktree)),
+            );
+          }
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+
+  const count = Number(
+    hookGitEnvironmentValue(environment, "GIT_CONFIG_COUNT"),
+  );
+  if (Number.isSafeInteger(count) && count > 0) {
+    for (let index = 0; index < count && index < 1_024; index += 1) {
+      if (
+        hookGitEnvironmentValue(
+          environment,
+          `GIT_CONFIG_KEY_${index}`,
+        )?.toLowerCase() !== "core.worktree"
+      ) {
+        continue;
+      }
+      const worktree = hookGitEnvironmentValue(
+        environment,
+        `GIT_CONFIG_VALUE_${index}`,
+      );
+      if (!worktree) continue;
+      roots.add(
+        await canonicalProtectedHookRoot(resolve(repository, worktree)),
+      );
+      for (const gitDirectory of gitDirectories) {
+        roots.add(
+          await canonicalProtectedHookRoot(resolve(gitDirectory, worktree)),
+        );
+      }
+    }
   }
 
   return [...roots];
+}
+
+function hookGitEnvironmentValue(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined {
+  return process.platform === "win32"
+    ? Object.entries(environment).find(
+        ([candidate]) => candidate.toUpperCase() === name,
+      )?.[1]
+    : environment[name];
+}
+
+function gitConfigWorktrees(contents: string): readonly string[] {
+  const worktrees: string[] = [];
+  let core = false;
+  for (const line of contents.split(/\r?\n/u)) {
+    const section = /^\s*\[([^\]]+)\]/u.exec(line);
+    if (section?.[1] !== undefined) {
+      core = section[1].trim().toLowerCase() === "core";
+      continue;
+    }
+    if (!core) continue;
+    const matched = /^\s*worktree\s*=\s*(.+?)\s*$/iu.exec(line);
+    let worktree = matched?.[1];
+    if (worktree === undefined) continue;
+    if (worktree.startsWith('"') && worktree.endsWith('"')) {
+      try {
+        const decoded: unknown = JSON.parse(worktree);
+        if (typeof decoded === "string") worktree = decoded;
+      } catch {
+        worktree = worktree.slice(1, -1);
+      }
+    }
+    if (worktree.length > 0) worktrees.push(worktree);
+  }
+  return worktrees;
 }
 
 async function canonicalProtectedHookRoot(path: string): Promise<string> {

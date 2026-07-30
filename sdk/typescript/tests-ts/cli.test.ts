@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -984,6 +985,160 @@ describe("CLI", () => {
         expect(stderr.text()).toContain("A pre-commit hook already exists");
       }
       await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores Git shims inside symlinked repository metadata", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-symlinked-git-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      const gitDirectory = join(root, "git-directory");
+      const binaries = join(gitDirectory, "node_modules", ".bin");
+      const marker = join(root, "git-shim-executed");
+      execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
+      await rename(join(repository, ".git"), gitDirectory);
+      await symlink(
+        gitDirectory,
+        join(repository, ".git"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await mkdir(binaries, { recursive: true });
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      const maliciousGit =
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
+      await writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 });
+      const stdout = capture();
+      const stderr = capture();
+      const exitCode = await main(
+        ["install-hook", repository, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: repository,
+          environment: {
+            ...process.env,
+            PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+          },
+        }),
+      );
+      expect([0, 2]).toContain(exitCode);
+      if (exitCode === 2) {
+        expect(stderr.text()).toContain("A pre-commit hook already exists");
+      }
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores Git shims in a config-selected worktree", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-config-worktree-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      const gitDirectory = join(root, "git-directory");
+      const worktree = join(root, "configured-worktree");
+      const binaries = join(worktree, "node_modules", ".bin");
+      const marker = join(root, "git-shim-executed");
+      await Promise.all([
+        mkdir(repository, { recursive: true }),
+        mkdir(binaries, { recursive: true }),
+      ]);
+      execFileSync("git", ["init", "--bare", "-q", gitDirectory], {
+        timeout: 10_000,
+      });
+      execFileSync(
+        "git",
+        ["-C", gitDirectory, "config", "core.bare", "false"],
+        {
+          timeout: 10_000,
+        },
+      );
+      execFileSync(
+        "git",
+        ["-C", gitDirectory, "config", "core.worktree", worktree],
+        { timeout: 10_000 },
+      );
+      const gitName = process.platform === "win32" ? "git.cmd" : "git";
+      const maliciousGit =
+        process.platform === "win32"
+          ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+          : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
+      await writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 });
+      const stdout = capture();
+      const stderr = capture();
+      const exitCode = await main(
+        ["install-hook", repository, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: repository,
+          environment: {
+            ...process.env,
+            GIT_DIR: gitDirectory,
+            PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+          },
+        }),
+      );
+      expect([0, 2]).toContain(exitCode);
+      if (exitCode === 2) {
+        expect(stderr.text()).toContain("A pre-commit hook already exists");
+      }
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores Git shims in externally selected Git object stores", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-git-object-stores-")),
+    );
+    try {
+      const repository = join(root, "repository");
+      execFileSync("git", ["init", "-q", repository], { timeout: 10_000 });
+      for (const name of [
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+      ] as const) {
+        const objectDirectory = join(root, name.toLowerCase());
+        const binaries = join(objectDirectory, "node_modules", ".bin");
+        const marker = join(root, `${name.toLowerCase()}-executed`);
+        await mkdir(binaries, { recursive: true });
+        const gitName = process.platform === "win32" ? "git.cmd" : "git";
+        const maliciousGit =
+          process.platform === "win32"
+            ? `@echo off\r\n> "${marker}" echo hijacked\r\nexit /b 1\r\n`
+            : `#!/bin/sh\nprintf '%s' hijacked > '${marker.replaceAll("'", `'"'"'`)}'\nexit 1\n`;
+        await writeFile(join(binaries, gitName), maliciousGit, { mode: 0o755 });
+        const stdout = capture();
+        const stderr = capture();
+        const exitCode = await main(
+          ["install-hook", repository, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: repository,
+            environment: {
+              ...process.env,
+              [name]: objectDirectory,
+              PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
+            },
+          }),
+        );
+        expect([0, 2]).toContain(exitCode);
+        if (exitCode === 2) {
+          expect(stderr.text()).toContain("A pre-commit hook already exists");
+        }
+        await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
