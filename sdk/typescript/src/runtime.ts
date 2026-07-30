@@ -2006,9 +2006,11 @@ async function sameFile(left: string, right: string): Promise<boolean> {
 }
 
 export function expandHome(value: string): string {
+  const preferred = process.platform === "win32" ? "USERPROFILE" : "HOME";
+  const fallback = process.platform === "win32" ? "HOME" : "USERPROFILE";
   const home =
-    process.env["HOME"]?.trim() ||
-    process.env["USERPROFILE"]?.trim() ||
+    process.env[preferred]?.trim() ||
+    process.env[fallback]?.trim() ||
     homedir();
   if (value === "~") return home;
   if (value.startsWith("~/") || value.startsWith("~\\")) {

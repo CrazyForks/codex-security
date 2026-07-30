@@ -273,6 +273,29 @@ describe("multiscan", () => {
     ]);
   });
 
+  test("resumes equivalent canonical repository scopes", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "canonical-scope");
+    const inventory = (scope: string): string =>
+      `id,repository,revision,scope\nscoped,${source.path},${source.revision},${scope}\n`;
+    await writeFile(paths.input, inventory("./src//"));
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      expect(scanOptions.target).toEqual(["src"]);
+      return await completedScan(scanOptions.outputDir!);
+    });
+    await runMultiscan(options(paths, security));
+    await writeFile(paths.input, inventory("src/."));
+
+    expect(await runMultiscan(options(paths, security))).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(scans).toBe(1);
+  });
+
   test("preserves UTF-8 repository paths split across inventory stream chunks", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "caf\u00e9");
@@ -623,6 +646,37 @@ describe("multiscan", () => {
           name.startsWith(".lock.pending-") || name.startsWith(".lock.stale-"),
       ),
     ).toBe(false);
+  });
+
+  test("never recovers a lock while another live owner is publishing it", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-publication");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\npublishing,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    await writeFile(lock, "");
+    await writeFile(
+      join(paths.output, ".lock.pending-other-owner"),
+      `${JSON.stringify({ pid: process.pid, token: "other-owner" })}\n`,
+    );
+    let scans = 0;
+
+    await expect(
+      runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            scans += 1;
+            return await completedScan(scanOptions.outputDir!);
+          }),
+        ),
+      ),
+    ).rejects.toThrow(/running|supervisor/iu);
+    expect(scans).toBe(0);
+    expect(await readFile(lock, "utf8")).toBe("");
   });
 
   test("never overwrites a supervisor lock published during stale-lock recovery", async () => {
@@ -1205,8 +1259,82 @@ describe("multiscan", () => {
     );
 
     await writeFile(join(await latestOutput(), "findings.json"), "");
-    expect(await run()).toMatchObject({ completed: 0, failed: 1, skipped: 0 });
-    expect(calls).toBe(4);
+    expect(await run()).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(calls).toBe(5);
+    expect(await latestOutput()).toBe(
+      join(paths.output, "artifacts", "resume-integrity", "attempt-4"),
+    );
+  });
+
+  test("does not reuse a directory snapshot for a pinned Git campaign", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "snapshot-mismatch");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nsnapshot,${source.path},${source.revision}\n`,
+    );
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const initial = await runMultiscan(options(paths, security));
+    const [receipt] = await results(initial.resultsPath);
+    const manifestPath = join(
+      receipt!["outputDir"] as string,
+      "scan-manifest.json",
+    );
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      scan: { target: { kind: string } };
+    };
+    manifest.scan.target.kind = "directory_snapshot";
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    expect(await runMultiscan(options(paths, security))).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 0,
+    });
+    expect(scans).toBe(2);
+  });
+
+  test("recovers interrupted receipt replacement without dropping valid history", async () => {
+    for (const interruption of ["truncated", "missing", "published"]) {
+      const paths = await fixture();
+      const source = await repository(paths.root, `repair-${interruption}`);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrepair,${source.path},${source.revision}\n`,
+      );
+      let scans = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        scans += 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+      const initial = await runMultiscan(options(paths, security));
+      const saved = await readFile(initial.resultsPath, "utf8");
+      const replacement = join(
+        paths.output,
+        ".results.repair-interrupted.jsonl",
+      );
+      await writeFile(replacement, saved, { flag: "wx", mode: 0o600 });
+      if (interruption === "truncated") {
+        await writeFile(initial.resultsPath, saved.slice(0, 10));
+      } else if (interruption === "missing") {
+        await rm(initial.resultsPath);
+      }
+
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toBe(1);
+      expect(await readFile(initial.resultsPath, "utf8")).toBe(saved);
+      await expect(access(replacement)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
   });
 
   test("binds resumed scan bundles to their pinned task and plugin version", async () => {

@@ -50,6 +50,7 @@ import {
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  expandHome,
   codexPlatformPackage,
   isPythonPathCandidate,
   planOutputArchive,
@@ -64,6 +65,26 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
+
+test.skipIf(process.platform !== "win32")(
+  "expands home using USERPROFILE before a conflicting HOME on Windows",
+  () => {
+    const savedHome = process.env["HOME"];
+    const savedUserProfile = process.env["USERPROFILE"];
+    try {
+      process.env["HOME"] = "C:\\legacy-posix-home";
+      process.env["USERPROFILE"] = "C:\\Users\\scan-owner";
+      expect(expandHome("~/.codex")).toBe(
+        join("C:\\Users\\scan-owner", ".codex"),
+      );
+    } finally {
+      if (savedHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = savedHome;
+      if (savedUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = savedUserProfile;
+    }
+  },
+);
 
 afterEach(async () => {
   await Promise.all(

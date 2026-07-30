@@ -9,6 +9,7 @@ import {
   mkdir,
   open,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -158,18 +159,27 @@ async function runCampaign(
       recorded !== undefined && sameMultiscanTask(recorded, task)
         ? recorded
         : undefined;
-    if (
-      receipt?.status === "completed" &&
-      receipt.outputDir ===
-        join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
-      (await hasArtifacts(
-        receipt.outputDir,
-        await resumePluginRoot(),
-        task,
-        options.signal,
-      ))
-    ) {
-      completed += 1;
+    if (receipt?.status === "completed") {
+      if (
+        receipt.outputDir ===
+          join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
+        (await hasArtifacts(
+          receipt.outputDir,
+          await resumePluginRoot(),
+          task,
+          options.signal,
+        ))
+      ) {
+        completed += 1;
+      } else {
+        pending.push({
+          task,
+          attempt:
+            receipt.attempt >= options.maxAttempts
+              ? Math.max(0, receipt.attempt - 1)
+              : receipt.attempt,
+        });
+      }
     } else if ((receipt?.attempt ?? 0) >= options.maxAttempts) {
       failed += 1;
     } else {
@@ -471,6 +481,9 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
         }
         continue;
       }
+      if (existing === null && (await hasCompetingPendingLock(output, token))) {
+        throw new Error("A multiscan supervisor is already running.");
+      }
 
       try {
         await publishLock(pending, recovery, owner);
@@ -547,6 +560,23 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   } finally {
     await rm(pending, { force: true });
   }
+}
+
+async function hasCompetingPendingLock(
+  output: string,
+  ownToken: string,
+): Promise<boolean> {
+  for (const name of await readdir(output)) {
+    if (
+      !name.startsWith(".lock.pending-") ||
+      name === `.lock.pending-${ownToken}`
+    ) {
+      continue;
+    }
+    const owner = await readLockOwner(join(output, name));
+    if (owner !== null && processIsRunning(owner.pid)) return true;
+  }
+  return false;
 }
 
 async function publishLock(
@@ -673,6 +703,7 @@ async function readReceipts(
   signal?: AbortSignal,
 ): Promise<Map<string, MultiscanReceipt>> {
   signal?.throwIfAborted();
+  await recoverInterruptedReceiptRepair(path, signal);
   let file: FileHandle;
   try {
     file = await openReceiptLedger(path, constants.O_RDONLY);
@@ -704,6 +735,7 @@ async function readReceipts(
 
     const replacement = receiptRepairPath(path);
     let repaired: FileHandle | undefined;
+    let publishing = false;
     try {
       repaired = await open(replacement, "wx", 0o600);
       if (!initial.discardAll) {
@@ -719,16 +751,84 @@ async function readReceipts(
       repaired = undefined;
       await file.close();
       opened = undefined;
+      publishing = true;
       await publishReceiptRepair(path, replacement);
     } catch (error) {
       await repaired?.close();
-      await rm(replacement, { force: true });
+      if (!publishing) await rm(replacement, { force: true });
       throw error;
     }
     return receipts;
   } finally {
     await opened?.close();
   }
+}
+
+async function recoverInterruptedReceiptRepair(
+  path: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const candidates = (await readdir(dirname(path))).filter(
+    (name) => name.startsWith(".results.repair-") && name.endsWith(".jsonl"),
+  );
+  if (candidates.length === 0) return;
+  if (candidates.length !== 1) {
+    throw new Error(
+      "Multiple interrupted multiscan receipt repairs were found.",
+    );
+  }
+  const replacement = join(dirname(path), candidates[0]!);
+  const candidate = await openReceiptLedger(replacement, constants.O_RDONLY);
+  let replacementBytes: Buffer;
+  try {
+    if ((await candidate.stat()).size > MAX_RECEIPT_LEDGER_BYTES) {
+      throw new Error(
+        "Interrupted multiscan receipt repair exceeds its size limit.",
+      );
+    }
+    replacementBytes = await candidate.readFile();
+    const inspection = await readReceiptLines(
+      candidate,
+      signal,
+      async () => {},
+    );
+    if (inspection.corrupted) {
+      throw new Error("Interrupted multiscan receipt repair is invalid.");
+    }
+  } finally {
+    await candidate.close();
+  }
+
+  let existing: FileHandle;
+  try {
+    existing = await openReceiptLedger(path, constants.O_RDONLY);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await rename(replacement, path);
+    return;
+  }
+  let complete = false;
+  try {
+    if ((await existing.stat()).size <= MAX_RECEIPT_LEDGER_BYTES) {
+      const bytes = await existing.readFile();
+      const inspection = await readReceiptLines(
+        existing,
+        signal,
+        async () => {},
+      );
+      complete =
+        !inspection.corrupted &&
+        bytes.length >= replacementBytes.length &&
+        bytes.subarray(0, replacementBytes.length).equals(replacementBytes);
+    }
+  } finally {
+    await existing.close();
+  }
+  if (complete) {
+    await rm(replacement, { force: true });
+    return;
+  }
+  await publishReceiptRepair(path, replacement);
 }
 
 async function readReceiptLines(
@@ -896,40 +996,35 @@ async function publishReceiptRepair(
   );
   await copyFile(path, quarantine, constants.COPYFILE_EXCL);
   try {
-    try {
-      await rename(replacement, path);
-    } catch (error) {
-      if (
-        process.platform !== "win32" ||
-        !["EPERM", "EACCES", "EEXIST"].includes(
-          (error as NodeJS.ErrnoException).code ?? "",
-        )
-      ) {
-        throw error;
-      }
-      const destination = await openReceiptLedger(path, constants.O_RDWR);
-      try {
-        const source = await open(replacement, constants.O_RDONLY);
-        try {
-          await destination.truncate(0);
-          for await (const chunk of source.createReadStream({
-            autoClose: false,
-            highWaterMark: 64 * 1024,
-          })) {
-            await destination.writeFile(chunk);
-          }
-          await destination.sync();
-        } finally {
-          await source.close();
-        }
-      } finally {
-        await destination.close();
-      }
-      await rm(replacement, { force: true });
-    }
+    await rename(replacement, path);
   } catch (error) {
+    if (
+      process.platform !== "win32" ||
+      !["EPERM", "EACCES", "EEXIST"].includes(
+        (error as NodeJS.ErrnoException).code ?? "",
+      )
+    ) {
+      throw error;
+    }
+    const destination = await openReceiptLedger(path, constants.O_RDWR);
+    try {
+      const source = await open(replacement, constants.O_RDONLY);
+      try {
+        await destination.truncate(0);
+        for await (const chunk of source.createReadStream({
+          autoClose: false,
+          highWaterMark: 64 * 1024,
+        })) {
+          await destination.writeFile(chunk);
+        }
+        await destination.sync();
+      } finally {
+        await source.close();
+      }
+    } finally {
+      await destination.close();
+    }
     await rm(replacement, { force: true });
-    throw error;
   }
 }
 
@@ -963,7 +1058,10 @@ async function hasArtifacts(
         pluginVersion: plugin.version,
       },
     });
-    return contract.coverage.completeness === "complete";
+    return (
+      contract.coverage.completeness === "complete" &&
+      contract.manifest.scan.target.kind !== "directory_snapshot"
+    );
   } catch (error) {
     if (signal?.aborted === true) signal.throwIfAborted();
     return false;
@@ -1143,12 +1241,16 @@ function parseInventoryRow(
   ) {
     throw new Error("Multiscan scope must stay inside its repository.");
   }
+  const normalizedScope = scope
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".")
+    .join("/");
   return {
     id,
     repository: normalizeRepository(get("repository"), directory),
     revision,
     mode,
-    ...(scope ? { scope } : {}),
+    ...(normalizedScope ? { scope: normalizedScope } : {}),
   };
 }
 
