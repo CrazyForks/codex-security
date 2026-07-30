@@ -376,6 +376,32 @@ describe("multiscan", () => {
         skipped: 1,
       });
       expect(scans).toBe(1);
+
+      const remote = "https://example.invalid/symlinked-scope.git";
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nscoped,${remote},${revision},alias\n`,
+      );
+      const manifestPath = join(paths.output, "manifest.json");
+      const campaign = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        tasks: Array<{ repository: string }>;
+      };
+      campaign.tasks[0]!.repository = remote;
+      await writeFile(manifestPath, `${JSON.stringify(campaign, null, 2)}\n`);
+      const ledgerPath = join(paths.output, "results.jsonl");
+      const receipts = await results(ledgerPath);
+      for (const receipt of receipts) receipt["repository"] = remote;
+      await writeFile(
+        ledgerPath,
+        `${receipts.map((receipt) => JSON.stringify(receipt)).join("\n")}\n`,
+      );
+
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toBe(1);
     },
   );
 

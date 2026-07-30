@@ -65,6 +65,7 @@ interface MultiscanReceipt extends MultiscanTask {
   outputDir: string;
   cost?: ScanCost;
   error?: string;
+  canonicalScope?: string;
 }
 
 export interface MultiscanOptions {
@@ -167,6 +168,7 @@ async function runCampaign(
           receipt.outputDir,
           await resumePluginRoot(),
           task,
+          receipt.canonicalScope,
           options.signal,
         ))
       ) {
@@ -221,6 +223,7 @@ async function runCampaign(
         options.onProgress?.({ ...progress, status: "started" });
         let failure: string | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        let canonicalScope: string | undefined;
         try {
           await ensureOutputDirectory(dirname(scanDir));
           await rm(scanDir, { recursive: true, force: true });
@@ -242,6 +245,7 @@ async function runCampaign(
             ) {
               throw new Error("Multiscan scope escapes its repository.");
             }
+            canonicalScope = outside.split(sep).join("/");
           }
           const result = await security.run(checkout, {
             ...(task.scope === undefined ? {} : { target: [task.scope] }),
@@ -267,6 +271,7 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(canonicalScope === undefined ? {} : { canonicalScope }),
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
           })}\n`,
@@ -916,6 +921,7 @@ function parseMultiscanReceipt(bytes: Buffer): MultiscanReceipt | null {
   }
   if (!isRecord(value)) return null;
   const scope = value["scope"];
+  const canonicalScope = value["canonicalScope"];
   const cost = value["cost"];
   const error = value["error"];
   if (
@@ -935,6 +941,13 @@ function parseMultiscanReceipt(bytes: Buffer): MultiscanReceipt | null {
         scope.includes("\\") ||
         scope.split("/").includes("..") ||
         scope.includes("\0"))) ||
+    (canonicalScope !== undefined &&
+      (typeof canonicalScope !== "string" ||
+        canonicalScope.length > 4096 ||
+        isAbsolute(canonicalScope) ||
+        canonicalScope.includes("\\") ||
+        canonicalScope.split("/").includes("..") ||
+        canonicalScope.includes("\0"))) ||
     (value["status"] !== "completed" && value["status"] !== "failed") ||
     !Number.isSafeInteger(value["attempt"]) ||
     (value["attempt"] as number) < 1 ||
@@ -1050,6 +1063,7 @@ async function hasArtifacts(
   path: string,
   pluginRoot: string,
   task: MultiscanTask,
+  recordedCanonicalScope?: string,
   signal?: AbortSignal,
 ): Promise<boolean> {
   try {
@@ -1077,7 +1091,9 @@ async function hasArtifacts(
         }
         canonicalScope = relativeScope.split(sep).join("/");
       } catch {
-        // Remote repositories cannot be inspected until a checkout exists.
+        if (recordedCanonicalScope !== undefined) {
+          canonicalScope = recordedCanonicalScope;
+        }
       }
     }
     const contract = await loadContract(path, {
