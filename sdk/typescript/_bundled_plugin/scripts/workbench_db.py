@@ -1395,6 +1395,7 @@ def complete_scan_locked(
     prepare_only: bool = False,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
+    scan = backfill_legacy_immutable_diff_digest(connection, scan)
     if scan["status"] == "complete":
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
@@ -1523,6 +1524,44 @@ def complete_scan_locked(
         connection.rollback()
         raise
     return scan_context(connection, scan["id"])
+
+
+def backfill_legacy_immutable_diff_digest(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> sqlite3.Row:
+    if (
+        scan["mode"] != "diff"
+        or scan["diff_target_kind"] not in {"commit", "range"}
+        or scan["diff_content_digest"] is not None
+    ):
+        return scan
+    if scan["status"] == "complete":
+        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        require_recorded_manifest_digest(scan, scan_dir)
+        manifest = read_json_object(scan_dir / ARTIFACTS["manifest"])
+        target = manifest.get("scan", {}).get("target", {})
+        digest = target.get("snapshotDigest") if isinstance(target, dict) else None
+        if not isinstance(digest, str) or re.fullmatch(
+            r"codex-security-snapshot/v1:sha256:[a-f0-9]{64}", digest
+        ) is None:
+            raise SystemExit("Completed immutable diff scan is missing its sealed snapshot digest.")
+    else:
+        target = require_scan_target_identity(scan)
+        digest = git_diff_content_digest(
+            target,
+            scan["diff_base_revision"],
+            scan["diff_head_revision"],
+        )
+    with connection:
+        connection.execute(
+            "UPDATE scans SET diff_content_digest = ? WHERE id = ? AND diff_content_digest IS NULL",
+            (digest, scan["id"]),
+        )
+        connection.execute(
+            "UPDATE workspaces SET diff_content_digest = ? WHERE id = ? AND diff_content_digest IS NULL",
+            (digest, scan["workspace_id"]),
+        )
+    return require_scan(connection, scan["id"])
 
 
 def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:

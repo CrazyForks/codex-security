@@ -378,6 +378,26 @@ describe("malformed scan artifact recovery", () => {
       contract.diffTarget.contentDigest,
     );
     expect((await completeScan(fixture)).progress.status).toBe("complete");
+
+    const downgrade = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sqlite3, sys",
+          "with sqlite3.connect(sys.argv[1]) as connection:",
+          "    connection.execute('UPDATE scans SET diff_content_digest = NULL WHERE id = ?', (sys.argv[2],))",
+          "    connection.execute('UPDATE workspaces SET diff_content_digest = NULL WHERE id = (SELECT workspace_id FROM scans WHERE id = ?)', (sys.argv[2],))",
+        ].join("\n"),
+        join(fixture.stateDir, "workbench.sqlite3"),
+        fixture.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(downgrade.status, downgrade.stderr).toBe(0);
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {

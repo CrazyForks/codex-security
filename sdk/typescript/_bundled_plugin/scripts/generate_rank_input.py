@@ -428,6 +428,59 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
     return fit_preview_lines(preview_lines, preview_bytes), False
 
 
+def immutable_diff_preview(
+    repo: Path, path: Path, head: str, preview_bytes: int
+) -> tuple[str, bool]:
+    relative = path.relative_to(repo).as_posix()
+    command = ["git", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(repo)]
+    listed = subprocess.run(
+        [*command, "ls-tree", "-z", head, "--", relative],
+        check=False,
+        capture_output=True,
+    )
+    entries = [entry for entry in listed.stdout.split(b"\0") if entry]
+    if listed.returncode != 0 or len(entries) != 1:
+        raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
+    try:
+        metadata, tree_path = entries[0].split(b"\t", 1)
+        mode, kind, object_id = metadata.split(b" ", 2)
+    except ValueError as error:
+        raise SystemExit(
+            f"Unsafe changed repository path cannot be safely reviewed: {relative}"
+        ) from error
+    if (
+        mode not in {b"100644", b"100755"}
+        or kind != b"blob"
+        or tree_path != os.fsencode(relative)
+    ):
+        raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
+
+    process = subprocess.Popen(
+        [*command, "cat-file", "blob", object_id.decode("ascii")],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert process.stdout is not None
+        data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
+        if len(data) < DIRECT_SCOPE_PREVIEW_READ_BYTES:
+            if process.wait() != 0:
+                raise SystemExit(
+                    f"Unsafe changed repository path cannot be safely reviewed: {relative}"
+                )
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+    if is_binary_sample(data):
+        return "", True
+    text = data.decode("utf-8", errors="ignore")
+    outline = structural_outline(path, text)
+    preview_lines = select_preview_lines(outline or text.splitlines())
+    return fit_preview_lines(preview_lines, preview_bytes), False
+
+
 def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
@@ -645,6 +698,9 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     result = subprocess.run(
         [
             "git",
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
             "-C",
             str(repo),
             "diff",
@@ -700,7 +756,11 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         if status in {"D", "U"}:
             preview = ""
         else:
-            preview, is_binary = confined_diff_preview(repo, path, args.preview_bytes)
+            preview, is_binary = (
+                immutable_diff_preview(repo, path, args.head, args.preview_bytes)
+                if args.mode == "revisions"
+                else confined_diff_preview(repo, path, args.preview_bytes)
+            )
             if is_binary:
                 continue
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})

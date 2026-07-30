@@ -1230,6 +1230,10 @@ describe("runtime directories and plugin Python boundary", () => {
       "outside immutable diff\n",
     );
     expect(digest()).toBe(first);
+    await writeFile(join(repository, ".gitattributes"), "*.ts binary\n");
+    expect(digest()).toBe(first);
+    runGit("replace", head, base);
+    expect(digest()).toBe(first);
   });
 
   test("prepares one private, reusable managed-credential home", async () => {

@@ -134,6 +134,7 @@ Use `../security-scan/references/scan-artifacts-and-ledger.md` for the shared sc
 Diff scans should:
 
 - generate `rank_input.jsonl` deterministically from changed source-like files with `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl` for PR, commit, and branch diffs, or `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl` for a local patch
+- for committed revision diffs, read every changed or supporting file exclusively from the selected immutable Git tree with `git --no-replace-objects -C <repo_root> show <head>:<repository-relative-path>`; for deleted files use `<base>:<repository-relative-path>`. Never substitute the checked-out working-tree file, which may be from another revision or contain local edits
 - copy every diff row into `deep_review_input.jsonl` with `<python_command> <plugin_dir>/scripts/generate_rank_input.py copy-deep-review-input --rank-input <discovery_dir>/rank_input.jsonl --out <discovery_dir>/deep_review_input.jsonl`
 - deep-review every file in `deep_review_input.jsonl`
 - add directly supporting files only when repository evidence shows they are needed to understand the changed security behavior

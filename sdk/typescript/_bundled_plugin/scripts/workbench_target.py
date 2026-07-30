@@ -54,7 +54,14 @@ def git_command(
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
-    command = ["git", "-c", "core.fsmonitor=false", "-C", str(target)]
+    command = [
+        "git",
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        str(target),
+    ]
     if git_dir is not None and work_tree is not None:
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
@@ -81,26 +88,25 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
 
 
 def git_diff_content_digest(target: Path, base_revision: str, head_revision: str) -> str:
-    diff = git_bytes(
+    changed_objects = git_bytes(
         target,
-        "diff",
-        "--binary",
-        "--full-index",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
+        "diff-tree",
+        "-r",
+        "--raw",
+        "-z",
+        "--no-commit-id",
+        "--no-abbrev",
         "--no-renames",
-        "--ignore-submodules=none",
         base_revision,
         head_revision,
         "--",
         ".",
     )
-    if diff is None:
+    if changed_objects is None:
         raise SystemExit("Could not snapshot the selected Git diff.")
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
-    update_digest_field(digest, b"git-diff", diff)
+    update_digest_field(digest, b"git-tree-diff", changed_objects)
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 

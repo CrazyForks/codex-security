@@ -96,6 +96,7 @@ async function runDiffRankInput(
   fixture: TestRepository,
   mode: DiffMode,
   swap?: PathSwap,
+  head = "HEAD",
 ): Promise<RankInputRow[]> {
   const interpreter =
     Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -118,7 +119,7 @@ async function runDiffRankInput(
     "--mode",
     mode,
     "--head",
-    "HEAD",
+    head,
     "--out",
     output,
   ];
@@ -160,6 +161,39 @@ async function runDiffRankInput(
 }
 
 describe("diff rank input", () => {
+  test("previews immutable head blobs even when another revision is checked out", async () => {
+    const fixture = await createRepository();
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/app.ts",
+      "export const value = 'reviewed-head';\n",
+    );
+    git(fixture.repository, "add", "src/app.ts");
+    git(fixture.repository, "commit", "-qm", "selected review head");
+    const selectedHead = git(fixture.repository, "rev-parse", "HEAD");
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/app.ts",
+      "export const value = 'different-checkout';\n",
+    );
+    git(fixture.repository, "add", "src/app.ts");
+    git(fixture.repository, "commit", "-qm", "different checked out head");
+
+    const rows = await runDiffRankInput(
+      fixture,
+      "revisions",
+      undefined,
+      selectedHead,
+    );
+
+    expect(rows).toContainEqual({
+      path: "src/app.ts",
+      area: "diff",
+      preview: "export const value = 'reviewed-head';",
+    });
+    expect(JSON.stringify(rows)).not.toContain("different-checkout");
+  });
+
   test("inventories committed security-sensitive workflows, containers, and agent instructions", async () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
@@ -439,9 +473,14 @@ describe("diff rank input", () => {
       );
       git(fixture.repository, "add", "src/app.ts");
       git(fixture.repository, "commit", "-qm", "update reviewed source");
+      await writeRepositoryFile(
+        fixture.repository,
+        "src/app.ts",
+        "export const value = 3;\n",
+      );
 
       await expect(
-        runDiffRankInput(fixture, "revisions", {
+        runDiffRankInput(fixture, "local-patch", {
           path: "src/app.ts",
           replacement: externalFile,
         }),
@@ -451,7 +490,7 @@ describe("diff rank input", () => {
   );
 
   test.skipIf(process.platform === "win32")(
-    "inventories a changed FIFO without blocking or reading it",
+    "reviews immutable Git blobs without opening a replacement FIFO",
     async () => {
       const fixture = await createRepository();
       await writeRepositoryFile(
@@ -466,9 +505,11 @@ describe("diff rank input", () => {
       await rm(trackedFile);
       execFileSync("mkfifo", [trackedFile], { stdio: "pipe" });
 
-      await expect(runDiffRankInput(fixture, "revisions")).rejects.toThrow(
-        /unsafe changed repository path/iu,
-      );
+      expect(await runDiffRankInput(fixture, "revisions")).toContainEqual({
+        path: "src/app.ts",
+        area: "diff",
+        preview: "export const value = 2;",
+      });
     },
   );
 
