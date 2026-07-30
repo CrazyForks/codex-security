@@ -431,6 +431,10 @@ describe("multiscan", () => {
       coverage.includePaths = ["another"];
       await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
       await reseal(dirname(scanManifestPath));
+      await writeFile(
+        join(dirname(scanManifestPath), ".multiscan-scope.json"),
+        `${JSON.stringify({ scope: "alias", canonicalScope: "another" })}\n`,
+      );
 
       const resumed = await runMultiscan(options(paths, security));
       expect(resumed.skipped).toBe(0);
