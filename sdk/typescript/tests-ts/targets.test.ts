@@ -406,4 +406,33 @@ describe("scan target normalization", () => {
       canonicalProject,
     ]);
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "prefers USERPROFILE to a conflicting HOME for scan target expansion",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-userprofile-"));
+      temporaryDirectories.push(root);
+      const project = join(root, "project");
+      await mkdir(project);
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          'const { normalizeRepository } = await import(process.argv[1]); console.log(await normalizeRepository("~/project"));',
+          fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: "C:\\missing-posix-home",
+            USERPROFILE: root,
+          },
+        },
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe(await realpath(project));
+    },
+  );
 });

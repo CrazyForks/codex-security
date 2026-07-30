@@ -735,10 +735,11 @@ async function readReceipts(
     if (!initial.corrupted) return receipts;
 
     const replacement = receiptRepairPath(path);
+    const pending = `${replacement}.pending`;
     let repaired: FileHandle | undefined;
     let publishing = false;
     try {
-      repaired = await open(replacement, "wx", 0o600);
+      repaired = await open(pending, "wx", 0o600);
       if (!initial.discardAll) {
         await readReceiptLines(file, signal, async (_receipt, bytes) => {
           await repaired!.write(bytes);
@@ -750,13 +751,17 @@ async function readReceipts(
       await repaired.sync();
       await repaired.close();
       repaired = undefined;
+      await rename(pending, replacement);
       await file.close();
       opened = undefined;
       publishing = true;
       await publishReceiptRepair(path, replacement);
     } catch (error) {
       await repaired?.close();
-      if (!publishing) await rm(replacement, { force: true });
+      if (!publishing) {
+        await rm(pending, { force: true });
+        await rm(replacement, { force: true });
+      }
       throw error;
     }
     return receipts;
@@ -769,7 +774,17 @@ async function recoverInterruptedReceiptRepair(
   path: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const candidates = (await readdir(dirname(path))).filter(
+  const entries = await readdir(dirname(path));
+  await Promise.all(
+    entries
+      .filter(
+        (name) =>
+          name.startsWith(".results.repair-") &&
+          name.endsWith(".jsonl.pending"),
+      )
+      .map((name) => rm(join(dirname(path), name), { force: true })),
+  );
+  const candidates = entries.filter(
     (name) => name.startsWith(".results.repair-") && name.endsWith(".jsonl"),
   );
   if (candidates.length === 0) return;
@@ -974,16 +989,18 @@ async function replaceCorruptReceiptLedger(
   writeReplacement: (file: Awaited<ReturnType<typeof open>>) => Promise<void>,
 ): Promise<void> {
   const replacement = receiptRepairPath(path);
-  const file = await open(replacement, "wx", 0o600);
+  const pending = `${replacement}.pending`;
+  const file = await open(pending, "wx", 0o600);
   try {
     await writeReplacement(file);
     await file.sync();
   } catch (error) {
     await file.close();
-    await rm(replacement, { force: true });
+    await rm(pending, { force: true });
     throw error;
   }
   await file.close();
+  await rename(pending, replacement);
   await publishReceiptRepair(path, replacement);
 }
 
@@ -1045,6 +1062,24 @@ async function hasArtifacts(
       await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
     ) as { version?: unknown };
     if (typeof plugin.version !== "string") return false;
+    let canonicalScope = task.scope;
+    if (canonicalScope !== undefined) {
+      try {
+        const repository = await realpath(task.repository);
+        const selected = await realpath(join(repository, canonicalScope));
+        const relativeScope = relative(repository, selected);
+        if (
+          relativeScope === ".." ||
+          relativeScope.startsWith(`..${sep}`) ||
+          isAbsolute(relativeScope)
+        ) {
+          return false;
+        }
+        canonicalScope = relativeScope.split(sep).join("/");
+      } catch {
+        // Remote repositories cannot be inspected until a checkout exists.
+      }
+    }
     const contract = await loadContract(path, {
       pluginRoot,
       signal,
@@ -1052,9 +1087,9 @@ async function hasArtifacts(
         repository: task.repository,
         repositoryRevision: task.revision,
         target:
-          task.scope === undefined
+          canonicalScope === undefined
             ? { kind: "repository", paths: [] }
-            : { kind: "paths", paths: [task.scope] },
+            : { kind: "paths", paths: [canonicalScope] },
         mode: task.mode,
         pluginVersion: plugin.version,
       },

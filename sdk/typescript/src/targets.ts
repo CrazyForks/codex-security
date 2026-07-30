@@ -439,8 +439,9 @@ function abortReason(signal: AbortSignal): unknown {
 
 function expandHome(value: string): string {
   const home =
-    process.env["HOME"]?.trim() ||
-    process.env["USERPROFILE"]?.trim() ||
+    (process.platform === "win32"
+      ? process.env["USERPROFILE"]?.trim() || process.env["HOME"]?.trim()
+      : process.env["HOME"]?.trim() || process.env["USERPROFILE"]?.trim()) ||
     homedir();
   if (value === "~") {
     return home;

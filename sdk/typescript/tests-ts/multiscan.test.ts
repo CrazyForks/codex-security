@@ -326,6 +326,59 @@ describe("multiscan", () => {
     expect(scans).toBe(1);
   });
 
+  test.skipIf(process.platform === "win32")(
+    "resumes symlinked scopes using their canonical repository paths",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "symlinked-scope");
+      await symlink("src", join(source.path, "alias"));
+      git(source.path, "add", "alias");
+      git(
+        source.path,
+        "-c",
+        "user.name=Multiscan Test",
+        "-c",
+        "user.email=multiscan@example.test",
+        "commit",
+        "-qm",
+        "add scope alias",
+      );
+      const revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nscoped,${source.path},${revision},alias\n`,
+      );
+      let scans = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        scans += 1;
+        const result = await completedScan(scanOptions.outputDir!);
+        for (const artifact of ["scan-manifest.json", "coverage.json"]) {
+          const path = join(scanOptions.outputDir!, artifact);
+          const document = JSON.parse(await readFile(path, "utf8")) as {
+            scan?: { scope: { includePaths: string[] } };
+            includePaths?: string[];
+          };
+          if (document.scan !== undefined) {
+            document.scan.scope.includePaths = ["src"];
+          } else {
+            document.includePaths = ["src"];
+          }
+          await writeFile(path, `${JSON.stringify(document, null, 2)}\n`);
+        }
+        await reseal(scanOptions.outputDir!);
+        return result;
+      });
+
+      await runMultiscan(options(paths, security));
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toBe(1);
+    },
+  );
+
   test("records each completed scan's cost in the resumable ledger", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "priced");
@@ -1338,6 +1391,46 @@ describe("multiscan", () => {
         code: "ENOENT",
       });
     }
+  });
+
+  test("never publishes an unfinished receipt-repair construction file", async () => {
+    const paths = await fixture();
+    const first = await repository(paths.root, "repair-first");
+    const second = await repository(paths.root, "repair-second");
+    await writeFile(
+      paths.input,
+      [
+        "id,repository,revision",
+        `first,${first.path},${first.revision}`,
+        `second,${second.path},${second.revision}`,
+        "",
+      ].join("\n"),
+    );
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const initial = await runMultiscan(options(paths, security));
+    const saved = await readFile(initial.resultsPath, "utf8");
+    const unfinished = join(
+      paths.output,
+      ".results.repair-interrupted.jsonl.pending",
+    );
+    await writeFile(unfinished, `${saved.split("\n")[0]}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await appendFile(initial.resultsPath, '{"id":"interrupted"');
+
+    expect(await runMultiscan(options(paths, security))).toMatchObject({
+      completed: 2,
+      failed: 0,
+      skipped: 2,
+    });
+    expect(scans).toBe(2);
+    expect(await readFile(initial.resultsPath, "utf8")).toBe(saved);
+    await expect(access(unfinished)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("binds resumed scan bundles to their pinned task and plugin version", async () => {
