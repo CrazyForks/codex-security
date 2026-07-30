@@ -412,6 +412,12 @@ GitHub discovery applies the same repository limit and stops before creating an
 inventory if the selected account exceeds it. Split larger campaigns into
 separate repository lists and output directories.
 
+Bulk-scan receipt ledgers are limited to 64 MiB total and 1 MiB per record.
+If a committed record is malformed, the original ledger is retained as
+`results.corrupt-<uuid>.jsonl` and valid records are republished to
+`results.jsonl` before the campaign resumes. An oversized ledger is quarantined
+whole and the campaign safely rescans its repositories.
+
 ### Scan history and reruns
 
 `npx @openai/codex-security scans list` lists scans for the current repository. Pass a
