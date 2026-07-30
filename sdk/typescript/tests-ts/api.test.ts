@@ -3901,12 +3901,11 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     await writeFile(
       fakeCodex,
       `
-import { appendFileSync, writeSync } from "node:fs";
+import { appendFileSync, readFileSync, writeSync } from "node:fs";
 
 const args = process.argv.slice(2).join(" ");
 if (args === "login --with-api-key") {
-  let apiKey = "";
-  for await (const chunk of process.stdin) apiKey += chunk;
+  const apiKey = readFileSync(0, "utf8");
   if (!["secret-key", "ambient-key"].includes(apiKey.trim())) {
     process.exitCode = 3;
   } else {
