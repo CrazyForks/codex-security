@@ -17,9 +17,10 @@ import {
   truncate,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import type { ScanResult } from "../src/result.js";
 import {
@@ -344,6 +345,7 @@ describe("multiscan", () => {
         "add scope alias",
       );
       const revision = git(source.path, "rev-parse", "HEAD");
+      git(source.path, "config", "core.symlinks", "false");
       await writeFile(
         paths.input,
         `id,repository,revision,scope\nscoped,${source.path},${revision},alias\n`,
@@ -446,6 +448,69 @@ describe("multiscan", () => {
         skipped: 0,
       });
       expect(scans).toBe(2);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "resumes scope aliases that resolve to a pinned Git submodule",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "submodule-scope");
+      await mkdir(join(source.path, "vendor", "dependency"), {
+        recursive: true,
+      });
+      git(
+        source.path,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        `160000,${source.revision},vendor/dependency`,
+      );
+      await symlink("vendor/dependency", join(source.path, "alias"));
+      git(source.path, "add", "alias");
+      git(
+        source.path,
+        "-c",
+        "user.name=Multiscan Test",
+        "-c",
+        "user.email=multiscan@example.test",
+        "commit",
+        "-qm",
+        "add submodule scope alias",
+      );
+      const revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nscoped,${source.path},${revision},alias\n`,
+      );
+      let scans = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        scans += 1;
+        const result = await completedScan(scanOptions.outputDir!);
+        for (const artifact of ["scan-manifest.json", "coverage.json"]) {
+          const path = join(scanOptions.outputDir!, artifact);
+          const document = JSON.parse(await readFile(path, "utf8")) as {
+            scan?: { scope: { includePaths: string[] } };
+            includePaths?: string[];
+          };
+          if (document.scan === undefined) {
+            document.includePaths = ["vendor/dependency"];
+          } else {
+            document.scan.scope.includePaths = ["vendor/dependency"];
+          }
+          await writeFile(path, `${JSON.stringify(document, null, 2)}\n`);
+        }
+        await reseal(scanOptions.outputDir!);
+        return result;
+      });
+
+      await runMultiscan(options(paths, security));
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toBe(1);
     },
   );
 
@@ -1747,6 +1812,68 @@ describe("multiscan", () => {
       ).toContain(corruption.trim());
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "quarantines verified ledger bytes when the pathname becomes a symlink",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "ledger-quarantine-race");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrace,${source.path},${source.revision}\n`,
+      );
+      const security = client(async (_repository, scanOptions = {}) =>
+        completedScan(scanOptions.outputDir!),
+      );
+      const initial = await runMultiscan(options(paths, security));
+      await appendFile(initial.resultsPath, '{"malformed":\n');
+      const external = join(paths.root, "private.txt");
+      await writeFile(external, "private data must not enter quarantine\n");
+      const originalOpen = fsPromises.open;
+      let swapped = false;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        open: async (...args: Parameters<typeof originalOpen>) => {
+          if (
+            !swapped &&
+            basename(String(args[0])).startsWith("results.corrupt-")
+          ) {
+            swapped = true;
+            await rm(initial.resultsPath);
+            await symlink(external, initial.resultsPath);
+          }
+          return originalOpen(...args);
+        },
+      }));
+      try {
+        expect(await runMultiscan(options(paths, security))).toMatchObject({
+          completed: 1,
+          failed: 0,
+          skipped: 1,
+        });
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          open: originalOpen,
+        }));
+      }
+
+      expect(swapped).toBe(true);
+      const quarantine = (await readdir(paths.output)).find((entry) =>
+        entry.startsWith("results.corrupt-"),
+      );
+      expect(quarantine).toBeDefined();
+      expect(await readFile(join(paths.output, quarantine!), "utf8")).toContain(
+        '{"malformed":',
+      );
+      expect(
+        await readFile(join(paths.output, quarantine!), "utf8"),
+      ).not.toContain("private data");
+      expect(await readFile(external, "utf8")).toBe(
+        "private data must not enter quarantine\n",
+      );
+    },
+  );
 
   test("quarantines an oversized receipt ledger before rescanning", async () => {
     const paths = await fixture();

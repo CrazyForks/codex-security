@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import {
   type FileHandle,
-  copyFile,
   link,
   lstat,
   mkdir,
@@ -765,10 +764,9 @@ async function readReceipts(
       await repaired.close();
       repaired = undefined;
       await rename(pending, replacement);
-      await file.close();
       opened = undefined;
       publishing = true;
-      await publishReceiptRepair(path, replacement);
+      await publishReceiptRepair(path, replacement, file);
     } catch (error) {
       await repaired?.close();
       if (!publishing) {
@@ -1028,12 +1026,34 @@ async function replaceCorruptReceiptLedger(
 async function publishReceiptRepair(
   path: string,
   replacement: string,
+  verifiedSource?: FileHandle,
 ): Promise<void> {
   const quarantine = join(
     dirname(path),
     `results.corrupt-${randomUUID()}.jsonl`,
   );
-  await copyFile(path, quarantine, constants.COPYFILE_EXCL);
+  const source =
+    verifiedSource ?? (await openReceiptLedger(path, constants.O_RDONLY));
+  let destination: FileHandle | undefined;
+  try {
+    destination = await open(quarantine, "wx", 0o600);
+    for await (const chunk of source.createReadStream({
+      autoClose: false,
+      start: 0,
+      highWaterMark: 64 * 1024,
+    })) {
+      await destination.writeFile(chunk);
+    }
+    await destination.sync();
+  } catch (error) {
+    await destination?.close();
+    destination = undefined;
+    await rm(quarantine, { force: true });
+    throw error;
+  } finally {
+    await destination?.close();
+    await source.close();
+  }
   try {
     await rename(replacement, path);
   } catch (error) {
@@ -1094,6 +1114,24 @@ async function hasArtifacts(
           canonicalScope,
           signal,
         );
+        if (
+          recordedCanonicalScope !== undefined &&
+          canonicalScope !== recordedCanonicalScope
+        ) {
+          for (const followsSymbolicLinks of [true, false]) {
+            const alternateScope = await pinnedMultiscanScope(
+              repository,
+              task.revision,
+              task.scope!,
+              signal,
+              followsSymbolicLinks,
+            );
+            if (alternateScope === recordedCanonicalScope) {
+              canonicalScope = alternateScope;
+              break;
+            }
+          }
+        }
       } catch {
         if (recordedCanonicalScope !== undefined) {
           if (recordedCanonicalScope !== canonicalScope) return false;
@@ -1130,6 +1168,7 @@ async function pinnedMultiscanScope(
   revision: string,
   scope: string,
   signal?: AbortSignal,
+  materializesSymbolicLinks?: boolean,
 ): Promise<string> {
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
@@ -1166,7 +1205,8 @@ async function pinnedMultiscanScope(
     ],
     { env: command.environment, signal, maxBuffer: 64 * 1024 },
   );
-  const followsSymbolicLinks = symlinkConfiguration.stdout.trim() !== "false";
+  const followsSymbolicLinks =
+    materializesSymbolicLinks ?? symlinkConfiguration.stdout.trim() !== "false";
   let selected = posix.normalize(scope);
   for (let followed = 0; followed <= 40; followed += 1) {
     if (selected === ".") return selected;
@@ -1192,7 +1232,7 @@ async function pinnedMultiscanScope(
         { env: command.environment, signal, maxBuffer: 1024 * 1024 },
       );
       const matched =
-        /^(\d{6}) (blob|tree) ([a-f0-9]{40,64})\t([^\0]+)\0$/u.exec(
+        /^(\d{6}) (blob|tree|commit) ([a-f0-9]{40,64})\t([^\0]+)\0$/u.exec(
           listed.stdout,
         );
       let entry =
@@ -1221,7 +1261,7 @@ async function pinnedMultiscanScope(
         );
         const candidates = [
           ...listed.stdout.matchAll(
-            /(\d{6}) (blob|tree) ([a-f0-9]{40,64})\t([^\0]+)\0/gu,
+            /(\d{6}) (blob|tree|commit) ([a-f0-9]{40,64})\t([^\0]+)\0/gu,
           ),
         ].filter(
           (match) =>
