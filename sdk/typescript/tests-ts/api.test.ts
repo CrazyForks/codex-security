@@ -3913,7 +3913,10 @@ if (args === "login --with-api-key") {
     appendFileSync(${JSON.stringify(keyLog)}, apiKey);
   }
 } else if (args === "login") {
-  console.error("Open https://auth.example.test/login");
+  process.stderr.write(
+    "Open https://auth.example.test/login\\n",
+    (error) => process.exit(error ? 1 : 0),
+  );
 } else {
   process.exitCode = 2;
 }
