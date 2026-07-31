@@ -1292,28 +1292,9 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            let optionIndex = 1;
-            while (optionIndex < argv.length) {
-              const argument = argv[optionIndex]!;
-              if (
-                argument === "--model" ||
-                argument === "--effort" ||
-                argument === "--codex"
-              ) {
-                optionIndex += 2;
-              } else if (
-                argument.startsWith("--model=") ||
-                argument.startsWith("--effort=") ||
-                argument.startsWith("--codex=")
-              ) {
-                optionIndex += 1;
-              } else {
-                break;
-              }
-            }
-            if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
+            if (options.outputDir !== undefined) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE]' to discover repositories, or provide a CSV and --output-dir.",
+                "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
               );
             }
             const wizard = await runBulkScanWizard(

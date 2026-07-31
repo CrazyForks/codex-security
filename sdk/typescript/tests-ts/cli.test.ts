@@ -756,6 +756,12 @@ describe("CLI", () => {
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
+      ["bulk-scan", "--workers", "8"],
+      ["bulk-scan", "--workers=8"],
+      ["bulk-scan", "--mode", "deep"],
+      ["bulk-scan", "--max-attempts=3"],
+      ["bulk-scan", "--plugin-path", "./plugin"],
+      ["bulk-scan", "--python=python3"],
     ] as const) {
       const stdout = capture();
       const stderr = capture();
@@ -788,6 +794,24 @@ describe("CLI", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("--output-dir is required");
+    expect(stdout.text()).toBe("");
+  });
+
+  test("lets the discovery wizard choose its output directory", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["bulk-scan", "--output-dir", "results"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--output-dir can only be used with a repository CSV",
+    );
     expect(stdout.text()).toBe("");
   });
 
