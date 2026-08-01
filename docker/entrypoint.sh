@@ -2,11 +2,63 @@
 
 set -eu
 
-if [ "${1:-}" = bulk-scan ]; then
-    case "${2:-}" in
-        --help|-h)
+# Global options may precede the command, and scan options may precede its CSV.
+# Classify positional input without consuming arguments or mistaking option values for a CSV.
+bulk_scan_command=
+bulk_scan_input=
+bulk_scan_metadata=
+expects_option_value=
+
+for argument do
+    if [ "$expects_option_value" = yes ]; then
+        expects_option_value=
+        continue
+    fi
+
+    case "$argument" in
+        --help|-h|--llms|--llms-full|--schema|--version)
+            bulk_scan_metadata=yes
+            continue
             ;;
-        ""|-*)
+    esac
+
+    if [ "$bulk_scan_command" != yes ]; then
+        case "$argument" in
+            bulk-scan)
+                bulk_scan_command=yes
+                ;;
+            --filter-output|--format|--token-limit|--token-offset)
+                expects_option_value=yes
+                ;;
+            --filter-output=*|--format=*|--token-limit=*|--token-offset=*|\
+                --full-output|--json|--token-count|--)
+                ;;
+            *)
+                break
+                ;;
+        esac
+        continue
+    fi
+
+    case "$argument" in
+        --output-dir|--workers|--mode|--model|--effort|--max-attempts|\
+            --plugin-path|--python|--codex|--filter-output|--format|\
+            --token-limit|--token-offset)
+            expects_option_value=yes
+            ;;
+        -*)
+            ;;
+        *)
+            if [ -z "$bulk_scan_input" ]; then
+                bulk_scan_input=$argument
+            fi
+            ;;
+    esac
+done
+
+if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_metadata" != yes ]; then
+    case "$bulk_scan_input" in
+        "")
             printf '%s\n' 'codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.' >&2
             exit 2
             ;;
