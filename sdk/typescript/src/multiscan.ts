@@ -30,6 +30,7 @@ const REQUIRED_ARTIFACTS = [
   "report.md",
 ];
 const MAX_LOCK_OWNER_BYTES = 4 * 1024;
+const MAX_LOCK_OWNER_PID = 2_147_483_647;
 
 interface MultiscanLockOwner {
   pid: number;
@@ -274,21 +275,31 @@ async function appendReceipt(path: string, receipt: string): Promise<void> {
 
 async function acquireLock(output: string): Promise<() => Promise<void>> {
   const path = join(output, ".lock");
+  const recovery = join(output, ".lock.recovery");
   const token = randomUUID();
   const pending = join(output, `.lock.pending-${token}`);
   const owner = `${JSON.stringify({ pid: process.pid, token })}\n`;
   const file = await open(pending, "wx", 0o600);
   try {
-    await file.writeFile(owner, "utf8");
-    await file.sync();
-  } finally {
-    await file.close();
-  }
+    try {
+      await file.writeFile(owner, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
 
-  try {
     for (;;) {
       try {
         await link(pending, path);
+        const recovering = await readLockOwner(recovery);
+        if (
+          recovering !== null &&
+          recovering.token !== token &&
+          processIsRunning(recovering.pid)
+        ) {
+          await releaseLock(path, token);
+          throw new Error("A multiscan supervisor is already running.");
+        }
         return async () => await releaseLock(path, token);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -296,34 +307,49 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
 
       const existing = await readLockOwner(path);
       if (existing !== null && processIsRunning(existing.pid)) {
-        const current = await readLockOwner(path);
-        if (
-          current !== null &&
-          current.pid === existing.pid &&
-          current.token === existing.token
-        ) {
+        throw new Error("A multiscan supervisor is already running.");
+      }
+
+      try {
+        await link(pending, recovery);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const recovering = await readLockOwner(recovery);
+        if (recovering !== null && processIsRunning(recovering.pid)) {
           throw new Error("A multiscan supervisor is already running.");
         }
+        await rm(recovery, { force: true });
         continue;
       }
 
-      const stale = join(output, `.lock.stale-${randomUUID()}`);
       try {
-        await rename(path, stale);
+        const current = await readLockOwner(path);
+        if (current !== null && processIsRunning(current.pid)) {
+          throw new Error("A multiscan supervisor is already running.");
+        }
+        const metadata = await lstat(path).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        });
+        if (metadata === null) continue;
+        if (metadata.isDirectory()) {
+          const stale = join(output, `.lock.stale-${randomUUID()}`);
+          await rename(path, stale);
+          try {
+            await rename(pending, path);
+          } finally {
+            await rm(stale, { recursive: true, force: true });
+          }
+        } else {
+          await rename(pending, path);
+        }
+        return async () => await releaseLock(path, token);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw error;
+      } finally {
+        await releaseLock(recovery, token);
       }
-      const moved = await readLockOwner(stale);
-      if (moved !== null && processIsRunning(moved.pid)) {
-        try {
-          await rename(stale, path);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        }
-        throw new Error("A multiscan supervisor is already running.");
-      }
-      await rm(stale, { recursive: true, force: true });
     }
   } finally {
     await rm(pending, { force: true });
@@ -373,6 +399,7 @@ async function readLockOwner(path: string): Promise<MultiscanLockOwner | null> {
     !("pid" in value) ||
     !Number.isSafeInteger(value.pid) ||
     (value.pid as number) <= 0 ||
+    (value.pid as number) > MAX_LOCK_OWNER_PID ||
     ("token" in value && typeof value.token !== "string")
   ) {
     return null;
@@ -397,8 +424,23 @@ function processIsRunning(pid: number): boolean {
 
 async function releaseLock(path: string, token: string): Promise<void> {
   const owner = await readLockOwner(path);
-  if (owner?.token === token) {
-    await rm(path, { force: true });
+  if (owner?.token !== token) return;
+
+  const released = `${path}.released-${randomUUID()}`;
+  try {
+    await rename(path, released);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+
+  try {
+    const moved = await readLockOwner(released);
+    if (moved?.token !== token) {
+      await link(released, path);
+    }
+  } finally {
+    await rm(released, { force: true });
   }
 }
 

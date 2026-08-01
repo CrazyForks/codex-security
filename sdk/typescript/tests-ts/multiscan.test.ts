@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { renameSync, writeFileSync } from "node:fs";
 import {
   access,
   appendFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -466,7 +468,17 @@ describe("multiscan", () => {
       return await completedScan(scanOptions.outputDir!);
     });
 
-    for (const owner of [undefined, '{"pid":', '{"pid":"invalid"}']) {
+    for (const owner of [
+      undefined,
+      '{"pid":',
+      '{"pid":"invalid"}',
+      '{"pid":0}',
+      '{"pid":-1}',
+      '{"pid":2147483648}',
+      '{"pid":9007199254740991}',
+      '{"pid":1,"token":false}',
+      `{"pid":1,"padding":"${"x".repeat(4096)}"}`,
+    ]) {
       await mkdir(lock);
       if (owner !== undefined) {
         await writeFile(join(lock, "owner.json"), owner);
@@ -482,9 +494,256 @@ describe("multiscan", () => {
     expect(
       (await readdir(paths.output)).some(
         (name) =>
-          name.startsWith(".lock.pending-") || name.startsWith(".lock.stale-"),
+          name.startsWith(".lock.pending-") ||
+          name.startsWith(".lock.stale-") ||
+          name.startsWith(".lock.recovery") ||
+          name.startsWith(".lock.released-"),
       ),
     ).toBe(false);
+  });
+
+  test("serializes supervisors while recovering stale file and legacy locks", async () => {
+    for (const legacy of [false, true]) {
+      const paths = await fixture();
+      const source = await repository(
+        paths.root,
+        legacy ? "legacy-contention" : "file-contention",
+      );
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
+      );
+      await mkdir(paths.output);
+      const lock = join(paths.output, ".lock");
+      const owner = JSON.stringify({
+        pid: 999_999_999,
+        ...(legacy ? {} : { token: "crashed-supervisor" }),
+      });
+      if (legacy) {
+        await mkdir(lock);
+        await writeFile(join(lock, "owner.json"), owner);
+      } else {
+        await writeFile(lock, owner);
+      }
+
+      let active = 0;
+      let maximum = 0;
+      let rejected = 0;
+      let signalStarted!: () => void;
+      let signalBlocked!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        signalStarted = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        signalBlocked = resolve;
+      });
+      const completion = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const security = client(async (_repository, scanOptions = {}) => {
+        await completion;
+        return await completedScan(scanOptions.outputDir!);
+      });
+      const attempts = Array.from({ length: 24 }, () =>
+        runMultiscan(
+          options(paths, security, {
+            createSecurity: () => {
+              active += 1;
+              maximum = Math.max(maximum, active);
+              signalStarted();
+              return client(security.run, async () => {
+                active -= 1;
+              });
+            },
+          }),
+        ).catch((error: unknown) => {
+          rejected += 1;
+          if (rejected === 23) signalBlocked();
+          throw error;
+        }),
+      );
+      const settledAttempts = Promise.allSettled(attempts);
+
+      await started;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          blocked,
+          new Promise<void>((_resolve, reject) => {
+            timeout = setTimeout(() => {
+              reject(new Error("Competing supervisors were not rejected."));
+            }, 10_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+        release();
+      }
+      const settled = await settledAttempts;
+
+      expect(maximum).toBe(1);
+      expect(
+        settled.filter((attempt) => attempt.status === "fulfilled"),
+      ).toHaveLength(1);
+      await expect(access(lock)).rejects.toThrow();
+      expect(
+        (await readdir(paths.output)).some((name) => name.startsWith(".lock")),
+      ).toBe(false);
+    }
+  });
+
+  test("preserves locks published while another supervisor checks recovery", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-replacement");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlock-replacement,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    await writeFile(lock, JSON.stringify({ pid: process.pid, token: "moved" }));
+    const originalKill = process.kill;
+    let checks = 0;
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid !== process.pid) return originalKill.call(process, pid, signal);
+      checks += 1;
+      if (checks === 1) {
+        const error = new Error(
+          "simulated stale owner",
+        ) as NodeJS.ErrnoException;
+        error.code = "ESRCH";
+        throw error;
+      }
+      if (checks === 2) {
+        writeFileSync(lock, JSON.stringify({ pid, token: "replacement" }));
+      }
+      return true;
+    }) as typeof process.kill;
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) =>
+              completedScan(scanOptions.outputDir!),
+            ),
+          ),
+        ),
+      ).rejects.toThrow("A multiscan supervisor is already running.");
+      expect(JSON.parse(await readFile(lock, "utf8"))).toMatchObject({
+        pid: process.pid,
+        token: "replacement",
+      });
+    } finally {
+      process.kill = originalKill;
+    }
+  });
+
+  test("preserves a replacement lock substituted during ownership release", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-release");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlock-release,${source.path},${source.revision}\n`,
+    );
+    let signalStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const completion = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const security = client(async (_repository, scanOptions = {}) => {
+      signalStarted();
+      await completion;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const running = runMultiscan(options(paths, security));
+    await started;
+
+    const lock = join(paths.output, ".lock");
+    const current = JSON.parse(await readFile(lock, "utf8")) as {
+      token: string;
+    };
+    const originalParse = JSON.parse;
+    let replaced = false;
+    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
+      const value = originalParse(...arguments_) as unknown;
+      if (
+        !replaced &&
+        typeof value === "object" &&
+        value !== null &&
+        "token" in value &&
+        value.token === current.token
+      ) {
+        replaced = true;
+        const replacement = join(paths.output, ".lock-replacement");
+        writeFileSync(
+          replacement,
+          JSON.stringify({ pid: process.pid, token: "new-supervisor" }),
+        );
+        renameSync(replacement, lock);
+      }
+      return value;
+    }) as typeof JSON.parse;
+
+    try {
+      release();
+      await expect(running).resolves.toMatchObject({ completed: 1, failed: 0 });
+      expect(replaced).toBe(true);
+      expect(originalParse(await readFile(lock, "utf8"))).toMatchObject({
+        pid: process.pid,
+        token: "new-supervisor",
+      });
+    } finally {
+      JSON.parse = originalParse;
+    }
+  });
+
+  test("cleans pending ownership files when synchronization fails", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-sync-failure");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlock-sync-failure,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const probePath = join(paths.output, ".probe");
+    const probe = await open(probePath, "wx");
+    const prototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>;
+    };
+    await probe.close();
+    await rm(probePath);
+    const originalSync = prototype.sync;
+    prototype.sync = async () => {
+      const error = new Error(
+        "simulated lock sync failure",
+      ) as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    };
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) =>
+              completedScan(scanOptions.outputDir!),
+            ),
+          ),
+        ),
+      ).rejects.toThrow("simulated lock sync failure");
+      expect(
+        (await readdir(paths.output)).some((name) => name.startsWith(".lock")),
+      ).toBe(false);
+    } finally {
+      prototype.sync = originalSync;
+    }
   });
 
   test("retries a failed attempt and records both durable receipts", async () => {
