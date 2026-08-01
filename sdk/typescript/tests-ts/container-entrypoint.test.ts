@@ -255,50 +255,132 @@ describe("customer container entrypoint", () => {
   );
 
   testPosix(
+    "keeps metadata-shaped CSV filenames behind the option terminator",
+    async () => {
+      for (const filename of [
+        "--help",
+        "-h",
+        "--schema",
+        "--llms",
+        "--llms-full",
+        "--version",
+        "--codex=features.use_legacy_landlock=true",
+        "--codex=features.use_legacy_landlock=false",
+      ] as const) {
+        const arguments_ = [
+          "--format",
+          "toon",
+          "bulk-scan",
+          "--output-dir",
+          "/output",
+          "--",
+          filename,
+        ];
+        const result = await runEntrypoint(arguments_);
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout).toBe(
+          [
+            ...arguments_.slice(0, -2),
+            ...(appArmorRestrictsUserNamespaces &&
+            !usesCodexSecurityAppArmorProfile
+              ? ["--codex", "features.use_legacy_landlock=true"]
+              : []),
+            "--",
+            filename,
+            "",
+          ].join("\n"),
+        );
+      }
+    },
+  );
+
+  testPosix(
     "preserves an explicit Landlock override without duplicating it",
     async () => {
-      const arguments_ = [
-        "bulk-scan",
-        "/input/repositories.csv",
-        "--output-dir",
-        "/output",
-        "--codex",
-        "features.use_legacy_landlock=true",
-      ];
-      const result = await runEntrypoint(arguments_);
+      for (const arguments_ of [
+        [
+          "bulk-scan",
+          "/input/repositories.csv",
+          "--output-dir",
+          "/output",
+          "--codex",
+          "features.use_legacy_landlock=true",
+        ],
+        [
+          "bulk-scan",
+          "--output-dir",
+          "/output",
+          "--codex",
+          "features.use_legacy_landlock=true",
+          "--",
+          "--help",
+        ],
+        [
+          "bulk-scan",
+          "--output-dir",
+          "/output",
+          "--codex=features.use_legacy_landlock=true",
+          "--",
+          "--schema",
+        ],
+      ] as const) {
+        const result = await runEntrypoint(arguments_);
 
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
-      expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+      }
     },
   );
 
   testPosix(
     "rejects incompatible Landlock overrides only on restricted hosts",
     async () => {
-      const arguments_ = [
-        "bulk-scan",
-        "/input/repositories.csv",
-        "--output-dir",
-        "/output",
-        "--codex",
-        "features.use_legacy_landlock=false",
-      ];
-      const result = await runEntrypoint(arguments_);
+      for (const arguments_ of [
+        [
+          "bulk-scan",
+          "/input/repositories.csv",
+          "--output-dir",
+          "/output",
+          "--codex",
+          "features.use_legacy_landlock=false",
+        ],
+        [
+          "bulk-scan",
+          "--output-dir",
+          "/output",
+          "--codex",
+          "features.use_legacy_landlock=false",
+          "--",
+          "--help",
+        ],
+        [
+          "bulk-scan",
+          "--output-dir",
+          "/output",
+          "--codex=features.use_legacy_landlock=false",
+          "--",
+          "--schema",
+        ],
+      ] as const) {
+        const result = await runEntrypoint(arguments_);
 
-      if (
-        appArmorRestrictsUserNamespaces &&
-        !usesCodexSecurityAppArmorProfile
-      ) {
-        expect(result.status).toBe(2);
-        expect(result.stdout).toBe("");
-        expect(result.stderr).toBe(
-          "codex-security: restricted Ubuntu hosts require --codex features.use_legacy_landlock=true.\n",
-        );
-      } else {
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+        if (
+          appArmorRestrictsUserNamespaces &&
+          !usesCodexSecurityAppArmorProfile
+        ) {
+          expect(result.status).toBe(2);
+          expect(result.stdout).toBe("");
+          expect(result.stderr).toBe(
+            "codex-security: restricted Ubuntu hosts require --codex features.use_legacy_landlock=true.\n",
+          );
+        } else {
+          expect(result.status).toBe(0);
+          expect(result.stderr).toBe("");
+          expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+        }
       }
     },
   );
@@ -372,6 +454,7 @@ describe("customer container entrypoint", () => {
           "features.goals=true",
         ],
         ["bulk-scan", "--workers=8", "--output-dir=/output"],
+        ["bulk-scan", "--output-dir", "/output", "--"],
         ["--format", "toon", "bulk-scan", "--workers", "8"],
         ["--format=toon", "--token-limit", "5", "bulk-scan", "--mode", "deep"],
         [

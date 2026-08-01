@@ -7,11 +7,19 @@ set -eu
 bulk_scan_command=
 bulk_scan_input=
 bulk_scan_metadata=
+bulk_scan_positional_only=
 expects_option_value=
 
 for argument do
     if [ "$expects_option_value" = yes ]; then
         expects_option_value=
+        continue
+    fi
+
+    if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_positional_only" = yes ]; then
+        if [ -z "$bulk_scan_input" ]; then
+            bulk_scan_input=$argument
+        fi
         continue
     fi
 
@@ -41,6 +49,9 @@ for argument do
     fi
 
     case "$argument" in
+        --)
+            bulk_scan_positional_only=yes
+            ;;
         --output-dir|--workers|--mode|--model|--effort|--max-attempts|\
             --plugin-path|--python|--codex|--filter-output|--format|\
             --token-limit|--token-offset)
@@ -76,7 +87,9 @@ if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_metadata" != yes ]; then
                         landlock_override=
                         expects_codex_override=
                         for argument do
-                            if [ "$expects_codex_override" = yes ]; then
+                            if [ "$argument" = -- ]; then
+                                break
+                            elif [ "$expects_codex_override" = yes ]; then
                                 case "$argument" in
                                     features.use_legacy_landlock=true)
                                         landlock_override=enabled
@@ -103,7 +116,23 @@ if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_metadata" != yes ]; then
                         done
 
                         if [ "$landlock_override" != enabled ]; then
-                            set -- "$@" --codex features.use_legacy_landlock=true
+                            if [ "$bulk_scan_positional_only" = yes ]; then
+                                arguments_remaining=$#
+                                landlock_inserted=
+                                while [ "$arguments_remaining" -gt 0 ]; do
+                                    argument=$1
+                                    shift
+                                    if [ "$argument" = -- ] && [ "$landlock_inserted" != yes ]; then
+                                        set -- "$@" --codex features.use_legacy_landlock=true "$argument"
+                                        landlock_inserted=yes
+                                    else
+                                        set -- "$@" "$argument"
+                                    fi
+                                    arguments_remaining=$((arguments_remaining - 1))
+                                done
+                            else
+                                set -- "$@" --codex features.use_legacy_landlock=true
+                            fi
                         fi
                     fi
                 fi
