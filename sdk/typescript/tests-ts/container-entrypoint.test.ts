@@ -255,6 +255,30 @@ describe("customer container entrypoint", () => {
   );
 
   testPosix(
+    "forwards metadata after options with missing values to the CLI",
+    async () => {
+      for (const arguments_ of [
+        ["bulk-scan", "--workers", "--help"],
+        ["bulk-scan", "--output-dir", "-h"],
+        ["bulk-scan", "--workers", "--schema"],
+        ["bulk-scan", "--codex", "--llms"],
+        ["bulk-scan", "--model", "--llms-full"],
+        ["bulk-scan", "--python", "--version"],
+        ["--format", "--help", "bulk-scan"],
+        ["--filter-output", "-h", "bulk-scan"],
+        ["--token-limit", "--schema", "bulk-scan"],
+        ["--token-offset", "--llms", "bulk-scan"],
+      ] as const) {
+        const result = await runEntrypoint(arguments_);
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+      }
+    },
+  );
+
+  testPosix(
     "keeps metadata-shaped CSV filenames behind the option terminator",
     async () => {
       for (const filename of [

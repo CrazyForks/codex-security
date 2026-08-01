@@ -11,11 +11,6 @@ bulk_scan_positional_only=
 expects_option_value=
 
 for argument do
-    if [ "$expects_option_value" = yes ]; then
-        expects_option_value=
-        continue
-    fi
-
     if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_positional_only" = yes ]; then
         if [ -z "$bulk_scan_input" ]; then
             bulk_scan_input=$argument
@@ -29,6 +24,11 @@ for argument do
             continue
             ;;
     esac
+
+    if [ "$expects_option_value" = yes ]; then
+        expects_option_value=
+        continue
+    fi
 
     if [ "$bulk_scan_command" != yes ]; then
         case "$argument" in
