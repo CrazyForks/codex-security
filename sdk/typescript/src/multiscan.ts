@@ -300,6 +300,9 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
           await releaseLock(path, token);
           throw new Error("A multiscan supervisor is already running.");
         }
+        if ((await readLockOwner(path))?.token !== token) {
+          throw new Error("A multiscan supervisor is already running.");
+        }
         return async () => await releaseLock(path, token);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -318,7 +321,10 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
         if (recovering !== null && processIsRunning(recovering.pid)) {
           throw new Error("A multiscan supervisor is already running.");
         }
-        await rm(recovery, { force: true });
+        if (recovering?.token === undefined) {
+          throw new Error("A multiscan supervisor is already running.");
+        }
+        await releaseLock(recovery, recovering.token);
         continue;
       }
 
@@ -437,7 +443,11 @@ async function releaseLock(path: string, token: string): Promise<void> {
   try {
     const moved = await readLockOwner(released);
     if (moved?.token !== token) {
-      await link(released, path);
+      if ((await lstat(released)).isDirectory()) {
+        await rename(released, path);
+      } else {
+        await link(released, path);
+      }
     }
   } finally {
     await rm(released, { force: true });

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import {
   access,
   appendFile,
@@ -641,6 +641,128 @@ describe("multiscan", () => {
     }
   });
 
+  test("does not delete a replacement recovery marker after observing a stale owner", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "recovery-marker-replacement");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    const recovery = join(paths.output, ".lock.recovery");
+    await writeFile(
+      lock,
+      JSON.stringify({ pid: 999_999_999, token: "stale-lock" }),
+    );
+    await writeFile(
+      recovery,
+      JSON.stringify({ pid: 999_999_999, token: "stale-recovery" }),
+    );
+    const originalParse = JSON.parse;
+    let replaced = false;
+    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
+      const value = originalParse(...arguments_) as unknown;
+      if (
+        !replaced &&
+        typeof value === "object" &&
+        value !== null &&
+        "token" in value &&
+        value.token === "stale-recovery"
+      ) {
+        replaced = true;
+        const successor = join(paths.output, ".recovery-successor");
+        writeFileSync(
+          successor,
+          JSON.stringify({ pid: process.pid, token: "active-recovery" }),
+        );
+        renameSync(successor, recovery);
+      }
+      return value;
+    }) as typeof JSON.parse;
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) =>
+              completedScan(scanOptions.outputDir!),
+            ),
+          ),
+        ),
+      ).rejects.toThrow("A multiscan supervisor is already running.");
+      expect(replaced).toBe(true);
+      expect(originalParse(await readFile(recovery, "utf8"))).toMatchObject({
+        pid: process.pid,
+        token: "active-recovery",
+      });
+    } finally {
+      JSON.parse = originalParse;
+    }
+  });
+
+  test("revalidates newly published ownership after a recovery marker disappears", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "published-lock-replacement");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    const recovery = join(paths.output, ".lock.recovery");
+    await writeFile(
+      recovery,
+      JSON.stringify({ pid: "invalid", marker: "published-lock-race" }),
+    );
+    const originalParse = JSON.parse;
+    let replaced = false;
+    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
+      const value = originalParse(...arguments_) as unknown;
+      if (
+        !replaced &&
+        typeof value === "object" &&
+        value !== null &&
+        "marker" in value &&
+        value.marker === "published-lock-race"
+      ) {
+        replaced = true;
+        const successor = join(paths.output, ".published-successor");
+        writeFileSync(
+          successor,
+          JSON.stringify({ pid: process.pid, token: "active-owner" }),
+        );
+        renameSync(successor, lock);
+        rmSync(recovery);
+      }
+      return value;
+    }) as typeof JSON.parse;
+    let started = false;
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) => {
+              started = true;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+          ),
+        ),
+      ).rejects.toThrow("A multiscan supervisor is already running.");
+      expect(replaced).toBe(true);
+      expect(started).toBe(false);
+      expect(originalParse(await readFile(lock, "utf8"))).toMatchObject({
+        pid: process.pid,
+        token: "active-owner",
+      });
+    } finally {
+      JSON.parse = originalParse;
+    }
+  });
+
   test("preserves a replacement lock substituted during ownership release", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "lock-release");
@@ -698,6 +820,81 @@ describe("multiscan", () => {
         pid: process.pid,
         token: "new-supervisor",
       });
+    } finally {
+      JSON.parse = originalParse;
+    }
+  });
+
+  test("restores a replacement legacy directory substituted during ownership release", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "legacy-lock-release");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
+    );
+    let signalStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const completion = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const running = runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          signalStarted();
+          await completion;
+          return await completedScan(scanOptions.outputDir!);
+        }),
+      ),
+    );
+    await started;
+    const lock = join(paths.output, ".lock");
+    const current = JSON.parse(await readFile(lock, "utf8")) as {
+      token: string;
+    };
+    const originalParse = JSON.parse;
+    let replaced = false;
+    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
+      const value = originalParse(...arguments_) as unknown;
+      if (
+        !replaced &&
+        typeof value === "object" &&
+        value !== null &&
+        "token" in value &&
+        value.token === current.token
+      ) {
+        replaced = true;
+        const previous = join(paths.output, ".previous-lock");
+        renameSync(lock, previous);
+        mkdirSync(lock);
+        writeFileSync(
+          join(lock, "owner.json"),
+          JSON.stringify({ pid: process.pid, token: "legacy-successor" }),
+        );
+        rmSync(previous);
+      }
+      return value;
+    }) as typeof JSON.parse;
+
+    try {
+      release();
+      await expect(running).resolves.toMatchObject({ completed: 1, failed: 0 });
+      expect(replaced).toBe(true);
+      expect((await lstat(lock)).isDirectory()).toBe(true);
+      expect(
+        originalParse(await readFile(join(lock, "owner.json"), "utf8")),
+      ).toMatchObject({
+        pid: process.pid,
+        token: "legacy-successor",
+      });
+      expect(
+        (await readdir(paths.output)).some((name) =>
+          name.startsWith(".lock.released-"),
+        ),
+      ).toBe(false);
     } finally {
       JSON.parse = originalParse;
     }
