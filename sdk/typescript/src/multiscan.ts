@@ -323,37 +323,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
         throw new Error("A multiscan supervisor is already running.");
       }
 
-      try {
-        await link(pending, recovery);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const recovering = await readLockOwner(recovery);
-        if (recovering !== null && processIsRunning(recovering.pid)) {
-          throw new Error("A multiscan supervisor is already running.");
-        }
-        if (recovering?.token === undefined) {
-          throw new Error("A multiscan supervisor is already running.");
-        }
-        const observed = await lstat(recovery);
-        const replacement = `${recovery}.pending-${token}`;
-        try {
-          await link(pending, replacement);
-          const current = await readLockOwner(recovery);
-          const confirmed = await lstat(recovery);
-          if (
-            current?.token !== recovering.token ||
-            current.pid !== recovering.pid ||
-            observed.dev !== confirmed.dev ||
-            observed.ino !== confirmed.ino ||
-            processIsRunning(current.pid)
-          ) {
-            throw new Error("A multiscan supervisor is already running.");
-          }
-          await rename(replacement, recovery);
-        } finally {
-          await rm(replacement, { force: true });
-        }
-      }
+      await acquireRecoveryMarker(recovery, pending, token);
 
       try {
         if ((await readLockOwner(recovery))?.token !== token) {
@@ -368,6 +338,9 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
           throw error;
         });
         if (metadata === null) continue;
+        if ((await readLockOwner(recovery))?.token !== token) {
+          throw new Error("A multiscan supervisor is already running.");
+        }
         if (metadata.isDirectory()) {
           const stale = join(output, `.lock.stale-${randomUUID()}`);
           await rename(path, stale);
@@ -379,7 +352,40 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
               moved?.token !== current?.token ||
               (moved !== null && processIsRunning(moved.pid))
             ) {
-              await rename(stale, path);
+              for (;;) {
+                try {
+                  await rename(stale, path);
+                  break;
+                } catch (error) {
+                  const code = (error as NodeJS.ErrnoException).code;
+                  if (
+                    code !== "EEXIST" &&
+                    code !== "ENOTEMPTY" &&
+                    code !== "ENOTDIR" &&
+                    code !== "EISDIR" &&
+                    code !== "EPERM"
+                  ) {
+                    throw error;
+                  }
+                  const occupied = await lstat(path).catch(
+                    (failure: NodeJS.ErrnoException) => {
+                      if (failure.code === "ENOENT") return null;
+                      throw failure;
+                    },
+                  );
+                  if (occupied === null) continue;
+                  const contender = await readLockOwner(path);
+                  if (contender === null) continue;
+                  if (
+                    contender.token === undefined ||
+                    !occupied.isFile() ||
+                    (await readLockOwner(recovery))?.token !== token
+                  ) {
+                    throw error;
+                  }
+                  await releaseLock(path, contender.token);
+                }
+              }
               throw new Error("A multiscan supervisor is already running.");
             }
             await rename(pending, path);
@@ -414,6 +420,44 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     } finally {
       await rm(pending, { force: true });
     }
+  }
+}
+
+async function acquireRecoveryMarker(
+  path: string,
+  pending: string,
+  token: string,
+): Promise<void> {
+  try {
+    await link(pending, path);
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+
+  const owner = await readLockOwner(path);
+  if (owner?.token === undefined || processIsRunning(owner.pid)) {
+    throw new Error("A multiscan supervisor is already running.");
+  }
+  const observed = await lstat(path);
+  const replacement = `${path}.pending-${owner.pid}`;
+  await acquireRecoveryMarker(replacement, pending, token);
+  try {
+    const current = await readLockOwner(path);
+    const confirmed = await lstat(path);
+    if (
+      current?.token !== owner.token ||
+      current.pid !== owner.pid ||
+      observed.dev !== confirmed.dev ||
+      observed.ino !== confirmed.ino ||
+      processIsRunning(current.pid) ||
+      (await readLockOwner(replacement))?.token !== token
+    ) {
+      throw new Error("A multiscan supervisor is already running.");
+    }
+    await rename(replacement, path);
+  } finally {
+    await releaseLock(replacement, token);
   }
 }
 
