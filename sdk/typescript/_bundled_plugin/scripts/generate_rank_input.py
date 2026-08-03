@@ -360,6 +360,8 @@ def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
+    if scope_path.is_symlink():
+        raise SystemExit(f"Scope must not be a symbolic link: {scope_path}")
     scope_path = scope_path.resolve()
     repo_resolved = repo.resolve()
     try:
@@ -394,20 +396,23 @@ def record_scope_symlink_exclusions(
 ) -> None:
     """Declare symlinks skipped by the authoritative scope inventory."""
 
-    pending = [scope]
+    pending: list[tuple[Path, Iterator[Path]]] = [(scope, scope.iterdir())]
     while pending:
-        directory = pending.pop()
+        directory, children = pending[-1]
         try:
-            for child in directory.iterdir():
-                if child.is_symlink():
-                    record_scope_symlink_exclusion(repository, child, exclusions)
-                elif (
-                    child.name not in STANDARD_SCOPE_EXCLUDED_DIRS
-                    and child.is_dir()
-                ):
-                    pending.append(child)
+            child = next(children)
+        except StopIteration:
+            pending.pop()
+            continue
         except OSError as exc:
             raise SystemExit(f"Unable to safely inventory scope path: {directory}") from exc
+        try:
+            if child.is_symlink():
+                record_scope_symlink_exclusion(repository, child, exclusions)
+            elif child.name not in STANDARD_SCOPE_EXCLUDED_DIRS and child.is_dir():
+                pending.append((child, child.iterdir()))
+        except OSError as exc:
+            raise SystemExit(f"Unable to safely inventory scope path: {child}") from exc
 
 
 def record_overlapping_scope_exclusions(

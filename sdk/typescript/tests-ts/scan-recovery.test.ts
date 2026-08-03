@@ -31,6 +31,8 @@ type Finding = Record<string, unknown> & {
     explanation: string;
   }>;
   writeup?: unknown;
+  remediationTests?: unknown;
+  preventiveControls?: unknown;
 };
 
 type FindingsDocument = {
@@ -683,7 +685,7 @@ describe("malformed scan artifact recovery", () => {
           "import sqlite3, sys",
           "with sqlite3.connect(sys.argv[1]) as connection:",
           "    connection.execute('ALTER TABLE scans DROP COLUMN scope_exclusions_json')",
-          "    connection.execute('DELETE FROM schema_migrations WHERE version = 26')",
+          "    connection.execute('DELETE FROM schema_migrations WHERE version = 27')",
         ].join("\n"),
         database,
       ],
@@ -702,7 +704,7 @@ describe("malformed scan artifact recovery", () => {
         [
           "import json, sqlite3, sys",
           "with sqlite3.connect(sys.argv[1]) as connection:",
-          "    version = connection.execute('SELECT version FROM schema_migrations WHERE version = 26').fetchone()",
+          "    version = connection.execute('SELECT version FROM schema_migrations WHERE version = 27').fetchone()",
           "    exclusions = connection.execute('SELECT scope_exclusions_json FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
           "    print(json.dumps({'version': None if version is None else version[0], 'exclusions': None if exclusions is None else exclusions[0]}))",
         ].join("\n"),
@@ -713,7 +715,7 @@ describe("malformed scan artifact recovery", () => {
     );
     expect(migration.status, migration.stderr).toBe(0);
     expect(JSON.parse(migration.stdout)).toEqual({
-      version: 26,
+      version: 27,
       exclusions: null,
     });
     expect((await completeScan(fixture)).progress.status).toBe("complete");
@@ -1198,6 +1200,74 @@ describe("malformed scan artifact recovery", () => {
       expect(
         recovered.find((finding) => finding?.identity.anchor === anchor),
       ).not.toHaveProperty("writeup");
+    }
+  });
+
+  test("keeps findings while removing malformed remediation guidance", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+    const valid = document.findings[0]!;
+
+    const cases: Array<
+      [string, "remediationTests" | "preventiveControls", unknown]
+    > = [
+      [
+        "valid-remediation-tests",
+        "remediationTests",
+        ["Add a regression test."],
+      ],
+      ["prose-remediation-tests", "remediationTests", "Add a regression test."],
+      [
+        "object-remediation-tests",
+        "remediationTests",
+        [{ description: "Add a regression test." }],
+      ],
+      [
+        "prose-preventive-controls",
+        "preventiveControls",
+        "Centralize validation.",
+      ],
+    ];
+    for (const [anchor, field, value] of cases) {
+      const finding = structuredClone(valid);
+      finding.identity.anchor = anchor;
+      finding[field] = value;
+      document.findings.push(finding);
+    }
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(5);
+    expect(completed.warnings).toHaveLength(3);
+    expect(
+      completed.warnings.filter((warning) =>
+        warning.startsWith("Skipped malformed remediationTests for finding"),
+      ),
+    ).toHaveLength(2);
+    expect(
+      completed.warnings.filter((warning) =>
+        warning.startsWith("Skipped malformed preventiveControls for finding"),
+      ),
+    ).toHaveLength(1);
+    const recovered = (await readJson<FindingsDocument>(path)).findings;
+    expect(
+      recovered.find(
+        (finding) => finding?.identity.anchor === "valid-remediation-tests",
+      )?.remediationTests,
+    ).toEqual(["Add a regression test."]);
+    for (const [anchor, field] of [
+      ["prose-remediation-tests", "remediationTests"],
+      ["object-remediation-tests", "remediationTests"],
+      ["prose-preventive-controls", "preventiveControls"],
+    ] as const) {
+      const finding = recovered.find(
+        (candidate) => candidate?.identity.anchor === anchor,
+      );
+      expect(finding).toBeDefined();
+      expect(finding).not.toHaveProperty(field);
     }
   });
 
