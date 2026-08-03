@@ -507,10 +507,12 @@ describe("diff rank input", () => {
       CODEOWNERS: "* @repository-owners\n",
       Containerfile: "FROM scratch\n",
       Dockerfile: "FROM node:24-alpine\n",
+      Jenkinsfile: "pipeline { agent any }\n",
       "build/Dockerfile": "FROM node:24-alpine\n",
       "compose.yaml": "services:\n  app:\n    image: app\n",
       "config/nginx.conf": "server { listen 443 ssl; }\n",
       "docker-compose.yml": "services:\n  app:\n    image: app\n",
+      "docs/CODEOWNERS": "* @documentation-owners\n",
       "docs/example.py": "print('documentation example')\n",
       "docs/AGENTS.md":
         "Example instructions, not executable repository scope.\n",
@@ -573,10 +575,12 @@ describe("diff rank input", () => {
         "CODEOWNERS",
         "Containerfile",
         "Dockerfile",
+        "Jenkinsfile",
         "build/Dockerfile",
         "compose.yaml",
         "config/nginx.conf",
         "docker-compose.yml",
+        "docs/CODEOWNERS",
         "infra/main.tf",
         "infra/variables.hcl",
         "policy/security.rego",
@@ -1178,6 +1182,28 @@ describe("diff rank input", () => {
         path: "src/renamed.py",
         area: "diff",
         preview: "print('rename')",
+      },
+    ]);
+  });
+
+  test("previews the base contents of staged security-sensitive deletions", async () => {
+    const fixture = await createRepository();
+    const path = ".github/workflows/deploy.yml";
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "name: Protected deployment\non: push\n",
+    );
+    git(fixture.repository, "add", path);
+    git(fixture.repository, "commit", "-qm", "add deployment workflow");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "rm", "--quiet", path);
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([
+      {
+        path,
+        area: "diff",
+        preview: "key name\nkey on",
       },
     ]);
   });

@@ -133,6 +133,7 @@ SECURITY_RELEVANT_DIFF_FILENAMES = {
     "CODEOWNERS",
     "Containerfile",
     "Dockerfile",
+    "Jenkinsfile",
     "compose.yaml",
     "compose.yml",
     "docker-compose.yaml",
@@ -344,8 +345,6 @@ def path_is_excluded(path: Path) -> bool:
 
 
 def diff_path_is_security_relevant(path: Path) -> bool:
-    if path.parts == (".circleci", "config.yml"):
-        return True
     if path.name in SECURITY_RELEVANT_DIFF_FILENAMES:
         return True
     if path.name.startswith(("Dockerfile.", "Containerfile.")):
@@ -366,6 +365,8 @@ def diff_path_is_security_relevant(path: Path) -> bool:
 
 
 def diff_path_is_included(path: Path) -> bool:
+    if path.parts in {(".circleci", "config.yml"), ("docs", "CODEOWNERS")}:
+        return True
     if diff_path_is_security_relevant(path):
         if len(path.parts) >= 2 and path.parts[0] == ".github" and path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES:
             return ".git" not in path.parts
@@ -965,7 +966,14 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             continue
 
         if status == "D":
-            preview = ""
+            if args.mode == "local-patch" and gitlink_revision is None:
+                preview, is_binary = immutable_diff_preview(
+                    repo, path, args.base, args.preview_bytes
+                )
+                if is_binary:
+                    continue
+            else:
+                preview = ""
         else:
             if args.mode == "revisions":
                 preview, is_binary = immutable_diff_preview(
