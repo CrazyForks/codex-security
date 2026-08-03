@@ -481,6 +481,7 @@ describe("diff rank input", () => {
   test("inventories committed security-sensitive workflows, containers, and agent instructions", async () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
+      ".circleci/config.yml": "version: 2.1\njobs: {}\n",
       ".dockerignore": "node_modules\nvendor\n",
       ".github/actions/build/action.yml": "runs:\n  using: composite\n",
       ".github/actions/vendor/checkout/action.yml":
@@ -550,6 +551,7 @@ describe("diff rank input", () => {
 
     expect(rows.map((row) => row.path)).toEqual(
       [
+        ".circleci/config.yml",
         ".dockerignore",
         ".github/actions/build/action.yml",
         ".github/actions/security/action.yml",
@@ -1250,6 +1252,43 @@ describe("diff rank input", () => {
     expect(digest()).not.toBe(previous);
   });
 
+  test("reports staged changes hidden by a matching legacy snapshot", async () => {
+    const fixture = await createRepository();
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const warning = execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sqlite3, subprocess, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from filesystem_identity import serialize_filesystem_identity",
+          "from workbench_target import scan_target_warning, worktree_content_digest",
+          "target = Path(sys.argv[2])",
+          "revision = sys.argv[3]",
+          "expected = worktree_content_digest(target)",
+          "blob = subprocess.check_output(['git', '-C', str(target), 'hash-object', '-w', '--stdin'], input=b'export const value = 2;\\n', text=False).decode().strip()",
+          "subprocess.run(['git', '-C', str(target), 'update-index', '--cacheinfo', f'100644,{blob},src/app.ts'], check=True)",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "metadata = target.stat()",
+          "scan = connection.execute('SELECT ? AS diff_target_kind, ? AS target_snapshot_digest, ? AS target_path, ? AS target_device, ? AS target_inode, ? AS target_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS scan_dir', ('working_tree', None, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), revision, revision, expected, str(target.parent / 'scan'))).fetchone()",
+          "print(scan_target_warning(scan))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        fixture.base,
+      ],
+      { encoding: "utf8" },
+    ).trim();
+
+    expect(warning).toContain("Working-tree contents changed");
+  });
+
   test("binds every unresolved Git merge stage into local-patch snapshot digests", async () => {
     const fixture = await createRepository();
     const path = "src/app.ts";
@@ -1398,7 +1437,7 @@ describe("diff rank input", () => {
           "connection = sqlite3.connect(':memory:')",
           "connection.row_factory = sqlite3.Row",
           "metadata = target.stat()",
-          "scan = connection.execute('SELECT ? AS diff_target_kind, ? AS target_snapshot_digest, ? AS target_path, ? AS target_device, ? AS target_inode, ? AS target_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS scan_dir', ('working_tree', legacy, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), revision, revision, legacy, str(target.parent / 'scan'))).fetchone()",
+          "scan = connection.execute('SELECT ? AS diff_target_kind, ? AS target_snapshot_digest, ? AS target_path, ? AS target_device, ? AS target_inode, ? AS target_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS scan_dir', ('working_tree', None, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), revision, revision, selected['contentDigest'], str(target.parent / 'scan'))).fetchone()",
           "print(json.dumps({'modern': modern, 'legacy': legacy, 'selected': selected['contentDigest'], 'warning': scan_target_warning(scan)}))",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),

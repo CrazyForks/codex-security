@@ -344,6 +344,8 @@ def path_is_excluded(path: Path) -> bool:
 
 
 def diff_path_is_security_relevant(path: Path) -> bool:
+    if path.parts == (".circleci", "config.yml"):
+        return True
     if path.name in SECURITY_RELEVANT_DIFF_FILENAMES:
         return True
     if path.name.startswith(("Dockerfile.", "Containerfile.")):

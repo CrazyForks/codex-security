@@ -662,10 +662,7 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
         expected_digest = (
             scan["diff_content_digest"] if working_tree else scan["target_snapshot_digest"]
         )
-        if (
-            worktree_content_digest(target) != expected_digest
-            and worktree_content_digest(target, legacy=True) != expected_digest
-        ):
+        if worktree_content_digest(target) != expected_digest:
             return (
                 "Working-tree contents changed while the scan was running; "
                 "results were saved for the original snapshot."
