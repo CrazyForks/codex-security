@@ -340,6 +340,10 @@ describe("multiscan", () => {
 
   test("limits simultaneous checkouts to the requested worker count", async () => {
     const paths = await fixture();
+    const knowledgeBasePaths = [
+      join(paths.root, "architecture.md"),
+      "shared/threat-model.md",
+    ];
     const sources = await Promise.all(
       ["one", "two", "three"].map((name) => repository(paths.root, name)),
     );
@@ -361,6 +365,7 @@ describe("multiscan", () => {
       release = resolve;
     });
     const security = client(async (_repository, scanOptions = {}) => {
+      expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
       active += 1;
       maximum = Math.max(maximum, active);
       if (active === 2) release();
@@ -371,6 +376,7 @@ describe("multiscan", () => {
     const summary = await runMultiscan(
       options(paths, security, {
         workers: 2,
+        knowledgeBasePaths,
         createSecurity: () => {
           created += 1;
           let running = false;
@@ -1248,6 +1254,7 @@ describe("multiscan", () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
     const secret = "sk-proj-SYNTHETIC_MULTISCAN_SECRET_123";
+    const knowledgeBasePaths = ["architecture.md"];
     const proxyUrl =
       "https://SYNTHETIC_USER:SYNTHETIC_MULTISCAN_PASSWORD@proxy.test/v1/responses";
     const queryUrl =
@@ -1274,6 +1281,7 @@ describe("multiscan", () => {
       options(
         paths,
         client(async (_repository, scanOptions = {}) => {
+          expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
           attempts += 1;
           if (attempts === 1) {
             throw new Error(
@@ -1282,6 +1290,7 @@ describe("multiscan", () => {
           }
           return await completedScan(scanOptions.outputDir!);
         }),
+        { knowledgeBasePaths },
       ),
     );
 
