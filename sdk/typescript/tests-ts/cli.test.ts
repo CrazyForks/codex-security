@@ -172,8 +172,12 @@ describe("CLI", () => {
     expect(manifest.text()).toContain(
       "codex-security findings false-positive <occurrenceId>",
     );
+    expect(manifest.text()).toContain("codex-security findings list");
+    expect(manifest.text()).toContain(
+      "codex-security findings show <occurrenceId>",
+    );
     expect(manifest.text()).toContain("codex-security scans list [repository]");
-    expect(manifest.text()).toContain("codex-security scans show <scanId>");
+    expect(manifest.text()).toContain("codex-security scans show [scanId]");
     expect(manifest.text()).toContain("codex-security scans rerun <scanId>");
     expect(manifest.text()).toContain(
       "codex-security scans match [beforeId] [afterId]",
@@ -211,6 +215,8 @@ describe("CLI", () => {
       ["scans", "rerun"],
       ["scans", "match"],
       ["scans", "compare"],
+      ["findings", "list"],
+      ["findings", "show"],
       ["findings", "false-positive"],
     ] as const;
 

@@ -3613,6 +3613,9 @@ def main() -> None:
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "get-finding":
+            occurrence = require_occurrence(connection, args.occurrence_id)
+            result = scan_context(connection, occurrence["scan_id"], occurrence["id"])
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":

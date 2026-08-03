@@ -190,6 +190,147 @@ describe("scan history renderer", () => {
     }
   });
 
+  test("makes finding identifiers, history, and pagination actionable", () => {
+    const page = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding_25",
+              severity: { level: "high" },
+              title: "Historic login injection",
+              locations: [{ path: "routes/login.ts", startLine: 34 }],
+              triage: { status: "open" },
+            },
+          ],
+          offset: 20,
+          limit: 1,
+          nextOffset: 21,
+          total: 25,
+        },
+        "findings",
+      ),
+    );
+    for (const expected of [
+      "SAVED FINDINGS",
+      "scan 31107fbe",
+      "21-21 of 25",
+      "routes/login.ts:34",
+      "ID occ_saved_finding_25",
+      "OPEN",
+      "NEXT PAGE  rerun with --offset 21",
+      "codex-security findings show OCCURRENCE_ID",
+    ]) {
+      expect(page).toContain(expected);
+    }
+
+    const detail = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          occurrenceId: "occ_saved_finding_25",
+          severity: { level: "high" },
+          title: "Historic login injection",
+          locations: [{ path: "routes/login.ts", startLine: 34 }],
+          summary: "User input reaches a SQL query.",
+          remediation: "Use a parameterized query.",
+          knownSince: "2026-06-15T12:00:00Z",
+          knownScanIds: ["87654321-abcd-4567-abcd-1234567890ab"],
+          matches: [
+            {
+              scanId: "87654321-abcd-4567-abcd-1234567890ab",
+              title: "Previous login injection",
+              reason: "The same unsafe query interpolates user input.",
+            },
+          ],
+        },
+        "finding",
+      ),
+    );
+    for (const expected of [
+      "FINDING DETAILS",
+      "juice-shop",
+      "ID occ_saved_finding_25",
+      "Known since Jun 15, 2026",
+      "LINKED FINDINGS",
+      "Previous login injection",
+      "User input reaches a SQL query.",
+      "Use a parameterized query.",
+      "findings false-positive occ_saved_finding_25 --reason TEXT",
+    ]) {
+      expect(detail).toContain(expected);
+    }
+  });
+
+  test("connects scan history with the next useful commands", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 18,
+              startedAt: "2026-08-03T12:00:00Z",
+            },
+            {
+              scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 25,
+              startedAt: "2026-07-31T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        { repository: "/demo/juice-shop" },
+      ),
+    );
+
+    expect(output).toContain("VIEW LATEST  codex-security scans show");
+    expect(output).toContain("FINDINGS     codex-security findings list");
+    expect(output).toContain(
+      "COMPARE      codex-security scans compare 31107fbe 5b8e555e",
+    );
+  });
+
+  test("does not suggest comparing scans from different repositories", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              scanId: "aaaaaaaa-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 8,
+              startedAt: "2026-08-03T12:00:00Z",
+            },
+            {
+              scanId: "bbbbbbbb-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/payment-service",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 2,
+              startedAt: "2026-08-02T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        { scanRoot: "/demo/results" },
+      ),
+    );
+
+    expect(output).toContain("scans show aaaaaaaa");
+    expect(output).not.toContain("scans compare");
+  });
+
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
@@ -223,6 +364,7 @@ describe("scan history renderer", () => {
       "9 files",
       "ARTIFACTS",
       "/demo/results/report.md",
+      "findings list --scan 12345678 --offset 20",
     ]) {
       expect(output).toContain(expected);
     }
@@ -239,6 +381,32 @@ describe("scan history renderer", () => {
       ),
     );
     expect(failed).toContain("ERROR  Repository checkout became unavailable.");
+  });
+
+  test("explains when requested cross-scan links have not been generated", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "routes/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        { showLinkedFindings: true },
+      ),
+    );
+
+    expect(output).toContain("No saved links");
+    expect(output).toContain("scans match --all (uses Codex)");
   });
 
   test("shows saved completion warnings without marking a scan failed", () => {

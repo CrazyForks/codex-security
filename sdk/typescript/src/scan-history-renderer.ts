@@ -1,7 +1,13 @@
 import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
-export type HistoryCommand = "list" | "show" | "compare" | "match-all";
+export type HistoryCommand =
+  | "list"
+  | "show"
+  | "compare"
+  | "match-all"
+  | "findings"
+  | "finding";
 type RendererOptions = {
   columns?: number;
   color?: boolean;
@@ -67,6 +73,8 @@ export function renderScanHistory(
     show: "SCAN DETAILS",
     compare: "SCAN COMPARISON",
     "match-all": "MATCH RESULTS",
+    findings: "SAVED FINDINGS",
+    finding: "FINDING DETAILS",
   };
   const lines = [
     "",
@@ -109,15 +117,41 @@ export function renderScanHistory(
       ? ` in ${clean(knownScanIds[0]).slice(0, 8)}${knownScanIds.length > 1 ? ` … ${clean(knownScanIds[knownScanIds.length - 1]).slice(0, 8)}` : ""}`
       : "";
     const knownSince =
-      command === "show" && matches?.length && entry["knownSince"]
+      (command === "show" || command === "finding") &&
+      matches?.length &&
+      entry["knownSince"]
         ? `  ${accent("·")}  ${strong(`Known since ${KNOWN_SINCE_DATE.format(new Date(clean(entry["knownSince"])))}`)}${knownScans}`
         : "";
     const location = (entry["locations"] as JsonObject[] | undefined)?.[0];
     const path =
       entry["path"] ??
+      entry["locationPath"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
     lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
-    const showLinkedFindings = command !== "show" || options.showLinkedFindings;
+    if (command === "findings" || command === "finding") {
+      const occurrenceId = entry["occurrenceId"];
+      const triage = entry["triage"] as JsonObject | undefined;
+      const status = entry["status"] ?? triage?.["status"];
+      const scanId = entry["scanId"];
+      const occurrenceCount = entry["occurrenceCount"];
+      const details = [
+        ...(occurrenceId ? [`${strong("ID")} ${clean(occurrenceId)}`] : []),
+        ...(status ? [strong(clean(status).toUpperCase())] : []),
+        ...(command === "findings" && scanId
+          ? [`${strong("SCAN")} ${clean(scanId).slice(0, 8)}`]
+          : []),
+        ...(typeof occurrenceCount === "number" && occurrenceCount > 1
+          ? [`${clean(occurrenceCount)} scans`]
+          : []),
+      ];
+      if (details.length > 0) {
+        lines.push(`              ${details.join(`  ${accent("·")}  `)}`);
+      }
+    }
+    const showLinkedFindings =
+      command === "compare" ||
+      command === "finding" ||
+      (command === "show" && options.showLinkedFindings);
     if (matches?.length && showLinkedFindings) {
       lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
       for (const match of matches) {
@@ -145,7 +179,69 @@ export function renderScanHistory(
     }
   };
 
-  if (command === "list") {
+  if (command === "findings") {
+    const findings = result["findings"] as JsonObject[];
+    const scanId = result["scanId"];
+    const repository = options.repository ?? result["repository"];
+    const scope =
+      typeof scanId === "string"
+        ? `scan ${clean(scanId).slice(0, 8)}`
+        : typeof repository === "string"
+          ? clean(basename(repository))
+          : "all repositories";
+    const offset = Number(result["offset"] ?? 0);
+    const total = result["total"];
+    const range =
+      typeof total === "number"
+        ? findings.length > 0
+          ? `${offset + 1}-${offset + findings.length} of ${total}`
+          : `0 of ${total}`
+        : `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+    lines.push(`  ${strong(scope)}  ${accent("·")}  ${range}`);
+    if (findings.length === 0) {
+      lines.push("", "  No saved findings match these filters.");
+    }
+    for (const entry of findings) {
+      lines.push("");
+      finding(entry, false);
+    }
+    if (typeof result["nextOffset"] === "number") {
+      lines.push(
+        "",
+        `  ${strong("NEXT PAGE")}  rerun with --offset ${clean(result["nextOffset"])}`,
+      );
+    }
+    if (findings.length > 0) {
+      lines.push(
+        "",
+        `  ${strong("DETAILS")}  codex-security findings show OCCURRENCE_ID`,
+      );
+    }
+  } else if (command === "finding") {
+    const repository = result["targetPath"];
+    const scanId = result["scanId"];
+    if (typeof repository === "string") {
+      lines.push(
+        `  ${strong(clean(basename(repository)))}${scanId ? `  ${accent("·")}  ${clean(scanId).slice(0, 8)}` : ""}`,
+      );
+    }
+    lines.push("");
+    finding(result);
+    if (typeof result["summary"] === "string" && result["summary"]) {
+      lines.push("", `  ${strong("SUMMARY")}`);
+      wrap(result["summary"], 4);
+    }
+    if (typeof result["remediation"] === "string" && result["remediation"]) {
+      lines.push("", `  ${strong("REMEDIATION")}`);
+      wrap(result["remediation"], 4);
+    }
+    if (typeof result["occurrenceId"] === "string") {
+      lines.push(
+        "",
+        `  ${strong("TRIAGE")}  codex-security findings false-positive ${clean(result["occurrenceId"])} --reason TEXT`,
+      );
+    }
+  } else if (command === "list") {
     const scans = (result["scans"] as JsonObject[]).filter((scan) => {
       if ((scan["progress"] as JsonObject)["status"] !== "running") {
         return true;
@@ -199,6 +295,30 @@ export function renderScanHistory(
         lines.push(
           `  ${clean(scan["scanId"])}`,
           `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
+        );
+      }
+    }
+    const completed = scans.filter(
+      (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
+    );
+    if (completed.length > 0) {
+      const latest = completed[0]!;
+      lines.push(
+        "",
+        `  ${strong("VIEW LATEST")}  codex-security scans show ${clean(latest["scanId"]).slice(0, 8)}`,
+        `  ${strong("FINDINGS")}     codex-security findings list`,
+      );
+      const previous = completed
+        .slice(1)
+        .find(
+          (scan) =>
+            scan["targetPath"] === latest["targetPath"] ||
+            (typeof scan["targetId"] === "string" &&
+              scan["targetId"] === latest["targetId"]),
+        );
+      if (previous !== undefined) {
+        lines.push(
+          `  ${strong("COMPARE")}      codex-security scans compare ${clean(previous["scanId"]).slice(0, 8)} ${clean(latest["scanId"]).slice(0, 8)}`,
         );
       }
     }
@@ -310,6 +430,26 @@ export function renderScanHistory(
       for (const entry of findings) {
         lines.push("");
         finding(entry);
+      }
+      if (result["findingsTruncated"] || count > findings.length) {
+        lines.push(
+          "",
+          `  ${strong("MORE FINDINGS")}  codex-security findings list --scan ${clean(result["scanId"]).slice(0, 8)} --offset ${findings.length}`,
+        );
+      }
+      const linked = findings.some(
+        (entry) => (entry["matches"] as JsonObject[] | undefined)?.length,
+      );
+      if (linked && !options.showLinkedFindings) {
+        lines.push(
+          "",
+          `  ${strong("FINDING HISTORY")}  codex-security scans show ${clean(result["scanId"]).slice(0, 8)} --show-linked-findings`,
+        );
+      } else if (!linked && options.showLinkedFindings) {
+        lines.push(
+          "",
+          `  ${strong("FINDING HISTORY")}  No saved links; run codex-security scans match --all (uses Codex).`,
+        );
       }
     }
   } else if (command === "compare") {

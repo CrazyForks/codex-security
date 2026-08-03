@@ -26,7 +26,7 @@ def list_global_findings(
     query = args.query.strip().casefold() if args.query else ""
     findings = (
         row
-        for row in _active_findings(connection, read_coverage)
+        for row in _active_findings(connection, read_coverage, target_id=args.target_id)
         if (args.target_id is None or row["target_id"] == args.target_id)
         and (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
@@ -75,21 +75,30 @@ def list_global_findings(
 def _active_findings(
     connection: sqlite3.Connection,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    *,
+    target_id: str | None = None,
 ) -> Iterator[sqlite3.Row]:
+    target_filter = "AND targets.id = ?" if target_id is not None else ""
+    target_values = (target_id,) if target_id is not None else ()
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
-        """
-        SELECT *
+        f"""
+        SELECT scans.*, targets.id AS indexed_target_id
         FROM scans
-        WHERE status = 'complete' AND seal_manifest_digest IS NOT NULL
-        ORDER BY started_at DESC, id DESC
-        """
+        JOIN security_targets AS targets
+            ON targets.id = scans.target_id
+            OR (scans.target_id IS NULL AND targets.current_path = scans.target_path)
+        WHERE scans.status = 'complete' AND scans.seal_manifest_digest IS NOT NULL
+            {target_filter}
+        ORDER BY scans.started_at DESC, scans.id DESC
+        """,
+        target_values,
     ):
-        completed_scans_by_target.setdefault(scan["target_id"], []).append(scan)
+        completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
 
-    coverage_by_scan_id: dict[str, dict[str, Any]] = {}
+    coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}
     rows = connection.execute(
-        """
+        f"""
         WITH ranked_findings AS (
             SELECT
                 occurrences.id AS occurrence_id,
@@ -98,22 +107,25 @@ def _active_findings(
                 occurrences.created_at,
                 scans.id AS scan_id,
                 scans.started_at AS scan_started_at,
-                scans.target_id,
+                targets.id AS target_id,
                 targets.current_path AS target_path,
                 scans.scope,
                 MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
                 COALESCE(triage.status, 'open') AS status,
                 COUNT(*) OVER (
-                    PARTITION BY scans.target_id, occurrences.finding_id
+                    PARTITION BY targets.id, occurrences.finding_id
                 ) AS occurrence_count,
                 ROW_NUMBER() OVER (
-                    PARTITION BY scans.target_id, occurrences.finding_id
+                    PARTITION BY targets.id, occurrences.finding_id
                     ORDER BY occurrences.created_at DESC, occurrences.id DESC
                 ) AS occurrence_rank
             FROM finding_occurrences AS occurrences
             JOIN scans ON scans.id = occurrences.scan_id
-            JOIN security_targets AS targets ON targets.id = scans.target_id
+            JOIN security_targets AS targets
+                ON targets.id = scans.target_id
+                OR (scans.target_id IS NULL AND targets.current_path = scans.target_path)
             LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+            WHERE 1 = 1 {target_filter}
         )
         SELECT
             selected_findings.*,
@@ -145,6 +157,7 @@ def _active_findings(
             selected_findings.created_at DESC,
             selected_findings.occurrence_id
         """,
+        target_values,
     )
     for row in rows:
         resolved = False
@@ -154,12 +167,21 @@ def _active_findings(
                 row["scan_id"],
             ):
                 break
-            coverage = coverage_by_scan_id.get(scan["id"])
+            if scan["id"] not in coverage_by_scan_id:
+                try:
+                    coverage_by_scan_id[scan["id"]] = read_coverage(scan)
+                except SystemExit:
+                    coverage_by_scan_id[scan["id"]] = None
+            coverage = coverage_by_scan_id[scan["id"]]
             if coverage is None:
-                coverage = read_coverage(scan)
-                coverage_by_scan_id[scan["id"]] = coverage
+                continue
+            comparable_scan = (
+                scan
+                if scan["target_id"] is not None
+                else {**dict(scan), "target_id": row["target_id"]}
+            )
             if scan_history.scan_covers_path(
-                scan,
+                comparable_scan,
                 target_id=row["target_id"],
                 path=row["location_path"],
                 coverage=coverage,
