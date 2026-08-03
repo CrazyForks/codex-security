@@ -1045,6 +1045,48 @@ describe("multiscan", () => {
     }
   });
 
+  test("rolls back a published lock when recovery inspection fails", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "recovery-inspection-failure");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    const recovery = join(paths.output, ".lock.recovery");
+    await writeFile(
+      recovery,
+      JSON.stringify({ pid: process.pid, marker: "fail" }),
+    );
+    const originalParse = JSON.parse;
+    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
+      const value = originalParse(...arguments_) as unknown;
+      if (typeof value === "object" && value !== null && "marker" in value) {
+        throw Object.assign(new Error("recovery inspection failed"), {
+          code: "EACCES",
+        });
+      }
+      return value;
+    }) as typeof JSON.parse;
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) =>
+              completedScan(scanOptions.outputDir!),
+            ),
+          ),
+        ),
+      ).rejects.toThrow("recovery inspection failed");
+      await expect(access(lock)).rejects.toThrow();
+    } finally {
+      JSON.parse = originalParse;
+    }
+  });
+
   test("cleans pending ownership files when synchronization fails", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "lock-sync-failure");

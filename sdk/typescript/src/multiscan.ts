@@ -280,6 +280,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   const pending = join(output, `.lock.pending-${token}`);
   const owner = `${JSON.stringify({ pid: process.pid, token })}\n`;
   const file = await open(pending, "wx", 0o600);
+  let published = false;
   try {
     try {
       await file.writeFile(owner, "utf8");
@@ -291,6 +292,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     for (;;) {
       try {
         await link(pending, path);
+        published = true;
         const recovering = await readLockOwner(recovery);
         if (
           recovering !== null &&
@@ -303,6 +305,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
         if ((await readLockOwner(path))?.token !== token) {
           throw new Error("A multiscan supervisor is already running.");
         }
+        published = false;
         return async () => await releaseLock(path, token);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -380,12 +383,14 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
               throw new Error("A multiscan supervisor is already running.");
             }
             await rename(pending, path);
+            published = true;
             removed = true;
           } finally {
             if (removed) await rm(stale, { recursive: true, force: true });
           }
         } else {
           await rename(pending, path);
+          published = true;
         }
         if (
           (await readLockOwner(recovery))?.token !== token ||
@@ -394,6 +399,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
           await releaseLock(path, token);
           throw new Error("A multiscan supervisor is already running.");
         }
+        published = false;
         return async () => await releaseLock(path, token);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
@@ -403,7 +409,11 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
       }
     }
   } finally {
-    await rm(pending, { force: true });
+    try {
+      if (published) await releaseLock(path, token);
+    } finally {
+      await rm(pending, { force: true });
+    }
   }
 }
 
