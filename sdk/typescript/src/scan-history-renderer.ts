@@ -32,10 +32,6 @@ const SEVERITY_COLORS: Record<string, number> = {
 
 const SEVERITY_ORDER = Object.keys(SEVERITY_COLORS);
 const MAX_KNOWN_SINCE_LENGTH = 32;
-// Severity badges occupy a fixed column, so the widest label decides the width
-// and the finding indent that lines up under it. INFORMATIONAL is abbreviated to
-// keep that column narrow; spelling it out costs every finding title five
-// characters, which matters most at the 48-column minimum.
 const SEVERITY_LABELS: Record<string, string> = { INFORMATIONAL: "INFO" };
 const SEVERITY_BADGE_WIDTH = Math.max(
   ...Object.keys(SEVERITY_COLORS).map(
@@ -52,15 +48,11 @@ const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
 });
 
 function clean(value: unknown): string {
-  return String(value)
+  return String(value ?? "")
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
 }
 
-// The workbench response is only checked for being a JSON object before it
-// reaches this renderer, so every field read here is treated as optional. A
-// history view degrades rather than aborting the command on a payload the
-// installed plugin did not produce.
 function record(value: unknown): JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as JsonObject)
@@ -76,15 +68,11 @@ function records(value: unknown): JsonObject[] {
     : [];
 }
 
-function text(value: unknown, fallback = ""): string {
-  return value === undefined || value === null ? fallback : clean(value);
-}
-
 function findingSeverity(finding: JsonObject): string {
   const severity = finding["severity"];
   const level =
     typeof severity === "string" ? severity : record(severity)["level"];
-  return text(level).toUpperCase();
+  return clean(level).toUpperCase();
 }
 
 function severityRank(finding: JsonObject): number {
@@ -242,7 +230,7 @@ export function renderScanHistory(
       );
     }
     for (const scan of scans) {
-      const status = text(record(scan["progress"])["status"], "unknown");
+      const status = clean(record(scan["progress"])["status"] ?? "unknown");
       const complete = status === "complete";
       const statusColor = complete ? 32 : status === "running" ? 36 : 31;
       const statusLabel = paint(
@@ -264,11 +252,11 @@ export function renderScanHistory(
       }
     }
   } else if (command === "show") {
-    const status = text(record(result["progress"])["status"], "unknown");
+    const status = clean(record(result["progress"])["status"] ?? "unknown");
     const statusColor =
       status === "complete" ? 32 : status === "running" ? 36 : 31;
     lines.push(
-      `  ${strong(clean(basename(text(result["targetPath"]))))}  ${accent("·")}  ${clean(result["scanId"])}`,
+      `  ${strong(basename(clean(result["targetPath"])))}  ${accent("·")}  ${clean(result["scanId"])}`,
       `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
     if (result["failureMessage"]) {
@@ -293,7 +281,7 @@ export function renderScanHistory(
         `  ${Object.entries(summary)
           .filter(([, count]) => count)
           .map(([severity, count]) => {
-            const label = severity.toUpperCase();
+            const label = clean(severity).toUpperCase();
             return paint(
               `${clean(count)} ${label}`,
               SEVERITY_COLORS[label] ?? 37,
@@ -376,7 +364,7 @@ export function renderScanHistory(
     }
   } else if (command === "compare") {
     if (result["repository"]) {
-      lines.push(`  ${strong(clean(basename(text(result["repository"]))))}`);
+      lines.push(`  ${strong(basename(clean(result["repository"])))}`);
     }
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
@@ -445,7 +433,7 @@ export function renderScanHistory(
     }
   } else {
     lines.push(
-      `  ${strong(clean(basename(text(result["repository"]))))}`,
+      `  ${strong(basename(clean(result["repository"])))}`,
       "",
       `  ${paint("●", 36)} ${clean(result["scanCount"])} scans    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparisons    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause matches`,
     );

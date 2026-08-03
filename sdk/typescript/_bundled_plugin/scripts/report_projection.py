@@ -364,12 +364,6 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
 
 
 def _unreported_findings_note(findings: list[dict[str, Any]]) -> str:
-    """Describe findings held back from this report by the reportable-severity gate.
-
-    They remain sealed in findings.json and exported to SARIF and CSV, so without
-    this line the three artifacts of one scan contradict each other and the one a
-    human reads is the one missing data.
-    """
     count = len(findings)
     subject = "finding is" if count == 1 else "findings are"
     pronoun = "It remains" if count == 1 else "They remain"

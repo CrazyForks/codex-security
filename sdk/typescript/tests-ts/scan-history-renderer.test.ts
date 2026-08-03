@@ -315,9 +315,6 @@ describe("scan history renderer", () => {
 });
 
 describe("scan history renderer resilience", () => {
-  // The workbench response is only checked for being a JSON object
-  // (src/runtime.ts runWorkbench), so a plugin or database that drifts from the
-  // shape this renderer expects must degrade instead of crashing the command.
   const plain = (
     result: Parameters<typeof renderScanHistory>[0],
     command: Parameters<typeof renderScanHistory>[1],
@@ -431,8 +428,22 @@ describe("scan history renderer resilience", () => {
 
   test("renders every command from an empty payload", () => {
     for (const command of ["list", "show", "compare", "match-all"] as const) {
-      expect(() => plain({}, command)).not.toThrow();
+      const output = plain({}, command);
+      expect(output).not.toContain("undefined");
+      expect(output).not.toContain("null");
     }
+  });
+
+  test("strips terminal-control sequences from severity-count keys", () => {
+    const output = renderScanHistory(
+      { severityCounts: { "\u001b[2J\u001b[HHIGH": 2 } },
+      "show",
+      { color: true },
+    );
+
+    expect(output).not.toContain("\u001b[2J");
+    expect(output).not.toContain("\u001b[H");
+    expect(stripVTControlCharacters(output)).toContain("2 HIGH");
   });
 });
 

@@ -67,9 +67,6 @@ sys.stdout.write(report_projection.build_report_markdown(manifest, findings, cov
 }
 
 describe("report projection severity gate", () => {
-  // https://github.com/openai/codex-security/issues/48 -- informational findings
-  // are sealed into findings.json and exported to SARIF and CSV, but excluded
-  // from report.md, which then claimed the scan produced nothing.
   test.skipIf(python === null)(
     "records findings held back by the reportable severity gate",
     () => {

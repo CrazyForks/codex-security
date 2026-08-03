@@ -45,10 +45,8 @@ When there are no reportable findings, include a short `No findings` section tha
 When there are reportable findings, render them as readable markdown findings rather than raw JSON or a dumped schema object.
 Order findings from highest severity to lowest severity: `critical`, then `high`, then `medium`, then `low`.
 
-`informational` is outside the reportable severity set, so those findings are not
-detailed in the report. They are still sealed into `findings.json` and included in
-the SARIF and CSV exports, so the report records how many were held back rather
-than omitting them silently.
+`informational` is outside the reportable severity set. Record how many findings
+were held back; they remain in `findings.json` and the SARIF and CSV exports.
 
 Use a separate finding entry for each independently attackable source/control/sink instance. Do not combine sibling routes, templates, query builders, parser operations, auth/object-access endpoints, or shared-helper callers into one representative finding solely for readability; if grouping helps, add a short grouped summary after the individual finding entries.
 
