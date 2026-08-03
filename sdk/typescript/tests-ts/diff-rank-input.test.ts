@@ -482,6 +482,8 @@ describe("diff rank input", () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
       ".circleci/config.yml": "version: 2.1\njobs: {}\n",
+      ".devcontainer/devcontainer.json": '{"postCreateCommand":"./setup.sh"}\n',
+      ".devcontainer/setup.sh": "#!/bin/sh\necho configuring\n",
       ".dockerignore": "node_modules\nvendor\n",
       ".github/actions/build/action.yml": "runs:\n  using: composite\n",
       ".github/actions/vendor/checkout/action.yml":
@@ -554,6 +556,8 @@ describe("diff rank input", () => {
     expect(rows.map((row) => row.path)).toEqual(
       [
         ".circleci/config.yml",
+        ".devcontainer/devcontainer.json",
+        ".devcontainer/setup.sh",
         ".dockerignore",
         ".github/actions/build/action.yml",
         ".github/actions/security/action.yml",

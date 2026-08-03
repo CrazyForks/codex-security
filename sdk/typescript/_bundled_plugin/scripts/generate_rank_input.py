@@ -367,6 +367,13 @@ def diff_path_is_security_relevant(path: Path) -> bool:
 def diff_path_is_included(path: Path) -> bool:
     if path.parts in {(".circleci", "config.yml"), ("docs", "CODEOWNERS")}:
         return True
+    if len(path.parts) >= 2 and path.parts[0] == ".devcontainer":
+        return not any(
+            part in SECURITY_RELEVANT_DIFF_EXCLUDED_DIRS for part in path.parts[1:]
+        ) and (
+            path.suffix.lower() in SECURITY_RELEVANT_DIFF_EXTENSIONS
+            or diff_path_is_security_relevant(path)
+        )
     if diff_path_is_security_relevant(path):
         if len(path.parts) >= 2 and path.parts[0] == ".github" and path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES:
             return ".git" not in path.parts
