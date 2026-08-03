@@ -1554,6 +1554,21 @@ async function stageProtectedScopeVerifier(
   );
 }
 
+async function realpathIfPresent(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    ) {
+      return path;
+    }
+    throw error;
+  }
+}
+
 async function requireHostControlledVerifierPython(
   python: string,
   stateDirectory: string,
@@ -1561,51 +1576,18 @@ async function requireHostControlledVerifierPython(
 ): Promise<void> {
   if (!isAbsolute(python)) return;
   throwIfAborted(signal);
-  let canonicalState = stateDirectory;
-  try {
-    canonicalState = await realpath(stateDirectory);
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
-    ) {
-      throw error;
-    }
-  }
+  const canonicalState = await realpathIfPresent(stateDirectory);
   requireOutputOutsideRepository(stateDirectory, python, "runtime");
   requireOutputOutsideRepository(canonicalState, python, "runtime");
 
-  let canonicalPythonParent = dirname(python);
-  try {
-    canonicalPythonParent = await realpath(canonicalPythonParent);
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
-    ) {
-      throw error;
-    }
-  }
+  const canonicalPythonParent = await realpathIfPresent(dirname(python));
   requireOutputOutsideRepository(
     canonicalState,
     canonicalPythonParent,
     "runtime",
   );
 
-  let canonicalPython = python;
-  try {
-    canonicalPython = await realpath(python);
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
-    ) {
-      throw error;
-    }
-  }
+  const canonicalPython = await realpathIfPresent(python);
   requireOutputOutsideRepository(canonicalState, canonicalPython, "runtime");
 }
 
@@ -1617,19 +1599,7 @@ async function createProtectedScopeInventoryDirectory(
   signal: AbortSignal,
   candidateRoots?: readonly string[],
 ): Promise<string> {
-  let canonicalState = stateDirectory;
-  try {
-    canonicalState = await realpath(stateDirectory);
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      (error.code !== "ENOENT" && error.code !== "ENOTDIR")
-    ) {
-      throw error;
-    }
-  }
-
+  const canonicalState = await realpathIfPresent(stateDirectory);
   const failures: unknown[] = [];
   for (const root of new Set(
     candidateRoots ?? [

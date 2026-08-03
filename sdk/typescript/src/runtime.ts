@@ -476,6 +476,16 @@ export async function preparePersistentScanRoot(
   return await realpath(root);
 }
 
+function withoutApiKeys(environment: ProcessEnvironment): ProcessEnvironment {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        name.toUpperCase() !== "OPENAI_API_KEY" &&
+        name.toUpperCase() !== "CODEX_API_KEY",
+    ),
+  );
+}
+
 export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
@@ -491,13 +501,7 @@ export async function runWorkbench(
         ...args,
       ],
       {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY",
-          ),
-        ),
+        env: withoutApiKeys(options.environment),
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
@@ -599,13 +603,7 @@ export async function prepareScopeInventory(
         output,
       ],
       {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY",
-          ),
-        ),
+        env: withoutApiKeys(options.environment),
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
@@ -671,13 +669,7 @@ export async function verifyScopeCoverage(
         options.scanDir,
       ],
       {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY",
-          ),
-        ),
+        env: withoutApiKeys(options.environment),
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
