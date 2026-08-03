@@ -977,6 +977,25 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 preview, is_binary = immutable_diff_preview(
                     repo, path, args.base, args.preview_bytes
                 )
+                if path.exists() or path.is_symlink():
+                    working_preview, working_binary = confined_diff_preview(
+                        repo, path, args.preview_bytes
+                    )
+                    if not working_binary:
+                        preview = (
+                            working_preview
+                            if is_binary
+                            else fit_preview_lines(
+                                [
+                                    "Deleted Git base:",
+                                    *preview.splitlines(),
+                                    "Recreated working tree:",
+                                    *working_preview.splitlines(),
+                                ],
+                                args.preview_bytes,
+                            )
+                        )
+                        is_binary = False
                 if is_binary:
                     continue
             else:
