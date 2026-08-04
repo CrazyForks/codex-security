@@ -447,6 +447,7 @@ def compare_scans(
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
     include_matching_inputs: bool = False,
     include_matching_status: bool = False,
+    matching_status_only: bool = False,
     require_matches: bool = False,
 ) -> dict[str, Any]:
     before = require_scan(connection, args.before_scan_id)
@@ -474,11 +475,13 @@ def compare_scans(
         raise SystemExit(
             "No saved matches for these scans. Run 'codex-security scans match BEFORE AFTER' first."
         )
-    if cached is None and include_matching_status and not include_matching_inputs:
+    if matching_status_only or (
+        cached is None and include_matching_status and not include_matching_inputs
+    ):
         return {
             "afterScanId": after["id"],
             "beforeScanId": before["id"],
-            "matchingCached": False,
+            "matchingCached": cached is not None,
         }
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)

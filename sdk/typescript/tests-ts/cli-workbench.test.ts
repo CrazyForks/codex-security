@@ -655,6 +655,9 @@ describe("CLI workbench", () => {
           "args = argparse.Namespace(before_scan_id='before', after_scan_id='after')",
           "result = history.compare_scans(connection, args, require_scan=lambda _, identity: scans[identity], read_coverage=lambda _: (_ for _ in ()).throw(AssertionError('coverage must not be projected')), include_matching_status=True)",
           "assert result == {'beforeScanId': 'before', 'afterScanId': 'after', 'matchingCached': False}, result",
+          "connection.execute(\"INSERT INTO scan_comparisons VALUES ('before', 'after', '{}')\")",
+          "result = history.compare_scans(connection, args, require_scan=lambda _, identity: scans[identity], read_coverage=lambda _: (_ for _ in ()).throw(AssertionError('cached force probe must not project coverage')), matching_status_only=True)",
+          "assert result == {'beforeScanId': 'before', 'afterScanId': 'after', 'matchingCached': True}, result",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
       ],
@@ -1326,6 +1329,8 @@ describe("CLI workbench", () => {
       "compare-scans",
       "save-scan-comparison",
     ]);
+    expect(calls[0]).toContain("--matching-status-only");
+    expect(calls[0]).not.toContain("--include-matching-status");
   });
 
   test("rejects invalid matching arguments before loading history", async () => {

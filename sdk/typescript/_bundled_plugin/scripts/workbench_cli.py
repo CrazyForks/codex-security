@@ -175,6 +175,7 @@ def parse_args(description: str) -> argparse.Namespace:
     compare_scans.add_argument("--after-scan-id", required=True)
     compare_scans.add_argument("--include-matching-inputs", action="store_true")
     compare_scans.add_argument("--include-matching-status", action="store_true")
+    compare_scans.add_argument("--matching-status-only", action="store_true")
     compare_scans.add_argument("--require-matches", action="store_true")
 
     save_scan_comparison = subparsers.add_parser("save-scan-comparison")

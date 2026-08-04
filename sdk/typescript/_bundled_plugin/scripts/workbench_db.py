@@ -3644,6 +3644,7 @@ def main() -> None:
                 backfill_finding_details=backfill_legacy_finding_details,
                 include_matching_inputs=args.include_matching_inputs,
                 include_matching_status=args.include_matching_status,
+                matching_status_only=args.matching_status_only,
                 require_matches=args.require_matches,
             )
         elif args.command == "save-scan-comparison":

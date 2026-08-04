@@ -739,7 +739,7 @@ export async function main(
         beforeId,
         "--after-scan-id",
         afterId,
-        "--include-matching-status",
+        force ? "--matching-status-only" : "--include-matching-status",
       ],
       async ({ matchingCached, matchingInputs, ...comparison }) => {
         if (matchingCached !== false && !force) return comparison;
