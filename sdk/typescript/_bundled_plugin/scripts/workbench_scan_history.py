@@ -179,15 +179,27 @@ def list_scans(
                 ).fetchone()
                 if registered_parent is not None:
                     break
-        if requested_identity[0] is not None:
-            for scan in connection.execute(
-                "SELECT target_id, target_path FROM scans WHERE target_id IS NULL"
-            ):
-                target_path = Path(scan["target_path"])
-                if target_path.is_relative_to(repository) and _same_repository(
+        for scan in connection.execute("SELECT target_id, target_path FROM scans"):
+            target_path = Path(scan["target_path"])
+            if target_path == repository or not target_path.is_relative_to(repository):
+                continue
+            if requested_identity[0] is not None:
+                if scan["target_id"] is not None or not _same_repository(
                     scan, requested_repository, after_identity=requested_identity
                 ):
-                    repository_paths.append(str(target_path))
+                    continue
+            elif registered_repository is not None or checkout_boundary is not None:
+                continue
+            else:
+                candidate = target_path
+                while candidate != repository:
+                    marker = candidate / ".git"
+                    if marker.is_dir() or marker.is_file() or marker.is_symlink():
+                        break
+                    candidate = candidate.parent
+                if candidate != repository:
+                    continue
+            repository_paths.append(str(target_path))
         repository_paths = list(dict.fromkeys(repository_paths))
         repository_placeholders = ", ".join("?" for _ in repository_paths)
         repository_clauses = [f"scans.target_path IN ({repository_placeholders})"]

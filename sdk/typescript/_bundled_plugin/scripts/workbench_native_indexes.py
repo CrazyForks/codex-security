@@ -24,6 +24,14 @@ def list_global_findings(
 ) -> dict[str, Any]:
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
+    selected_ids = args.target_id
+    target_ids = (
+        {selected_ids}
+        if isinstance(selected_ids, str)
+        else set(selected_ids)
+        if selected_ids is not None
+        else None
+    )
     selected_paths = getattr(args, "target_path", None)
     target_paths = (
         {selected_paths}
@@ -37,11 +45,14 @@ def list_global_findings(
         for row in _active_findings(
             connection,
             read_coverage,
-            target_id=args.target_id,
+            target_ids=target_ids,
             target_paths=target_paths,
         )
-        if (args.target_id is None or row["target_id"] == args.target_id)
-        and (target_paths is None or row["target_path"] in target_paths)
+        if (
+            (target_ids is None and target_paths is None)
+            or (target_ids is not None and row["target_id"] in target_ids)
+            or (target_paths is not None and row["target_path"] in target_paths)
+        )
         and (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
@@ -52,7 +63,7 @@ def list_global_findings(
                     row["title"],
                     row["summary"],
                     row["target_path"]
-                    if args.target_id is None and target_paths is None
+                    if target_ids is None and target_paths is None
                     else None,
                     row["location_path"],
                 )
@@ -99,19 +110,20 @@ def _active_findings(
     connection: sqlite3.Connection,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
     *,
-    target_id: str | None = None,
+    target_ids: set[str] | None = None,
     target_paths: set[str] | None = None,
 ) -> Iterator[sqlite3.Row]:
     target_filters = []
     target_values = []
-    if target_id is not None:
-        target_filters.append("targets.id = ?")
-        target_values.append(target_id)
+    if target_ids:
+        placeholders = ", ".join("?" for _ in target_ids)
+        target_filters.append(f"targets.id IN ({placeholders})")
+        target_values.extend(target_ids)
     if target_paths is not None:
         placeholders = ", ".join("?" for _ in target_paths)
         target_filters.append(f"scans.target_path IN ({placeholders})")
         target_values.extend(target_paths)
-    target_filter = "" if not target_filters else "AND " + " AND ".join(target_filters)
+    target_filter = "" if not target_filters else "AND (" + " OR ".join(target_filters) + ")"
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""

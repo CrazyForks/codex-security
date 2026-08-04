@@ -145,6 +145,60 @@ describe("CLI findings history", () => {
     ]);
   });
 
+  test("scopes multiple moved targets by identity instead of reusable checkout paths", async () => {
+    const calls: Array<readonly string[]> = [];
+    expect(
+      await main(
+        ["findings", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return args[0] === "list-scans"
+              ? {
+                  scans: [
+                    {
+                      scanId: "service-a",
+                      targetId: "target-a",
+                      targetPath: "/current/repository/a",
+                    },
+                    {
+                      scanId: "historical-a",
+                      targetId: "target-a",
+                      targetPath: "/another/reused-checkout",
+                    },
+                    {
+                      scanId: "service-b",
+                      targetId: "target-b",
+                      targetPath: "/current/repository/b",
+                    },
+                    {
+                      scanId: "unrelated",
+                      targetId: "unrelated-target",
+                      targetPath: "/another/reused-checkout",
+                    },
+                  ],
+                }
+              : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(calls[1]).toEqual([
+      "list-global-findings",
+      "--target-id",
+      "target-a",
+      "--target-id",
+      "target-b",
+      "--offset",
+      "0",
+      "--limit",
+      "20",
+    ]);
+  });
+
   test("returns an empty repository page without querying other targets", async () => {
     const calls: Array<readonly string[]> = [];
     const stdout = capture();
@@ -396,10 +450,10 @@ describe("CLI findings history", () => {
       if (command[0] === "findings") {
         expect(calls[1]).toEqual([
           "list-global-findings",
-          "--target-path",
-          "/current/repository/long-service",
-          "--target-path",
-          "/current/repository/a",
+          "--target-id",
+          "long-target",
+          "--target-id",
+          "short-target",
           "--offset",
           "0",
           "--limit",

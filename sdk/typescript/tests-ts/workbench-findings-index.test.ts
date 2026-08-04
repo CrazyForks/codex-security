@@ -51,7 +51,7 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
-  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), offset=0, limit=20)",
+  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), offset=0, limit=20)",
   "result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
   "print(json.dumps({'findings': result['findings'], 'coverageReads': coverage_reads}))",
 ].join("\n");
@@ -107,6 +107,21 @@ const nestedDirectoryScanProbe = [
   "    ensure_security_target(connection, str(git_service))",
   "    args = argparse.Namespace(repository=str(git_root), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "    output['registeredLegacyGitRoot'] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    plain_root = (pathlib.Path(directory) / 'unversioned-services').resolve()",
+  "    plain_service_a = plain_root / 'service-a'",
+  "    plain_service_b = plain_root / 'service-b'",
+  "    nested_checkout = plain_root / 'independent-checkout'",
+  "    for path in (plain_service_a, plain_service_b, nested_checkout): path.mkdir(parents=True)",
+  "    subprocess.run(['git', 'init', '-q', str(nested_checkout)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+  "    for scan_id, path in [('plain-a', plain_service_a), ('plain-b', plain_service_b), ('nested-git', nested_checkout)]:",
+  "        target = ensure_security_target(connection, str(path))",
+  "        workspace_id = scan_id + '-workspace'",
+  "        connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', (workspace_id, target, str(path), timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan_id, workspace_id, target, str(path), 'unversioned', '.', 'standard', directory + '/results/' + scan_id, 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', (scan_id, timestamp))",
+  "    for label, path in [('unversionedRoot', plain_root), ('unversionedService', plain_service_a), ('nestedGitCheckout', nested_checkout)]:",
+  "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
   "    print(json.dumps(output))",
 ].join("\n");
 
@@ -145,6 +160,7 @@ const findingDetailProbe = [
 function runFindingsIndex(
   targetId: string | null,
   settings: {
+    targetIds?: string[];
     targetPath?: string;
     targetPaths?: string[];
     query?: string;
@@ -175,6 +191,7 @@ function runFindingsIndex(
 function probeFindingsIndex(
   targetId: string | null,
   settings: {
+    targetIds?: string[];
     targetPath?: string;
     targetPaths?: string[];
     query?: string;
@@ -262,6 +279,26 @@ describe("workbench findings index", () => {
     expect(siblingPrefix.coverageReads).toEqual([]);
   });
 
+  test("combines exact target identities with legacy checkout paths", () => {
+    const identified = probeFindingsIndex(null, {
+      targetIds: ["current-target", "stale-target"],
+    });
+    expect(identified.findings.map((finding) => finding.occurrenceId)).toEqual([
+      "current-new-occurrence",
+      "stale-old-occurrence",
+    ]);
+
+    const mixed = probeFindingsIndex(null, {
+      targetIds: ["current-target"],
+      targetPaths: ["/orphan/repository"],
+    });
+    expect(mixed.findings.map((finding) => finding.occurrenceId)).toEqual([
+      "current-new-occurrence",
+      "orphan-old-occurrence",
+      "orphan-new-occurrence",
+    ]);
+  });
+
   test("searches secondary finding source locations", () => {
     const result = probeFindingsIndex("current-target", {
       query: "SECONDARY.PY",
@@ -319,6 +356,9 @@ describe("workbench findings index", () => {
       legacyGitRoot: ["legacy-git-scan"],
       legacyGitSubdirectory: ["legacy-git-scan"],
       registeredLegacyGitRoot: ["legacy-git-scan"],
+      unversionedRoot: ["plain-a", "plain-b"],
+      unversionedService: ["plain-a"],
+      nestedGitCheckout: ["nested-git"],
     });
   });
 

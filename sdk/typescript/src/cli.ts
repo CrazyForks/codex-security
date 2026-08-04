@@ -844,9 +844,8 @@ export async function main(
         const repository = options.allRepositories
           ? undefined
           : dependencies.currentDirectory();
-        let targetId: string | undefined;
-        let targetPath: string | undefined;
-        let targetPaths: string[] | undefined;
+        const targetIds = new Set<string>();
+        const targetPaths = new Set<string>();
         if (repository !== undefined) {
           const result = await history([
             "list-scans",
@@ -858,41 +857,16 @@ export async function main(
             result["scans"] as JsonObject[],
             repository,
           );
-          const targetIds = new Set(
-            scans
-              .map((scan) => scan["targetId"])
-              .filter((id): id is string => typeof id === "string"),
-          );
-          const scannedPaths = new Set(scans.map((scan) => scan["targetPath"]));
-          if (
-            targetIds.size === 1 &&
-            scans.every((scan) => typeof scan["targetId"] === "string")
-          ) {
-            targetId = [...targetIds][0];
-          } else if (scannedPaths.size > 1) {
-            targetPaths = [...scannedPaths].filter(
-              (path): path is string => typeof path === "string",
-            );
-          } else {
-            const target = scans.find(
-              (scan) => typeof scan["targetId"] === "string",
-            );
-            const candidateTargetId = target?.["targetId"];
-            targetId =
-              typeof candidateTargetId === "string"
-                ? candidateTargetId
-                : undefined;
-            const candidateTargetPath = scans[0]?.["targetPath"];
-            targetPath =
-              targetId === undefined && typeof candidateTargetPath === "string"
-                ? candidateTargetPath
-                : undefined;
+          for (const scan of scans) {
+            const targetId = scan["targetId"];
+            const targetPath = scan["targetPath"];
+            if (typeof targetId === "string") {
+              targetIds.add(targetId);
+            } else if (typeof targetPath === "string") {
+              targetPaths.add(targetPath);
+            }
           }
-          if (
-            targetId === undefined &&
-            targetPath === undefined &&
-            targetPaths === undefined
-          ) {
+          if (targetIds.size === 0 && targetPaths.size === 0) {
             return presentHistory(
               {
                 findings: [],
@@ -909,9 +883,8 @@ export async function main(
         return presentHistory(
           await history([
             "list-global-findings",
-            ...(targetId === undefined ? [] : ["--target-id", targetId]),
-            ...(targetPath === undefined ? [] : ["--target-path", targetPath]),
-            ...(targetPaths ?? []).flatMap((path) => ["--target-path", path]),
+            ...[...targetIds].flatMap((id) => ["--target-id", id]),
+            ...[...targetPaths].flatMap((path) => ["--target-path", path]),
             ...filters,
           ]),
           "findings",
