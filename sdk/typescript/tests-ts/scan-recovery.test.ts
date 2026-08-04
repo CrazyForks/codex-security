@@ -461,14 +461,14 @@ describe("malformed scan artifact recovery", () => {
         "-B",
         "-c",
         [
-          "import hashlib, json, pathlib, sqlite3, sys",
+          "import json, pathlib, sqlite3, sys",
           "manifest_path = pathlib.Path(sys.argv[1])",
           "manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
           "manifest['scan']['target'].pop('snapshotDigest', None)",
           "encoded = (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + '\\n').encode()",
           "manifest_path.write_bytes(encoded)",
           "with sqlite3.connect(sys.argv[2]) as connection:",
-          "    connection.execute('UPDATE scans SET diff_content_digest = NULL, seal_manifest_digest = ? WHERE id = ?', ('sha256:' + hashlib.sha256(encoded).hexdigest(), sys.argv[3]))",
+          "    connection.execute('UPDATE scans SET diff_content_digest = NULL, seal_manifest_digest = NULL WHERE id = ?', (sys.argv[3],))",
           "    connection.execute('UPDATE workspaces SET diff_content_digest = NULL WHERE id = (SELECT workspace_id FROM scans WHERE id = ?)', (sys.argv[3],))",
         ].join("\n"),
         manifestPath,
@@ -486,6 +486,35 @@ describe("malformed scan artifact recovery", () => {
         }>(manifestPath)
       ).scan.target.snapshotDigest,
     ).toBeUndefined();
+
+    const verifyLegacyManifestDigest = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import hashlib, pathlib, sqlite3, sys",
+          "digest = 'sha256:' + hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()",
+          "with sqlite3.connect(sys.argv[2]) as connection:",
+          "    recorded = connection.execute('SELECT seal_manifest_digest FROM scans WHERE id = ?', (sys.argv[3],)).fetchone()[0]",
+          "assert recorded == digest, recorded",
+        ].join("\n"),
+        manifestPath,
+        join(fixture.stateDir, "workbench.sqlite3"),
+        fixture.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(
+      verifyLegacyManifestDigest.status,
+      verifyLegacyManifestDigest.stderr,
+    ).toBe(0);
+
+    await writeFile(manifestPath, `${await readFile(manifestPath, "utf8")}\n`);
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "The sealed scan manifest changed after completion.",
+    );
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {

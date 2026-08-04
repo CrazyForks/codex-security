@@ -1411,6 +1411,8 @@ def complete_scan_locked(
                 _validate_existing_seal(scan_dir, manifest["scan"])
             except ContractError as exc:
                 raise SystemExit(str(exc)) from exc
+            manifest_digest = published_manifest_digest(scan_dir, manifest)
+            pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
             return scan_context(connection, scan["id"])
         try:
             manifest, _, _ = finalize_scan(
