@@ -1842,6 +1842,12 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt).toContain("$codex-security:security-scan");
     expect(prompt).toContain(
+      'The SDK has already registered this scan. Never call start_codex_security_standard_scan or create another scan; use "$CODEX_SECURITY_SCAN_ID" and write unsealed drafts to "$CODEX_SECURITY_SCAN_DIR".',
+    );
+    expect(prompt).toContain(
+      "Tool-written drafts may omit scan IDs, producer metadata, and timestamps; the SDK adds them during completion. Do not report these missing draft fields as errors.",
+    );
+    expect(prompt).toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
@@ -3758,7 +3764,10 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt).toContain("$codex-security:deep-security-scan");
     expect(prompt).toContain(
-      'start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }',
+      'The SDK has already registered this scan. Read "$CODEX_SECURITY_SCAN_ID" from the environment with a shell command, then call start_codex_security_deep_scan with its resolved UUID; never pass a literal variable, targetPath, or create another scan.',
+    );
+    expect(prompt).toContain(
+      "Tool-written drafts may omit scan IDs, producer metadata, and timestamps; the SDK adds them during completion. Do not report these missing draft fields as errors.",
     );
     expect(prompt).not.toContain(
       "This exhaustive scan authorizes the delegated-worker phases",

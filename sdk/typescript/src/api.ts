@@ -1702,7 +1702,17 @@ async function scanPrompt(
     "Run this Codex Security scan non-interactively.",
     ...(mode === "deep"
       ? [
-          'The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }; never pass targetPath or create another scan.',
+          'The SDK has already registered this scan. Read "$CODEX_SECURITY_SCAN_ID" from the environment with a shell command, then call start_codex_security_deep_scan with its resolved UUID; never pass a literal variable, targetPath, or create another scan.',
+        ]
+      : []),
+    ...(skillName === "security-scan"
+      ? [
+          'The SDK has already registered this scan. Never call start_codex_security_standard_scan or create another scan; use "$CODEX_SECURITY_SCAN_ID" and write unsealed drafts to "$CODEX_SECURITY_SCAN_DIR".',
+        ]
+      : []),
+    ...(skillName === "security-scan" || skillName === "deep-security-scan"
+      ? [
+          "Tool-written drafts may omit scan IDs, producer metadata, and timestamps; the SDK adds them during completion. Do not report these missing draft fields as errors.",
         ]
       : []),
     ...(skillName === "deep-security-scan"

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -68,7 +70,21 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
-    command = ["rg", "--files", "--hidden", "--glob", "!.git/**", "--", scope]
+    scopes = [scope]
+    if scopes_file := os.environ.get("CODEX_SECURITY_TARGET_PATHS_FILE"):
+        try:
+            requested_scopes = json.loads(Path(scopes_file).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise InventoryError(f"cannot read target paths file: {scopes_file}") from error
+        if (
+            not isinstance(requested_scopes, list)
+            or not requested_scopes
+            or any(not isinstance(path, str) or not path for path in requested_scopes)
+        ):
+            raise InventoryError("target paths file must contain a non-empty JSON string array")
+        scopes = [resolve_scope(repository, path) for path in requested_scopes]
+
+    command = ["rg", "--files", "--hidden", "--glob", "!.git/**", "--", *scopes]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(
@@ -89,7 +105,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(message)
 
         inventory.seek(0)
-        rows = sorted(inventory)
+        rows = sorted(set(inventory))
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
