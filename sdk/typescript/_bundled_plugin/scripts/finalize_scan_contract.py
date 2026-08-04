@@ -327,10 +327,7 @@ def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: 
         resolved_parent.relative_to(scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ContractError(f"{relative_path}: expected a path inside the scan directory") from exc
-    if (
-        os.path.normcase(resolved_parent) != os.path.normcase(path.parent)
-        or path.is_symlink()
-    ):
+    if os.path.normcase(resolved_parent) != os.path.normcase(path.parent) or path.is_symlink():
         raise ContractError(
             f"{relative_path}: expected a non-symlink path inside the scan directory"
         )
