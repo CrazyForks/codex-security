@@ -46,10 +46,19 @@ from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_fo
 
 STANDARD_SCOPE_EXCLUDED_DIRS = {
     ".git": "Git administrative metadata is not repository source code.",
+    ".venv": "Installed Python environments are excluded unless directly requested.",
     "node_modules": (
         "Installed dependency trees are excluded unless directly requested as a scan scope."
     ),
+    "vendor": "Vendored dependency trees are excluded unless directly requested.",
 }
+STANDARD_SCOPE_ALWAYS_DECLARED_DIRS = {".git", "node_modules"}
+STANDARD_SCOPE_BINARY_SUFFIXES = {
+    ".a", ".bin", ".class", ".dll", ".dylib", ".exe", ".gif", ".gz",
+    ".ico", ".jpeg", ".jpg", ".o", ".pdf", ".png", ".pyc", ".so",
+    ".wasm", ".webp", ".woff", ".woff2", ".zip",
+}
+STANDARD_SCOPE_BINARY_REASON = "Binary assets are excluded unless directly requested."
 STANDARD_SCOPE_SYMLINK_REASON = (
     "Symbolic links are not followed during standard scope inventory."
 )
@@ -373,10 +382,11 @@ def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     return scope_path
 
 
-def record_scope_symlink_exclusion(
+def record_scope_exclusion(
     repository: Path,
     path: Path,
     exclusions: dict[str, dict[str, str]],
+    reason: str = STANDARD_SCOPE_SYMLINK_REASON,
 ) -> None:
     relative = path.relative_to(repository).as_posix()
     pattern = "".join(
@@ -385,16 +395,17 @@ def record_scope_symlink_exclusion(
     )
     exclusions[pattern] = {
         "pattern": pattern,
-        "reason": STANDARD_SCOPE_SYMLINK_REASON,
+        "reason": reason,
     }
 
 
-def record_scope_symlink_exclusions(
+def record_scope_path_exclusions(
     repository: Path,
     scope: Path,
     exclusions: dict[str, dict[str, str]],
+    requested_files: set[Path],
 ) -> None:
-    """Declare symlinks skipped by the authoritative scope inventory."""
+    """Declare concrete paths skipped by the authoritative scope inventory."""
 
     pending: list[tuple[Path, Iterator[Path]]] = [(scope, scope.iterdir())]
     while pending:
@@ -408,9 +419,24 @@ def record_scope_symlink_exclusions(
             raise SystemExit(f"Unable to safely inventory scope path: {directory}") from exc
         try:
             if child.is_symlink():
-                record_scope_symlink_exclusion(repository, child, exclusions)
-            elif child.name not in STANDARD_SCOPE_EXCLUDED_DIRS and child.is_dir():
+                record_scope_exclusion(repository, child, exclusions)
+            elif child.name in STANDARD_SCOPE_EXCLUDED_DIRS:
+                if child.name not in STANDARD_SCOPE_ALWAYS_DECLARED_DIRS:
+                    record_scope_exclusion(
+                        repository,
+                        child,
+                        exclusions,
+                        STANDARD_SCOPE_EXCLUDED_DIRS[child.name],
+                    )
+            elif child.is_dir():
                 pending.append((child, child.iterdir()))
+            elif (
+                child.suffix.lower() in STANDARD_SCOPE_BINARY_SUFFIXES
+                and child not in requested_files
+            ):
+                record_scope_exclusion(
+                    repository, child, exclusions, STANDARD_SCOPE_BINARY_REASON
+                )
         except OSError as exc:
             raise SystemExit(f"Unable to safely inventory scope path: {child}") from exc
 
@@ -443,7 +469,7 @@ def record_overlapping_scope_exclusions(
         try:
             for child in current.iterdir():
                 if child.is_symlink():
-                    record_scope_symlink_exclusion(repository, child, exclusions)
+                    record_scope_exclusion(repository, child, exclusions)
                 else:
                     pending.append(child)
         except OSError as exc:
@@ -457,6 +483,7 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
     resolved_scopes = [
         resolve_scope(repository, scope, expand_user=False) for scope in scopes
     ]
+    requested_files = {scope for scope in resolved_scopes if scope.is_file()}
     exclusions: dict[str, dict[str, str]] = {}
     for scope_path in resolved_scopes:
         if not scope_path.is_dir():
@@ -478,7 +505,7 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
                 try:
                     for child in directory.iterdir():
                         if child.is_symlink():
-                            record_scope_symlink_exclusion(
+                            record_scope_exclusion(
                                 repository, child, exclusions
                             )
                             continue
@@ -492,6 +519,16 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
                             )
                         elif child.is_dir():
                             pending.append(child)
+                        elif (
+                            child.suffix.lower() in STANDARD_SCOPE_BINARY_SUFFIXES
+                            and child not in requested_files
+                        ):
+                            record_scope_exclusion(
+                                repository,
+                                child,
+                                exclusions,
+                                STANDARD_SCOPE_BINARY_REASON,
+                            )
                 except OSError as exc:
                     raise SystemExit(
                         f"Unable to safely inventory scope path: {directory}"
@@ -500,13 +537,17 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
 
         scope_prefix = PurePosixPath(scope_path.relative_to(repository).as_posix())
         for directory, reason in STANDARD_SCOPE_EXCLUDED_DIRS.items():
+            if directory not in STANDARD_SCOPE_ALWAYS_DECLARED_DIRS:
+                continue
             for pattern in (
                 (scope_prefix / directory).as_posix(),
                 (scope_prefix / "**" / directory).as_posix(),
                 (scope_prefix / "**" / directory / "**").as_posix(),
             ):
                 exclusions[pattern] = {"pattern": pattern, "reason": reason}
-        record_scope_symlink_exclusions(repository, scope_path, exclusions)
+        record_scope_path_exclusions(
+            repository, scope_path, exclusions, requested_files
+        )
     return [exclusions[pattern] for pattern in sorted(exclusions)]
 
 
@@ -792,6 +833,19 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     pending.append((path, path.iterdir()))
                 elif path.is_file():
                     relative_path = relative.as_posix()
+                    if (
+                        path.suffix.lower() in STANDARD_SCOPE_BINARY_SUFFIXES
+                        and path not in resolved_scopes
+                    ):
+                        if (
+                            expected_exclusions is not None
+                            and not excluded_from_registered_scope(relative_path)
+                        ):
+                            raise SystemExit(
+                                "Standard scan scope exclusions changed during inventory preparation: "
+                                + relative_path
+                            )
+                        continue
                     if excluded_from_registered_scope(relative_path):
                         raise SystemExit(
                             "Standard scan scope exclusions changed during inventory preparation: "

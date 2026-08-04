@@ -618,8 +618,12 @@ function withoutApiKeys(environment: ProcessEnvironment): ProcessEnvironment {
   return Object.fromEntries(
     Object.entries(environment).filter(
       ([name]) =>
-        name.toUpperCase() !== "OPENAI_API_KEY" &&
-        name.toUpperCase() !== "CODEX_API_KEY",
+        ![
+          "OPENAI_API_KEY",
+          "CODEX_API_KEY",
+          "OPENROUTER_API_KEY",
+          "FIREWORKS_API_KEY",
+        ].includes(name.toUpperCase()),
     ),
   );
 }

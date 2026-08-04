@@ -520,23 +520,17 @@ def registered_standard_scope_exclusions(scan: sqlite3.Row) -> list[dict[str, st
     """Use the host-owned exclusions captured before the scan started."""
 
     attestation = os.environ.get("CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE")
-    if "scope_exclusions_json" not in scan.keys():
-        if attestation:
-            raise SystemExit(
-                "Stored standard scope exclusions do not match their protected snapshot."
-            )
-        return standard_scope_exclusions(
-            Path(scan["target_path"]), requested_scan_paths(scan)
-        )
-    serialized = scan["scope_exclusions_json"]
+    serialized = (
+        scan["scope_exclusions_json"]
+        if "scope_exclusions_json" in scan.keys()
+        else None
+    )
     if serialized is None:
         if attestation:
             raise SystemExit(
                 "Stored standard scope exclusions do not match their protected snapshot."
             )
-        return standard_scope_exclusions(
-            Path(scan["target_path"]), requested_scan_paths(scan)
-        )
+        return []
     try:
         exclusions: Any = json.loads(
             serialized, parse_constant=reject_non_finite_json
