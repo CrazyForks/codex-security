@@ -280,6 +280,13 @@ def list_unmatched_scan_pairs(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
+    snapshot = Path(args.scan_snapshot) if args.scan_snapshot is not None else None
+    snapshot_scan_ids = None
+    if snapshot is not None:
+        try:
+            snapshot_scan_ids = set(json.loads(snapshot.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            pass
     requested = connection.execute(
         """
         SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
@@ -288,16 +295,17 @@ def list_unmatched_scan_pairs(
         (str(repository), str(repository)),
     ).fetchone()
     completed = connection.execute(
-        "SELECT * FROM scans WHERE status = 'complete'"
-        + (" AND completed_at <= ?" if args.completed_before is not None else "")
-        + " ORDER BY started_at, id",
-        (() if args.completed_before is None else (args.completed_before,)),
+        "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
     )
     selected = [
         scan
         for scan in completed
-        if Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested)
+        if (snapshot_scan_ids is None or scan["id"] in snapshot_scan_ids)
+        and (Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested))
     ]
+    if snapshot is not None and snapshot_scan_ids is None:
+        with snapshot.open("x", encoding="utf-8") as destination:
+            json.dump([scan["id"] for scan in selected], destination)
 
     available = []
     for scan in selected:

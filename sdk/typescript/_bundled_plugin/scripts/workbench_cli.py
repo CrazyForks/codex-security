@@ -153,7 +153,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_unmatched_scan_pairs.add_argument("--repository", required=True)
     list_unmatched_scan_pairs.add_argument("--force", action="store_true")
     list_unmatched_scan_pairs.add_argument("--offset", type=non_negative_int, default=0)
-    list_unmatched_scan_pairs.add_argument("--completed-before")
+    list_unmatched_scan_pairs.add_argument("--scan-snapshot")
 
     get_scan_matching_inputs = subparsers.add_parser("get-scan-matching-inputs")
     get_scan_matching_inputs.add_argument("--scan-id", required=True)

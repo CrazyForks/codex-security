@@ -2140,6 +2140,25 @@ async function matchAllScans(
   force: boolean,
   onWarning?: (warning: string) => void,
 ): Promise<JsonObject> {
+  const temporary = await mkdtemp(join(tmpdir(), "codex-security-matching-"));
+  try {
+    return await matchAllScansFromSnapshot(
+      dependencies,
+      force,
+      join(temporary, "scan-ids.json"),
+      onWarning,
+    );
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+}
+
+async function matchAllScansFromSnapshot(
+  dependencies: CliDependencies,
+  force: boolean,
+  scanSnapshot: string,
+  onWarning?: (warning: string) => void,
+): Promise<JsonObject> {
   let repository = dependencies.currentDirectory();
   let scanCount = 0;
   let unavailableScans = 0;
@@ -2150,7 +2169,6 @@ async function matchAllScans(
   let firstFailure: unknown;
   let offset = 0;
   let firstPage = true;
-  const completedBefore = new Date().toISOString();
   let pendingPairs: MatchingPair[] = [];
   const matchPendingPairs = async (): Promise<void> => {
     if (pendingPairs.length === 0) return;
@@ -2201,8 +2219,8 @@ async function matchAllScans(
       dependencies.currentDirectory(),
       "--offset",
       String(offset),
-      "--completed-before",
-      completedBefore,
+      "--scan-snapshot",
+      scanSnapshot,
       ...(force ? ["--force"] : []),
     ])) as MatchingPlanPage;
     if (firstPage) {
@@ -2392,6 +2410,12 @@ async function matchScanPairInBatches(
         },
         { allowHistoricalUncertainty: true },
       );
+      const previousMatchedBefore = new Set(
+        confirmed.flatMap(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
+      );
+      const previousMatchedAfter = new Set(
+        confirmed.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
+      );
       const matchedBefore = new Set(
         result.matches.flatMap(
           ({ beforeOccurrenceIds }) => beforeOccurrenceIds,
@@ -2410,6 +2434,12 @@ async function matchScanPairInBatches(
       }
       confirmed.push(...result.matches);
       for (const candidate of result.uncertain) {
+        if (
+          previousMatchedBefore.has(candidate.beforeOccurrenceId) ||
+          previousMatchedAfter.has(candidate.afterOccurrenceId)
+        ) {
+          continue;
+        }
         const key = JSON.stringify([
           candidate.beforeOccurrenceId,
           candidate.afterOccurrenceId,

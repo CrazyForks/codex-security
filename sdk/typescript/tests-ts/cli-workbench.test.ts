@@ -455,7 +455,7 @@ describe("CLI workbench", () => {
       "/current/repository",
       "--offset",
       "0",
-      "--completed-before",
+      "--scan-snapshot",
       expect.any(String),
       "--force",
     ]);
@@ -584,7 +584,7 @@ describe("CLI workbench", () => {
     });
   });
 
-  test("freezes completed scans and skips cached pair pages in one workbench call", () => {
+  test("snapshots completed scan identities and skips cached pair pages", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const result = spawnSync(
@@ -594,7 +594,7 @@ describe("CLI workbench", () => {
         "-B",
         "-c",
         [
-          "import argparse, sqlite3, sys",
+          "import argparse, os, sqlite3, sys, tempfile",
           "sys.path.insert(0, sys.argv[1])",
           "from workbench_scan_history import list_unmatched_scan_pairs",
           "connection = sqlite3.connect(':memory:')",
@@ -604,16 +604,21 @@ describe("CLI workbench", () => {
           "connection.executemany('INSERT INTO scans VALUES (?, ?, ?, ?, ?)', scans)",
           "saved = [(before[0], after[0]) for position, after in enumerate(scans) for before in scans[:position]]",
           "connection.executemany('INSERT INTO scan_comparisons VALUES (?, ?)', saved)",
-          "connection.execute(\"INSERT INTO scans VALUES ('new-scan', '/repo', 'complete', '2025-01-01T00:00:00Z', '2027-01-01T00:00:00Z')\")",
-          "args = argparse.Namespace(repository='/repo', force=False, offset=0, completed_before='2026-06-01T00:00:00Z')",
+          "connection.execute(\"INSERT INTO scans VALUES ('prepared-scan', '/repo', 'running', '2025-01-01T00:00:00Z', '2020-01-01T00:00:00Z')\")",
+          "snapshot_directory = tempfile.TemporaryDirectory()",
+          "snapshot = os.path.join(snapshot_directory.name, 'scan-ids.json')",
+          "args = argparse.Namespace(repository='/repo', force=False, offset=0, scan_snapshot=snapshot)",
           "result = list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: {})",
           "assert result['scanCount'] == 100, result",
           "assert result['skippedPairs'] == len(saved), result",
           "assert result['pairs'] == [] and result['nextOffset'] is None, result",
+          "connection.execute(\"UPDATE scans SET status = 'complete' WHERE id = 'prepared-scan'\")",
           "connection.execute('DELETE FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?', (scans[-2][0], scans[-1][0]))",
           "result = list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: {})",
+          "assert result['scanCount'] == 100, result",
           "assert result['pairs'] == [{'beforeScanId': scans[-2][0], 'afterScanId': scans[-1][0]}], result",
           "assert result['nextOffset'] is None, result",
+          "snapshot_directory.cleanup()",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
       ],
@@ -755,78 +760,86 @@ describe("CLI workbench", () => {
     });
   });
 
-  test("drops uncertain matches superseded by a later finding page", async () => {
-    const calls: Array<readonly string[]> = [];
-    const stdout = capture();
+  test.each([false, true])(
+    "drops uncertain matches from either side of a confirmed page (confirmed first: %s)",
+    async (confirmedFirst) => {
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
 
-    expect(
-      await main(
-        ["scans", "match", "--all", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args): JsonObject => {
-            calls.push(args);
-            if (args[0] === "list-unmatched-scan-pairs") {
+      expect(
+        await main(
+          ["scans", "match", "--all", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "list-unmatched-scan-pairs") {
+                return {
+                  repository: "/repo",
+                  scanCount: 2,
+                  unavailableScans: 0,
+                  skippedPairs: 0,
+                  nextOffset: null,
+                  pairs: [{ beforeScanId: "before", afterScanId: "after" }],
+                };
+              }
+              if (args[0] === "save-scan-comparison") return {};
+              const scanId = args[2]!;
+              const offset = Number(args[4]);
               return {
-                repository: "/repo",
-                scanCount: 2,
-                unavailableScans: 0,
-                skippedPairs: 0,
-                nextOffset: null,
-                pairs: [{ beforeScanId: "before", afterScanId: "after" }],
+                scanId,
+                findings: [
+                  {
+                    occurrenceId:
+                      scanId === "before" ? "before" : `after-${offset}`,
+                  },
+                ],
+                nextOffset: scanId === "after" && offset === 0 ? 1 : null,
+                totalFindings: scanId === "after" ? 2 : 1,
               };
-            }
-            if (args[0] === "save-scan-comparison") return {};
-            const scanId = args[2]!;
-            const offset = Number(args[4]);
-            return {
-              scanId,
-              findings: [
-                {
-                  occurrenceId:
-                    scanId === "before" ? "before" : `after-${offset}`,
-                },
-              ],
-              nextOffset: scanId === "after" && offset === 0 ? 1 : null,
-              totalFindings: scanId === "after" ? 2 : 1,
-            };
-          },
-          onMatch: async ({ after }) =>
-            after[0]!.occurrenceId === "after-0"
-              ? {
-                  matches: [],
-                  uncertain: [
-                    {
-                      beforeOccurrenceId: "before",
-                      afterOccurrenceId: "after-0",
-                      reason: "Possibly related.",
-                    },
-                  ],
-                }
-              : {
+            },
+            onMatch: async ({ after }) => {
+              const afterOccurrenceId = after[0]!.occurrenceId;
+              if ((afterOccurrenceId === "after-0") === confirmedFirst) {
+                return {
                   matches: [
                     {
                       beforeOccurrenceIds: ["before"],
-                      afterOccurrenceIds: ["after-1"],
+                      afterOccurrenceIds: [afterOccurrenceId],
                       confidence: "high",
                       reason: "Same root cause.",
                     },
                   ],
                   uncertain: [],
-                },
-        }),
-      ),
-    ).toBe(0);
+                };
+              }
+              return {
+                matches: [],
+                uncertain: [
+                  {
+                    beforeOccurrenceId: "before",
+                    afterOccurrenceId,
+                    reason: "Possibly related.",
+                  },
+                ],
+              };
+            },
+          }),
+        ),
+      ).toBe(0);
 
-    const save = calls.find(([command]) => command === "save-scan-comparison")!;
-    expect(JSON.parse(save[6]!)).toMatchObject({
-      matches: [{ beforeOccurrenceIds: ["before"] }],
-      uncertain: [],
-    });
-    expect(save).toContain("--ack-only");
-    expect(JSON.parse(stdout.text())).toMatchObject({ matchedPairs: 1 });
-  });
+      const save = calls.find(
+        ([command]) => command === "save-scan-comparison",
+      )!;
+      expect(JSON.parse(save[6]!)).toMatchObject({
+        matches: [{ beforeOccurrenceIds: ["before"] }],
+        uncertain: [],
+      });
+      expect(save).toContain("--ack-only");
+      expect(JSON.parse(stdout.text())).toMatchObject({ matchedPairs: 1 });
+    },
+  );
 
   test("rejects oversized accumulated match-all results before persistence", async () => {
     const calls: Array<readonly string[]> = [];
