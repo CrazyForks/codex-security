@@ -154,6 +154,7 @@ RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
 MAX_SCOPE_COVERAGE_BYTES = MAX_SCOPE_INVENTORY_BYTES
 MAX_SCOPE_REVIEW_BYTES = MAX_SCOPE_COVERAGE_BYTES + MAX_SCOPE_INVENTORY_FILES * 128
+MAX_SCOPE_SOURCE_BYTES = 512 * 1024 * 1024
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
 RankWorkerAssignment = tuple[int, list[str], list[str]]
@@ -801,6 +802,7 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
 
     paths: dict[str, str] = {}
     inventory_bytes = 0
+    source_bytes = 0
     for scope_abs in resolved_scopes:
         scope_root = scope_abs if scope_abs.is_dir() else scope_abs.parent
         pending: list[tuple[Path, Iterator[Path]]] = [
@@ -890,9 +892,20 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                         )
                     if relative_path in paths:
                         continue
+                    if source_bytes + path.stat().st_size > MAX_SCOPE_SOURCE_BYTES:
+                        raise SystemExit(
+                            "Exceeded the standard scan scope source byte limit: "
+                            + relative_path
+                        )
                     digest = hashlib.sha256()
                     with path.open("rb") as contents:
                         for chunk in iter(lambda: contents.read(1024 * 1024), b""):
+                            source_bytes += len(chunk)
+                            if source_bytes > MAX_SCOPE_SOURCE_BYTES:
+                                raise SystemExit(
+                                    "Exceeded the standard scan scope source byte limit: "
+                                    + relative_path
+                                )
                             digest.update(chunk)
                     row = {"path": relative_path, "sha256": digest.hexdigest()}
                     row_bytes = len(
@@ -909,6 +922,11 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                         raise SystemExit("Exceeded the standard scan scope inventory limit")
                     paths[relative_path] = row["sha256"]
                     inventory_bytes += row_bytes
+                else:
+                    raise SystemExit(
+                        "Unsupported non-regular standard scan scope entry: "
+                        + relative.as_posix()
+                    )
             except (OSError, ValueError) as exc:
                 raise SystemExit(f"Unable to safely inventory scope path: {path}") from exc
 

@@ -3444,6 +3444,69 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  test("bounds source hashing before reading oversized scope files", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const source = join(repository, "oversized.ts");
+    const output = join(root, "inventory.jsonl");
+    await mkdir(repository);
+    await writeFile(source, "");
+    await truncate(source, 512 * 1024 * 1024 + 1);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--out",
+        output,
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("standard scan scope source byte limit");
+    expect(existsSync(output)).toBe(false);
+  });
+
+  testPosix("rejects unsupported non-regular scope entries", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const fifo = join(repository, "unaccounted.pipe");
+    const output = join(root, "inventory.jsonl");
+    await mkdir(repository);
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--out",
+        output,
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "Unsupported non-regular standard scan scope entry: unaccounted.pipe",
+    );
+    expect(existsSync(output)).toBe(false);
+  });
+
   test("rejects oversized or substituted standard inventories after attestation", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
