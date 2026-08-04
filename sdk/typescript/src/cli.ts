@@ -85,6 +85,7 @@ import {
   type ScanComparisonInput,
 } from "./scan-comparison.js";
 import {
+  checkoutScans,
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
@@ -732,47 +733,6 @@ export async function main(
         ]);
       },
     );
-  const checkoutScans = (
-    scans: readonly JsonObject[],
-    directory: string,
-  ): JsonObject[] => {
-    let containingPath: string | undefined;
-    let descendantPath: string | undefined;
-    for (const scan of scans) {
-      const targetPath = scan["targetPath"];
-      if (typeof targetPath !== "string") continue;
-      const checkoutRelative = relative(targetPath, directory);
-      const targetRelative = relative(directory, targetPath);
-      const outsideTarget =
-        checkoutRelative === ".." ||
-        checkoutRelative.startsWith(`..${sep}`) ||
-        isAbsolute(checkoutRelative);
-      const outsideDirectory =
-        targetRelative === ".." ||
-        targetRelative.startsWith(`..${sep}`) ||
-        isAbsolute(targetRelative);
-      if (outsideTarget && outsideDirectory) {
-        continue;
-      }
-      if (!outsideTarget) {
-        if (
-          containingPath === undefined ||
-          targetPath.length > containingPath.length
-        ) {
-          containingPath = targetPath;
-        }
-      } else if (
-        descendantPath === undefined ||
-        targetPath.length < descendantPath.length
-      ) {
-        descendantPath = targetPath;
-      }
-    }
-    const checkoutPath = containingPath ?? descendantPath;
-    return checkoutPath === undefined
-      ? []
-      : scans.filter((scan) => scan["targetPath"] === checkoutPath);
-  };
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -877,6 +837,7 @@ export async function main(
           : dependencies.currentDirectory();
         let targetId: string | undefined;
         let targetPath: string | undefined;
+        let targetPaths: string[] | undefined;
         if (repository !== undefined) {
           const result = await history([
             "list-scans",
@@ -888,20 +849,31 @@ export async function main(
             result["scans"] as JsonObject[],
             repository,
           );
-          const target = scans.find(
-            (scan) => typeof scan["targetId"] === "string",
-          );
-          const candidateTargetId = target?.["targetId"];
-          targetId =
-            typeof candidateTargetId === "string"
-              ? candidateTargetId
-              : undefined;
-          const candidateTargetPath = scans[0]?.["targetPath"];
-          targetPath =
-            targetId === undefined && typeof candidateTargetPath === "string"
-              ? candidateTargetPath
-              : undefined;
-          if (targetId === undefined && targetPath === undefined) {
+          const scannedPaths = new Set(scans.map((scan) => scan["targetPath"]));
+          if (scannedPaths.size > 1) {
+            targetPaths = [...scannedPaths].filter(
+              (path): path is string => typeof path === "string",
+            );
+          } else {
+            const target = scans.find(
+              (scan) => typeof scan["targetId"] === "string",
+            );
+            const candidateTargetId = target?.["targetId"];
+            targetId =
+              typeof candidateTargetId === "string"
+                ? candidateTargetId
+                : undefined;
+            const candidateTargetPath = scans[0]?.["targetPath"];
+            targetPath =
+              targetId === undefined && typeof candidateTargetPath === "string"
+                ? candidateTargetPath
+                : undefined;
+          }
+          if (
+            targetId === undefined &&
+            targetPath === undefined &&
+            targetPaths === undefined
+          ) {
             return presentHistory(
               {
                 findings: [],
@@ -920,6 +892,7 @@ export async function main(
             "list-global-findings",
             ...(targetId === undefined ? [] : ["--target-id", targetId]),
             ...(targetPath === undefined ? [] : ["--target-path", targetPath]),
+            ...(targetPaths ?? []).flatMap((path) => ["--target-path", path]),
             ...filters,
           ]),
           "findings",
@@ -947,6 +920,7 @@ export async function main(
             ["get-finding", "--occurrence-id", args.occurrenceId],
             ({ scan }) => {
               const result = scan as JsonObject;
+              const scanDir = result["scanDir"];
               const scanId = result["scanId"];
               const targetPath = result["targetPath"];
               const finding = (result["findings"] as JsonObject[]).find(
@@ -963,6 +937,7 @@ export async function main(
               }
               return {
                 ...finding,
+                ...(typeof scanDir === "string" ? { scanDir } : {}),
                 scanId,
                 targetPath,
               };

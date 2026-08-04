@@ -299,6 +299,76 @@ describe("CLI findings history", () => {
     }
   });
 
+  test("includes every scanned subdirectory when the checkout has no root scan", async () => {
+    for (const command of [["findings"], ["scans", "show"]]) {
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      expect(
+        await main(
+          [...command, "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [
+                    {
+                      scanId: "newer-long-service",
+                      targetId: "long-target",
+                      targetPath: "/current/repository/long-service",
+                      completedAt: "2026-08-03T12:00:00Z",
+                      progress: { status: "complete" },
+                    },
+                    {
+                      scanId: "older-short-service",
+                      targetId: "short-target",
+                      targetPath: "/current/repository/a",
+                      completedAt: "2026-08-02T12:00:00Z",
+                      progress: { status: "complete" },
+                    },
+                  ],
+                };
+              }
+              return args[0] === "get-scan"
+                ? { scan: { scanId: "newer-long-service", findings: [] } }
+                : {
+                    findings: [
+                      { occurrenceId: "critical-long-service" },
+                      { occurrenceId: "older-short-service" },
+                    ],
+                    limit: 20,
+                    nextOffset: null,
+                    offset: 0,
+                  };
+            },
+          }),
+        ),
+      ).toBe(0);
+      if (command[0] === "findings") {
+        expect(calls[1]).toEqual([
+          "list-global-findings",
+          "--target-path",
+          "/current/repository/long-service",
+          "--target-path",
+          "/current/repository/a",
+          "--offset",
+          "0",
+          "--limit",
+          "20",
+        ]);
+        expect(JSON.parse(stdout.text())["findings"]).toHaveLength(2);
+      } else {
+        expect(calls[1]).toEqual([
+          "get-scan",
+          "--scan-id",
+          "newer-long-service",
+        ]);
+      }
+    }
+  });
+
   test("does not display a sibling checkout when this checkout has no scans", async () => {
     const calls: Array<readonly string[]> = [];
     const stdout = capture();
@@ -495,6 +565,7 @@ describe("CLI findings history", () => {
             return {
               scan: {
                 scanId: "31107fbe-full",
+                scanDir: "/private/results/31107fbe-full",
                 targetPath: "/current/repository",
                 findings: [
                   { occurrenceId: "occ-other", title: "Unrelated finding" },
@@ -509,6 +580,7 @@ describe("CLI findings history", () => {
     expect(calls).toEqual([["get-finding", "--occurrence-id", "occ-25"]]);
     expect(JSON.parse(stdout.text())).toEqual({
       ...selected,
+      scanDir: "/private/results/31107fbe-full",
       scanId: "31107fbe-full",
       targetPath: "/current/repository",
     });

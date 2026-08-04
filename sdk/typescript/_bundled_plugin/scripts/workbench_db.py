@@ -3160,12 +3160,10 @@ def finding_result(
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
     *,
-    include_remediation_details: bool = False,
+    full_details: bool = False,
 ) -> dict[str, Any]:
-    details = bounded_finding_details(
-        read_finding_details(occurrence["details_json"]),
-        include_remediation=include_remediation_details,
-    )
+    stored_details = read_finding_details(occurrence["details_json"])
+    details = stored_details if full_details else bounded_finding_details(stored_details)
     confidence = details.get("confidence")
     confidence = confidence if isinstance(confidence, dict) else {}
     severity = details.get("severity")
@@ -3183,7 +3181,7 @@ def finding_result(
         ORDER BY CASE WHEN role = 'root_control' THEN 0 ELSE 1 END, sort_order
         LIMIT ?
         """,
-        (occurrence["id"], FINDING_LOCATIONS_LIMIT),
+        (occurrence["id"], -1 if full_details else FINDING_LOCATIONS_LIMIT),
     ):
         absolute_path = safe_source_path(target, row["relative_path"]) if target else None
         location = {
@@ -3229,6 +3227,7 @@ def finding_result(
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
     result.pop("artifactPaths", None)
+    result.pop("sourceExcerpt", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt
@@ -3626,10 +3625,9 @@ def main() -> None:
             result = {
                 "scan": {
                     "findings": [
-                        finding_result(
-                            connection, scan, occurrence, include_remediation_details=True
-                        )
+                        finding_result(connection, scan, occurrence, full_details=True)
                     ],
+                    "scanDir": scan["scan_dir"],
                     "scanId": scan["id"],
                     "targetPath": scan["target_path"],
                 }

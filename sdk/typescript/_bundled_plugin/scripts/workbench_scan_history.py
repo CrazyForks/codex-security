@@ -154,6 +154,12 @@ def list_scans(
         checkout_boundary = (
             Path(repository_root).resolve() if repository_root is not None else None
         )
+        if checkout_boundary is None:
+            for candidate in (repository, *repository.parents):
+                marker = candidate / ".git"
+                if marker.is_dir() or marker.is_file() or marker.is_symlink():
+                    checkout_boundary = candidate
+                    break
         repository_paths = [str(repository)]
         registered_repository = requested_repository["target_id"] or connection.execute(
             "SELECT 1 FROM scans WHERE target_path = ? LIMIT 1", (str(repository),)

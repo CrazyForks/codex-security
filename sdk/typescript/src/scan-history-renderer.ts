@@ -1,4 +1,4 @@
-import { basename, relative } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
@@ -55,6 +55,47 @@ function findingSeverity(finding: JsonObject): string {
   return clean(
     typeof severity === "string" ? severity : (severity as JsonObject)["level"],
   ).toUpperCase();
+}
+
+export function checkoutScans(
+  scans: readonly JsonObject[],
+  directory: string,
+): JsonObject[] {
+  let containingPath: string | undefined;
+  const descendants = new Set<string>();
+  for (const scan of scans) {
+    const targetPath = scan["targetPath"];
+    if (typeof targetPath !== "string") continue;
+    const checkoutRelative = relative(targetPath, directory);
+    const targetRelative = relative(directory, targetPath);
+    const outsideTarget =
+      checkoutRelative === ".." ||
+      checkoutRelative.startsWith(`..${sep}`) ||
+      isAbsolute(checkoutRelative);
+    const outsideDirectory =
+      targetRelative === ".." ||
+      targetRelative.startsWith(`..${sep}`) ||
+      isAbsolute(targetRelative);
+    if (!outsideTarget) {
+      if (
+        containingPath === undefined ||
+        targetPath.length > containingPath.length
+      ) {
+        containingPath = targetPath;
+      }
+    } else if (!outsideDirectory) {
+      descendants.add(targetPath);
+    }
+  }
+  return scans.filter((scan) => {
+    const targetPath = scan["targetPath"];
+    return (
+      typeof targetPath === "string" &&
+      (containingPath === undefined
+        ? descendants.has(targetPath)
+        : targetPath === containingPath)
+    );
+  });
 }
 
 export function renderScanHistory(
@@ -285,16 +326,72 @@ export function renderScanHistory(
       ["VALIDATION", "validation"],
       ["ATTACK PATH", "attackPath"],
     ] as const) {
-      const detail = description(result[key]);
-      if (detail !== undefined) {
+      const value = result[key];
+      const detail = description(value);
+      const sections = detail === undefined ? [] : [detail];
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        if (key === "validation") {
+          if (typeof value["method"] === "string") {
+            sections.push(`Method: ${value["method"]}`);
+          }
+          const assertions = value["assertions"];
+          if (Array.isArray(assertions)) {
+            sections.push(
+              ...assertions
+                .filter(
+                  (assertion): assertion is string =>
+                    typeof assertion === "string",
+                )
+                .map((assertion) => `Verified: ${assertion}`),
+            );
+          }
+        }
+        if (key === "attackPath") {
+          for (const [nestedLabel, nestedKey] of [
+            ["Dataflow", "dataflow"],
+            ["Dataflow", "dataFlow"],
+            ["Reachability", "reachability"],
+            ["Impact", "impact"],
+            ["Likelihood", "likelihood"],
+          ] as const) {
+            const nested = description(value[nestedKey]);
+            if (nested !== undefined)
+              sections.push(`${nestedLabel}: ${nested}`);
+          }
+        }
+      }
+      if (sections.length > 0) {
         lines.push("", `  ${strong(label)}`);
-        wrap(detail, 4);
+        for (const section of sections) wrap(section, 4);
       }
     }
     const codeEvidence = result["codeEvidence"];
-    if (Array.isArray(codeEvidence) && codeEvidence.length > 0) {
+    const rootCause = result["rootCause"];
+    const legacyRootCode =
+      typeof rootCause === "object" &&
+      rootCause !== null &&
+      !Array.isArray(rootCause) &&
+      typeof rootCause["code"] === "string"
+        ? rootCause["code"]
+        : undefined;
+    const evidenceEntries: JsonObject[] =
+      Array.isArray(codeEvidence) && codeEvidence.length > 0
+        ? codeEvidence.filter(
+            (entry): entry is JsonObject =>
+              typeof entry === "object" &&
+              entry !== null &&
+              !Array.isArray(entry),
+          )
+        : legacyRootCode === undefined
+          ? []
+          : [{ label: "Root-cause source", code: legacyRootCode }];
+    if (evidenceEntries.length > 0) {
       lines.push("", `  ${strong("CODE EVIDENCE")}`);
-      for (const evidence of codeEvidence) {
+      for (const evidence of evidenceEntries) {
         if (
           typeof evidence !== "object" ||
           evidence === null ||
@@ -349,8 +446,12 @@ export function renderScanHistory(
     const artifactPaths = result["artifactPaths"];
     if (Array.isArray(artifactPaths) && artifactPaths.length > 0) {
       lines.push("", `  ${strong("EVIDENCE ARTIFACTS")}`);
+      const scanDirectory = result["scanDir"];
       for (const path of artifactPaths) {
-        if (typeof path === "string") lines.push(`    ${dim(clean(path))}`);
+        if (typeof path !== "string") continue;
+        const artifactPath =
+          typeof scanDirectory === "string" ? join(scanDirectory, path) : path;
+        lines.push(`    ${dim(clean(artifactPath))}`);
       }
     }
     if (typeof result["occurrenceId"] === "string") {
@@ -378,7 +479,11 @@ export function renderScanHistory(
           "",
       ),
     );
-    const completed = scans
+    const scopedScans =
+      options.repository === undefined
+        ? scans
+        : checkoutScans(scans, options.repository);
+    const completed = scopedScans
       .filter(
         (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
       )

@@ -51,7 +51,7 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
-  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetId'), target_path=settings.get('targetPath'), offset=0, limit=20)",
+  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), offset=0, limit=20)",
   "result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
   "print(json.dumps({'findings': result['findings'], 'coverageReads': coverage_reads}))",
 ].join("\n");
@@ -62,6 +62,7 @@ const nestedDirectoryScanProbe = [
   "from workbench_db import apply_migrations",
   "from workbench_scan_history import list_scans",
   "from workbench_target_state import ensure_security_target",
+  "from unittest.mock import patch",
   "with tempfile.TemporaryDirectory(prefix='codex-security-unversioned-scan-') as directory:",
   "    root = (pathlib.Path(directory) / 'plain-directory').resolve()",
   "    nested = root / 'src' / 'nested'",
@@ -88,21 +89,46 @@ const nestedDirectoryScanProbe = [
   "    for label, path in [('root', root), ('nested', nested), ('independentGit', independent), ('nestedIndependentGit', independent_nested), ('independentService', service), ('nestedIndependentService', nested_service)]:",
   "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    with patch('workbench_scan_history.git_output', return_value=None):",
+  "        for label, path in [('independentGitWithoutGit', independent), ('nestedIndependentGitWithoutGit', independent_nested)]:",
+  "            args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "            output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
   "    print(json.dumps(output))",
 ].join("\n");
 
 const findingDetailProbe = [
-  "import json, sys",
+  "import json, pathlib, sqlite3, sys, tempfile",
   "sys.path.insert(0, sys.argv[1])",
-  "from finding_preview import bounded_finding_details",
-  "finding = {'rootCause': {'summary': 'Missing authorization'}, 'remediationTests': ['Reject a cross-account request.'], 'preventiveControls': ['Centralize account authorization.']}",
-  "print(json.dumps({'preview': bounded_finding_details(finding), 'detail': bounded_finding_details(finding, include_remediation=True)}))",
+  "from workbench_db import apply_migrations, finding_result",
+  "from workbench_target_state import ensure_security_target",
+  "with tempfile.TemporaryDirectory(prefix='codex-security-complete-finding-') as directory:",
+  "    root = pathlib.Path(directory) / 'checkout'",
+  "    root.mkdir()",
+  "    connection = sqlite3.connect(':memory:')",
+  "    connection.row_factory = sqlite3.Row",
+  "    apply_migrations(connection)",
+  "    timestamp = '2026-08-03T12:00:00Z'",
+  "    target = ensure_security_target(connection, str(root))",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('workspace', target, str(root), timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('scan', 'workspace', target, str(root), 'unversioned', '.', 'standard', directory + '/results', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('scan', timestamp))",
+  "    connection.execute('INSERT INTO findings(id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', ('finding', 'fingerprint', 'rule', 'anchor', timestamp, timestamp))",
+  "    details = {'fingerprints': {'algorithm': 'codex-security/v1', 'primary': 'fingerprint'}, 'rootCause': {'summary': 'Missing authorization', 'evidenceRefs': [f'evidence-{index}' for index in range(5)]}, 'codeEvidence': [{'id': f'evidence-{index}', 'label': f'Source {index}', 'path': f'src/{index}.py', 'startLine': index + 1, 'code': f'unsafe_{index}()', 'explanation': 'Untrusted source.'} for index in range(5)], 'attackPath': {'dataflow': {'evidenceRefs': ['evidence-4'], 'summary': 'Attacker input reaches the sink.'}}, 'confidence': {'level': 'high', 'rationale': 'Confirmed with live replay.'}, 'severity': {'level': 'high', 'rationale': 'Cross-account disclosure.'}, 'remediationTests': ['Reject a cross-account request.'], 'preventiveControls': ['Centralize account authorization.'], 'sourceExcerpt': 'forged excerpt', 'artifactPaths': ['/untrusted/forged-artifact']}",
+  "    connection.execute('INSERT INTO finding_occurrences(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('occurrence', 'finding', 'scan', 'Missing authorization', 'Cross-account access', 'high', 'high', 'Enforce account ownership.', json.dumps(details), timestamp))",
+  "    for index in range(9):",
+  "        connection.execute('INSERT INTO finding_locations(occurrence_id, relative_path, start_line, end_line, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)', ('occurrence', f'src/{index}.py', index + 1, index + 1, 'root_control' if index == 0 else 'sink', index))",
+  "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
+  "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
+  "    preview = finding_result(connection, scan, occurrence)",
+  "    detail = finding_result(connection, scan, occurrence, full_details=True)",
+  "    print(json.dumps({'preview': {'evidenceCount': len(preview['codeEvidence']), 'locationCount': len(preview['locations']), 'hasFingerprints': 'fingerprints' in preview, 'hasRemediationTests': 'remediationTests' in preview}, 'detail': {'evidenceCount': len(detail['codeEvidence']), 'locationCount': len(detail['locations']), 'fingerprints': detail['fingerprints'], 'evidenceRefs': detail['rootCause']['evidenceRefs'], 'nestedEvidenceRefs': detail['attackPath']['dataflow']['evidenceRefs'], 'confidenceRationale': detail['confidence']['rationale'], 'severityRationale': detail['severity']['rationale'], 'remediationTests': detail['remediationTests'], 'preventiveControls': detail['preventiveControls'], 'artifactPaths': detail['artifactPaths'], 'hasForgedExcerpt': detail.get('sourceExcerpt') == 'forged excerpt'}}))",
 ].join("\n");
 
 function runFindingsIndex(
   targetId: string | null,
   settings: {
     targetPath?: string;
+    targetPaths?: string[];
     query?: string;
     coverageFailure?: "tampered" | "noncanonical";
   } = {},
@@ -130,7 +156,11 @@ function runFindingsIndex(
 
 function probeFindingsIndex(
   targetId: string | null,
-  settings: { targetPath?: string; query?: string } = {},
+  settings: {
+    targetPath?: string;
+    targetPaths?: string[];
+    query?: string;
+  } = {},
 ): {
   findings: Array<{
     occurrenceId: string;
@@ -196,6 +226,24 @@ describe("workbench findings index", () => {
     expect(result.coverageReads).toEqual(["orphan-new"]);
   });
 
+  test("keeps multi-target repository queries inside the selected checkout", () => {
+    const scoped = probeFindingsIndex(null, {
+      targetPaths: ["/current/repository", "/orphan/repository"],
+    });
+    expect(scoped.findings.map((finding) => finding.occurrenceId)).toEqual([
+      "current-new-occurrence",
+      "orphan-old-occurrence",
+      "orphan-new-occurrence",
+    ]);
+    expect(scoped.coverageReads).toEqual(["current-new", "orphan-new"]);
+
+    const siblingPrefix = probeFindingsIndex(null, {
+      targetPaths: ["/current/repositor"],
+    });
+    expect(siblingPrefix.findings).toEqual([]);
+    expect(siblingPrefix.coverageReads).toEqual([]);
+  });
+
   test("searches secondary finding source locations", () => {
     const result = probeFindingsIndex("current-target", {
       query: "SECONDARY.PY",
@@ -248,10 +296,12 @@ describe("workbench findings index", () => {
       nestedIndependentGit: [],
       independentService: ["independent-service-scan"],
       nestedIndependentService: ["independent-service-scan"],
+      independentGitWithoutGit: [],
+      nestedIndependentGitWithoutGit: [],
     });
   });
 
-  test("preserves remediation guidance only in dedicated finding details", () => {
+  test("returns complete evidence and locations only in dedicated finding details", () => {
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(python).not.toBeNull();
@@ -272,11 +322,33 @@ describe("workbench findings index", () => {
     expect(new TextDecoder().decode(result.stderr)).toBe("");
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
-      preview: { rootCause: { summary: "Missing authorization" } },
+      preview: {
+        evidenceCount: 4,
+        locationCount: 8,
+        hasFingerprints: false,
+        hasRemediationTests: false,
+      },
       detail: {
-        rootCause: { summary: "Missing authorization" },
+        evidenceCount: 5,
+        locationCount: 9,
+        fingerprints: {
+          algorithm: "codex-security/v1",
+          primary: "fingerprint",
+        },
+        evidenceRefs: [
+          "evidence-0",
+          "evidence-1",
+          "evidence-2",
+          "evidence-3",
+          "evidence-4",
+        ],
+        nestedEvidenceRefs: ["evidence-4"],
+        confidenceRationale: "Confirmed with live replay.",
+        severityRationale: "Cross-account disclosure.",
         remediationTests: ["Reject a cross-account request."],
         preventiveControls: ["Centralize account authorization."],
+        artifactPaths: [],
+        hasForgedExcerpt: false,
       },
     });
   });

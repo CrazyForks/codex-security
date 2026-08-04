@@ -229,6 +229,7 @@ describe("scan history renderer", () => {
       renderScanHistory(
         {
           scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+          scanDir: "/private/codex-security/scan-results",
           targetPath: "/demo/juice-shop",
           occurrenceId: "occ_saved_finding_25",
           severity: { level: "high" },
@@ -307,10 +308,56 @@ describe("scan history renderer", () => {
       "PREVENTIVE CONTROLS",
       "Require the parameterized-query wrapper.",
       "EVIDENCE ARTIFACTS",
-      "findings/login-injection/report.md",
+      "/private/codex-security/scan-results/findings/login-injection/report.md",
       "findings false-positive occ_saved_finding_25 --reason TEXT",
     ]) {
       expect(detail).toContain(expected);
+    }
+  });
+
+  test("renders structured validation, nested attack paths, and legacy source proof", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "legacy-scan",
+          targetPath: "/demo/legacy-service",
+          occurrenceId: "legacy-occurrence",
+          severity: { level: "high" },
+          title: "Unsafe legacy query",
+          locations: [{ path: "src/query.py", startLine: 12 }],
+          rootCause: {
+            summary: "The query accepts untrusted input.",
+            language: "python",
+            code: "execute(untrusted_query)",
+          },
+          validation: {
+            method: "live replay",
+            assertions: ["A cross-account record was returned."],
+          },
+          attackPath: {
+            dataflow: { summary: "Request input reaches the SQL executor." },
+            reachability: {
+              summary: "An unauthenticated caller reaches the endpoint.",
+            },
+          },
+          remediation: "Parameterize the database query.",
+        },
+        "finding",
+      ),
+    );
+
+    for (const expected of [
+      "VALIDATION",
+      "Method: live replay",
+      "Verified: A cross-account record was returned.",
+      "ATTACK PATH",
+      "Dataflow: Request input reaches the SQL executor.",
+      "Reachability: An unauthenticated caller reaches the endpoint.",
+      "CODE EVIDENCE",
+      "Root-cause source",
+      "execute(untrusted_query)",
+    ]) {
+      expect(output).toContain(expected);
     }
   });
 
@@ -415,6 +462,41 @@ describe("scan history renderer", () => {
     );
     expect(ancestor).toContain(
       "FINDINGS     codex-security findings list --scan aaaaaaaa",
+    );
+
+    const sibling = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              ...scan,
+              scanId: "bbbbbbbb-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/another-checkout",
+              findingCount: 8,
+              completedAt: "2026-08-03T12:00:00Z",
+            },
+            {
+              ...scan,
+              scanId: "cccccccc-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/current-checkout",
+              findingCount: 2,
+              completedAt: "2026-08-02T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        {
+          currentDirectory: "/demo/current-checkout",
+          repository: "/demo/current-checkout",
+        },
+      ),
+    );
+    expect(sibling).toContain("latest: 2 findings");
+    expect(sibling).toContain(
+      "VIEW LATEST  codex-security scans show cccccccc",
+    );
+    expect(sibling).not.toContain(
+      "VIEW LATEST  codex-security scans show bbbbbbbb",
     );
 
     const details = stripVTControlCharacters(
