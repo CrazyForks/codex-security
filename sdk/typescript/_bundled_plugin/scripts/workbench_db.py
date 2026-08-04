@@ -3175,6 +3175,7 @@ def finding_result(
     details = dict(stored_details if full_details else bounded_finding_details(stored_details))
     for field in (
         "artifactPaths",
+        "currentTargetPath",
         "knownScanIds",
         "knownSince",
         "matches",
