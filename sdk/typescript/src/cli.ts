@@ -731,6 +731,33 @@ export async function main(
         ]);
       },
     );
+  const checkoutScans = (
+    scans: readonly JsonObject[],
+    directory: string,
+  ): JsonObject[] => {
+    let checkoutPath: string | undefined;
+    for (const scan of scans) {
+      const targetPath = scan["targetPath"];
+      if (typeof targetPath !== "string") continue;
+      const checkoutRelative = relative(targetPath, directory);
+      if (
+        checkoutRelative === ".." ||
+        checkoutRelative.startsWith(`..${sep}`) ||
+        isAbsolute(checkoutRelative)
+      ) {
+        continue;
+      }
+      if (
+        checkoutPath === undefined ||
+        targetPath.length > checkoutPath.length
+      ) {
+        checkoutPath = targetPath;
+      }
+    }
+    return checkoutPath === undefined
+      ? []
+      : scans.filter((scan) => scan["targetPath"] === checkoutPath);
+  };
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -755,6 +782,7 @@ export async function main(
         dependencies.environment["NO_COLOR"] === undefined &&
         dependencies.environment["TERM"] !== "dumb",
       now: dependencies.now(),
+      currentDirectory: dependencies.currentDirectory(),
       repository: settings.repository,
       scanRoot: settings.scanRoot,
       showLinkedFindings: settings.showLinkedFindings,
@@ -833,6 +861,7 @@ export async function main(
           ? undefined
           : dependencies.currentDirectory();
         let targetId: string | undefined;
+        let targetPath: string | undefined;
         if (repository !== undefined) {
           const result = await history([
             "list-scans",
@@ -840,34 +869,24 @@ export async function main(
             repository,
           ]);
           if (result === undefined) return undefined;
-          const scans = result["scans"] as JsonObject[];
-          const target = scans.find(
-            (scan) =>
-              scan["targetPath"] === repository &&
-              typeof scan["targetId"] === "string",
+          const scans = checkoutScans(
+            result["scans"] as JsonObject[],
+            repository,
           );
-          const candidateTargetId = (target ?? scans[0])?.["targetId"];
+          const target = scans.find(
+            (scan) => typeof scan["targetId"] === "string",
+          );
+          const candidateTargetId = target?.["targetId"];
           targetId =
             typeof candidateTargetId === "string"
               ? candidateTargetId
               : undefined;
-          if (targetId === undefined) {
-            const scanId = scans.find(
-              (scan) =>
-                (scan["progress"] as JsonObject | undefined)?.["status"] ===
-                "complete",
-            )?.["scanId"];
-            if (typeof scanId === "string") {
-              return presentHistory(
-                await history(
-                  ["list-findings", "--scan-id", scanId, ...filters],
-                  ({ findingsPage }) => findingsPage as JsonObject,
-                ),
-                "findings",
-                format,
-                { repository },
-              );
-            }
+          const candidateTargetPath = scans[0]?.["targetPath"];
+          targetPath =
+            targetId === undefined && typeof candidateTargetPath === "string"
+              ? candidateTargetPath
+              : undefined;
+          if (targetId === undefined && targetPath === undefined) {
             return presentHistory(
               {
                 findings: [],
@@ -885,6 +904,7 @@ export async function main(
           await history([
             "list-global-findings",
             ...(targetId === undefined ? [] : ["--target-id", targetId]),
+            ...(targetPath === undefined ? [] : ["--target-path", targetPath]),
             ...filters,
           ]),
           "findings",
@@ -1049,11 +1069,22 @@ export async function main(
           const latest = await history(
             ["list-scans", "--repository", repository],
             ({ scans }) => {
-              const scan = (scans as JsonObject[]).find(
-                (entry) =>
-                  (entry["progress"] as JsonObject | undefined)?.["status"] ===
-                  "complete",
-              );
+              const scan = checkoutScans(scans as JsonObject[], repository)
+                .filter(
+                  (entry) =>
+                    (entry["progress"] as JsonObject | undefined)?.[
+                      "status"
+                    ] === "complete",
+                )
+                .sort((left, right) => {
+                  const leftCompleted = String(
+                    left["completedAt"] ?? left["startedAt"] ?? "",
+                  );
+                  const rightCompleted = String(
+                    right["completedAt"] ?? right["startedAt"] ?? "",
+                  );
+                  return rightCompleted.localeCompare(leftCompleted);
+                })[0];
               if (typeof scan?.["scanId"] !== "string") {
                 throw new CodexSecurityError(
                   `No completed scans found for ${repository}. Run 'codex-security scan .' first.`,

@@ -1,4 +1,4 @@
-import { basename, relative } from "node:path";
+import { basename, isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
@@ -12,6 +12,7 @@ type RendererOptions = {
   columns?: number;
   color?: boolean;
   now?: number;
+  currentDirectory?: string;
   repository?: string;
   scanRoot?: string;
   showLinkedFindings?: boolean;
@@ -68,6 +69,20 @@ export function renderScanHistory(
   const dim = (value: string): string => paint(value, 90);
   const strong = (value: string): string => paint(value, 1);
   const accent = (value: string): string => paint(value, 36);
+  const isCurrentCheckout = (targetPath: unknown): boolean => {
+    if (
+      typeof targetPath !== "string" ||
+      options.currentDirectory === undefined
+    ) {
+      return true;
+    }
+    const checkoutRelative = relative(targetPath, options.currentDirectory);
+    return (
+      checkoutRelative !== ".." &&
+      !checkoutRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(checkoutRelative)
+    );
+  };
   const labels: Record<HistoryCommand, string> = {
     list: "SCAN HISTORY",
     show: "SCAN DETAILS",
@@ -139,6 +154,11 @@ export function renderScanHistory(
         ...(status ? [strong(clean(status).toUpperCase())] : []),
         ...(command === "findings" && scanId
           ? [`${strong("SCAN")} ${clean(scanId).slice(0, 8)}`]
+          : []),
+        ...(command === "findings" &&
+        options.repository === undefined &&
+        typeof entry["targetPath"] === "string"
+          ? [`${strong("REPOSITORY")} ${clean(entry["targetPath"])}`]
           : []),
         ...(typeof occurrenceCount === "number" && occurrenceCount > 1
           ? [`${clean(occurrenceCount)} scans`]
@@ -298,15 +318,29 @@ export function renderScanHistory(
         );
       }
     }
-    const completed = scans.filter(
-      (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
-    );
+    const completed = scans
+      .filter(
+        (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
+      )
+      .sort((left, right) => {
+        const leftCompleted = String(
+          left["completedAt"] ?? left["startedAt"] ?? "",
+        );
+        const rightCompleted = String(
+          right["completedAt"] ?? right["startedAt"] ?? "",
+        );
+        return rightCompleted.localeCompare(leftCompleted);
+      });
     if (completed.length > 0) {
       const latest = completed[0]!;
+      const scanPrefix = clean(latest["scanId"]).slice(0, 8);
+      const scanQualifiedFindings =
+        options.scanRoot !== undefined ||
+        !isCurrentCheckout(latest["targetPath"]);
       lines.push(
         "",
-        `  ${strong("VIEW LATEST")}  codex-security scans show ${clean(latest["scanId"]).slice(0, 8)}`,
-        `  ${strong("FINDINGS")}     codex-security findings list`,
+        `  ${strong("VIEW LATEST")}  codex-security scans show ${scanPrefix}`,
+        `  ${strong("FINDINGS")}     codex-security findings list${scanQualifiedFindings ? ` --scan ${scanPrefix}` : ""}`,
       );
       const previous = completed
         .slice(1)
@@ -446,9 +480,13 @@ export function renderScanHistory(
           `  ${strong("FINDING HISTORY")}  codex-security scans show ${clean(result["scanId"]).slice(0, 8)} --show-linked-findings`,
         );
       } else if (!linked && options.showLinkedFindings) {
+        const matchingRepository = result["targetPath"];
+        const repositoryContext = isCurrentCheckout(matchingRepository)
+          ? "run"
+          : `from ${clean(matchingRepository)}, run`;
         lines.push(
           "",
-          `  ${strong("FINDING HISTORY")}  No saved links; run codex-security scans match --all (uses Codex).`,
+          `  ${strong("FINDING HISTORY")}  No saved links; ${repositoryContext} codex-security scans match --all (uses Codex).`,
         );
       }
     }

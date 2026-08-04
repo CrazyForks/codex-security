@@ -24,10 +24,17 @@ def list_global_findings(
 ) -> dict[str, Any]:
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
+    target_path = getattr(args, "target_path", None)
     findings = (
         row
-        for row in _active_findings(connection, read_coverage, target_id=args.target_id)
+        for row in _active_findings(
+            connection,
+            read_coverage,
+            target_id=args.target_id,
+            target_path=target_path,
+        )
         if (args.target_id is None or row["target_id"] == args.target_id)
+        and (target_path is None or row["target_path"] == target_path)
         and (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
@@ -41,6 +48,13 @@ def list_global_findings(
                     row["location_path"],
                 )
                 if value is not None
+            )
+            or any(
+                query in location["relative_path"].casefold()
+                for location in connection.execute(
+                    "SELECT relative_path FROM finding_locations WHERE occurrence_id = ?",
+                    (row["occurrence_id"],),
+                )
             )
         )
     )
@@ -77,15 +91,23 @@ def _active_findings(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
     *,
     target_id: str | None = None,
+    target_path: str | None = None,
 ) -> Iterator[sqlite3.Row]:
-    target_filter = "AND targets.id = ?" if target_id is not None else ""
-    target_values = (target_id,) if target_id is not None else ()
+    target_filters = []
+    target_values = []
+    if target_id is not None:
+        target_filters.append("targets.id = ?")
+        target_values.append(target_id)
+    if target_path is not None:
+        target_filters.append("scans.target_path = ?")
+        target_values.append(target_path)
+    target_filter = "" if not target_filters else "AND " + " AND ".join(target_filters)
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""
-        SELECT scans.*, targets.id AS indexed_target_id
+        SELECT scans.*, COALESCE(targets.id, scans.target_path) AS indexed_target_id
         FROM scans
-        JOIN security_targets AS targets
+        LEFT JOIN security_targets AS targets
             ON targets.id = scans.target_id
             OR (scans.target_id IS NULL AND targets.current_path = scans.target_path)
         WHERE scans.status = 'complete' AND scans.seal_manifest_digest IS NOT NULL
@@ -108,20 +130,21 @@ def _active_findings(
                 scans.id AS scan_id,
                 scans.started_at AS scan_started_at,
                 targets.id AS target_id,
-                targets.current_path AS target_path,
+                COALESCE(targets.id, scans.target_path) AS indexed_target_id,
+                COALESCE(targets.current_path, scans.target_path) AS target_path,
                 scans.scope,
                 MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
                 COALESCE(triage.status, 'open') AS status,
                 COUNT(*) OVER (
-                    PARTITION BY targets.id, occurrences.finding_id
+                    PARTITION BY COALESCE(targets.id, scans.target_path), occurrences.finding_id
                 ) AS occurrence_count,
                 ROW_NUMBER() OVER (
-                    PARTITION BY targets.id, occurrences.finding_id
+                    PARTITION BY COALESCE(targets.id, scans.target_path), occurrences.finding_id
                     ORDER BY occurrences.created_at DESC, occurrences.id DESC
                 ) AS occurrence_rank
             FROM finding_occurrences AS occurrences
             JOIN scans ON scans.id = occurrences.scan_id
-            JOIN security_targets AS targets
+            LEFT JOIN security_targets AS targets
                 ON targets.id = scans.target_id
                 OR (scans.target_id IS NULL AND targets.current_path = scans.target_path)
             LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
@@ -161,7 +184,7 @@ def _active_findings(
     )
     for row in rows:
         resolved = False
-        for scan in completed_scans_by_target.get(row["target_id"], ()):
+        for scan in completed_scans_by_target.get(row["indexed_target_id"], ()):
             if (scan["started_at"], scan["id"]) <= (
                 row["scan_started_at"],
                 row["scan_id"],
@@ -170,19 +193,28 @@ def _active_findings(
             if scan["id"] not in coverage_by_scan_id:
                 try:
                     coverage_by_scan_id[scan["id"]] = read_coverage(scan)
-                except SystemExit:
-                    coverage_by_scan_id[scan["id"]] = None
+                except SystemExit as error:
+                    if str(error) != (
+                        "Scan directory must be an existing canonical non-symlink directory."
+                    ):
+                        raise
+                    try:
+                        Path(scan["scan_dir"]).lstat()
+                    except FileNotFoundError:
+                        coverage_by_scan_id[scan["id"]] = None
+                    else:
+                        raise
             coverage = coverage_by_scan_id[scan["id"]]
             if coverage is None:
                 continue
             comparable_scan = (
                 scan
-                if scan["target_id"] is not None
-                else {**dict(scan), "target_id": row["target_id"]}
+                if scan["target_id"] == row["indexed_target_id"]
+                else {**dict(scan), "target_id": row["indexed_target_id"]}
             )
             if scan_history.scan_covers_path(
                 comparable_scan,
-                target_id=row["target_id"],
+                target_id=row["indexed_target_id"],
                 path=row["location_path"],
                 coverage=coverage,
             ):

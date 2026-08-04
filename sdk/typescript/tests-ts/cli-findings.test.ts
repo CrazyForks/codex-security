@@ -107,7 +107,7 @@ describe("CLI findings history", () => {
         stdout.stream,
         capture().stream,
         dependencies({
-          onWorkbench: (args) => {
+          onWorkbench: (args): JsonObject => {
             calls.push(args);
             return { scans: [] };
           },
@@ -125,7 +125,7 @@ describe("CLI findings history", () => {
     });
   });
 
-  test("falls back to a completed scan when legacy history has no target ID", async () => {
+  test("queries every local legacy scan when history has no target ID", async () => {
     const calls: Array<readonly string[]> = [];
     const stdout = capture();
     expect(
@@ -148,14 +148,10 @@ describe("CLI findings history", () => {
                   ],
                 }
               : {
-                  findingsPage: {
-                    findings: [{ occurrenceId: "occ-21" }],
-                    limit: 20,
-                    nextOffset: null,
-                    offset: 20,
-                    scanId: "legacy-scan",
-                    total: 21,
-                  },
+                  findings: [{ occurrenceId: "occ-21" }],
+                  limit: 20,
+                  nextOffset: null,
+                  offset: 20,
                 };
           },
         }),
@@ -164,9 +160,9 @@ describe("CLI findings history", () => {
     expect(calls).toEqual([
       ["list-scans", "--repository", "/current/repository"],
       [
-        "list-findings",
-        "--scan-id",
-        "legacy-scan",
+        "list-global-findings",
+        "--target-path",
+        "/current/repository",
         "--offset",
         "20",
         "--limit",
@@ -175,8 +171,115 @@ describe("CLI findings history", () => {
     ]);
     expect(JSON.parse(stdout.text())).toMatchObject({
       findings: [{ occurrenceId: "occ-21" }],
-      scanId: "legacy-scan",
     });
+  });
+
+  test("never replaces a local legacy scan with a newer sibling checkout", async () => {
+    const calls: Array<readonly string[]> = [];
+    expect(
+      await main(
+        ["findings", "list"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return args[0] === "list-scans"
+              ? {
+                  scans: [
+                    {
+                      scanId: "newer-sibling",
+                      targetId: "sibling-target",
+                      targetPath: "/another/checkout",
+                      progress: { status: "complete" },
+                    },
+                    {
+                      scanId: "local-legacy",
+                      targetId: null,
+                      targetPath: "/current/repository",
+                      progress: { status: "complete" },
+                    },
+                  ],
+                }
+              : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[1]).toEqual([
+      "list-global-findings",
+      "--target-path",
+      "/current/repository",
+      "--offset",
+      "0",
+      "--limit",
+      "20",
+    ]);
+  });
+
+  test("selects the containing checkout when run from a subdirectory", async () => {
+    const calls: Array<readonly string[]> = [];
+    expect(
+      await main(
+        ["findings"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: "/current/repository/src/nested",
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return args[0] === "list-scans"
+              ? {
+                  scans: [
+                    {
+                      scanId: "newer-sibling",
+                      targetId: "sibling-target",
+                      targetPath: "/another/checkout",
+                    },
+                    {
+                      scanId: "local",
+                      targetId: "local-target",
+                      targetPath: "/current/repository",
+                    },
+                  ],
+                }
+              : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[1]).toContain("local-target");
+    expect(calls[1]).not.toContain("sibling-target");
+  });
+
+  test("does not display a sibling checkout when this checkout has no scans", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    expect(
+      await main(
+        ["findings", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => {
+            calls.push(args);
+            return {
+              scans: [
+                {
+                  scanId: "sibling",
+                  targetId: "sibling-target",
+                  targetPath: "/another/checkout",
+                },
+              ],
+            };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      ["list-scans", "--repository", "/current/repository"],
+    ]);
+    expect(JSON.parse(stdout.text())).toMatchObject({ findings: [] });
   });
 
   test("lists findings across repositories without a target filter", async () => {
@@ -345,9 +448,21 @@ describe("CLI findings history", () => {
               return args[0] === "list-scans"
                 ? {
                     scans: [
-                      { scanId: "running", progress: { status: "running" } },
-                      { scanId: "latest", progress: { status: "complete" } },
-                      { scanId: "older", progress: { status: "complete" } },
+                      {
+                        scanId: "running",
+                        targetPath: "/current/repository",
+                        progress: { status: "running" },
+                      },
+                      {
+                        scanId: "latest",
+                        targetPath: "/current/repository",
+                        progress: { status: "complete" },
+                      },
+                      {
+                        scanId: "older",
+                        targetPath: "/current/repository",
+                        progress: { status: "complete" },
+                      },
                     ],
                   }
                 : { scan: { scanId: "latest", findings: [] } };
@@ -364,6 +479,75 @@ describe("CLI findings history", () => {
         findings: [],
       });
     }
+  });
+
+  test("selects the latest completed local scan instead of a newer sibling", async () => {
+    const calls: Array<readonly string[]> = [];
+    expect(
+      await main(
+        ["scans", "show"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return args[0] === "list-scans"
+              ? {
+                  scans: [
+                    {
+                      scanId: "sibling",
+                      targetPath: "/another/checkout",
+                      completedAt: "2026-08-03T12:00:00Z",
+                      progress: { status: "complete" },
+                    },
+                    {
+                      scanId: "archived-older",
+                      targetPath: "/current/repository",
+                      completedAt: "2026-08-01T12:00:00Z",
+                      progress: { status: "complete" },
+                    },
+                    {
+                      scanId: "actual-latest",
+                      targetPath: "/current/repository",
+                      completedAt: "2026-08-02T12:00:00Z",
+                      progress: { status: "complete" },
+                    },
+                  ],
+                }
+              : { scan: { scanId: "actual-latest", findings: [] } };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[1]).toEqual(["get-scan", "--scan-id", "actual-latest"]);
+  });
+
+  test("does not treat a sibling completed scan as local scan history", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["scans", "show"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            scans: [
+              {
+                scanId: "sibling-complete",
+                targetPath: "/another/checkout",
+                progress: { status: "complete" },
+              },
+              {
+                scanId: "local-running",
+                targetPath: "/current/repository",
+                progress: { status: "running" },
+              },
+            ],
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("No completed scans found");
   });
 
   test("explains when no completed scan is available", async () => {

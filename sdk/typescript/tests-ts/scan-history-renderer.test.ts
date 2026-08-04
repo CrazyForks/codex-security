@@ -299,6 +299,122 @@ describe("scan history renderer", () => {
     );
   });
 
+  test("identifies every repository in cross-repository findings", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          findings: [
+            {
+              occurrenceId: "occ-first",
+              scanId: "aaaaaaaa-full",
+              severity: { level: "high" },
+              title: "Missing authorization",
+              locationPath: "src/server.ts",
+              targetPath: "/demo/checkout-one",
+            },
+            {
+              occurrenceId: "occ-second",
+              scanId: "bbbbbbbb-full",
+              severity: { level: "high" },
+              title: "Missing authorization",
+              locationPath: "src/server.ts",
+              targetPath: "/demo/checkout-two",
+            },
+          ],
+          offset: 0,
+          nextOffset: null,
+        },
+        "findings",
+      ),
+    );
+
+    expect(output).toContain("REPOSITORY /demo/checkout-one");
+    expect(output).toContain("REPOSITORY /demo/checkout-two");
+  });
+
+  test("keeps findings and matching shortcuts in the displayed checkout", () => {
+    const scan = {
+      scanId: "aaaaaaaa-abcd-4567-abcd-1234567890ab",
+      targetPath: "/demo/another-checkout",
+      mode: "standard",
+      progress: { status: "complete" },
+      findingCount: 1,
+      startedAt: "2026-08-03T12:00:00Z",
+    };
+    const list = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", {
+        currentDirectory: "/demo/current-checkout",
+        repository: "/demo/another-checkout",
+      }),
+    );
+    expect(list).toContain(
+      "FINDINGS     codex-security findings list --scan aaaaaaaa",
+    );
+
+    const details = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          ...scan,
+          findings: [
+            {
+              occurrenceId: "occ-saved",
+              severity: { level: "high" },
+              title: "Missing authorization",
+              locations: [{ path: "src/server.ts" }],
+            },
+          ],
+        },
+        "show",
+        {
+          currentDirectory: "/demo/current-checkout",
+          showLinkedFindings: true,
+        },
+      ),
+    );
+    expect(details).toContain(
+      "from /demo/another-checkout, run codex-security scans match --all",
+    );
+  });
+
+  test("orders comparison suggestions by scan completion rather than updates", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              scanId: "aaaaaaaa-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 2,
+              completedAt: "2026-08-01T12:00:00Z",
+              startedAt: "2026-08-01T11:00:00Z",
+              updatedAt: "2026-08-04T12:00:00Z",
+            },
+            {
+              scanId: "bbbbbbbb-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 3,
+              completedAt: "2026-08-03T12:00:00Z",
+              startedAt: "2026-08-03T11:00:00Z",
+              updatedAt: "2026-08-03T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        { repository: "/demo/juice-shop" },
+      ),
+    );
+
+    expect(output).toContain("VIEW LATEST  codex-security scans show bbbbbbbb");
+    expect(output).toContain(
+      "COMPARE      codex-security scans compare aaaaaaaa bbbbbbbb",
+    );
+    expect(output).not.toContain("scans compare bbbbbbbb aaaaaaaa");
+  });
+
   test("does not suggest comparing scans from different repositories", () => {
     const output = stripVTControlCharacters(
       renderScanHistory(
@@ -328,6 +444,7 @@ describe("scan history renderer", () => {
     );
 
     expect(output).toContain("scans show aaaaaaaa");
+    expect(output).toContain("findings list --scan aaaaaaaa");
     expect(output).not.toContain("scans compare");
   });
 

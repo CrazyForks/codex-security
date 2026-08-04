@@ -3615,7 +3615,16 @@ def main() -> None:
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "get-finding":
             occurrence = require_occurrence(connection, args.occurrence_id)
-            result = scan_context(connection, occurrence["scan_id"], occurrence["id"])
+            scan = require_scan(connection, occurrence["scan_id"])
+            backfill_legacy_finding_details(connection, scan)
+            occurrence = require_occurrence(connection, occurrence["id"])
+            result = {
+                "scan": {
+                    "findings": [finding_result(connection, scan, occurrence)],
+                    "scanId": scan["id"],
+                    "targetPath": scan["target_path"],
+                }
+            }
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
