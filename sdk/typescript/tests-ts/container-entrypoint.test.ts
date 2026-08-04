@@ -467,6 +467,23 @@ describe("customer container entrypoint", () => {
   );
 
   testPosix(
+    "rejects missing bulk-scan option values before the terminator",
+    async () => {
+      for (const option of ["--model", "--output-dir", "--provider"]) {
+        const result = await runEntrypoint([
+          "bulk-scan",
+          option,
+          "--",
+          "repositories.csv",
+        ]);
+        expect(result.status).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("an option before -- requires a value");
+      }
+    },
+  );
+
+  testPosix(
     "rejects prefixed discovery without mistaking option values for a CSV",
     async () => {
       for (const arguments_ of [

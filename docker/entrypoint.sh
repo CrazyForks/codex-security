@@ -26,6 +26,10 @@ for argument do
     esac
 
     if [ "$expects_option_value" = yes ]; then
+        if [ "$argument" = -- ]; then
+            printf '%s\n' 'codex-security: an option before -- requires a value.' >&2
+            exit 2
+        fi
         expects_option_value=
         continue
     fi

@@ -663,12 +663,21 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   const optionTerminator = argv.indexOf("--");
+  const commandIndex = commandArgumentIndex(argv);
   const terminatedInput = argv[optionTerminator + 1];
   if (
     optionTerminator > 0 &&
-    argv.slice(0, optionTerminator).includes("bulk-scan") &&
+    commandIndex < optionTerminator &&
+    argv[commandIndex] === "bulk-scan" &&
     terminatedInput !== undefined
   ) {
+    const pendingOption = argv[optionTerminator - 1]!;
+    if (VALUE_OPTIONS.has(pendingOption)) {
+      errorOutput.write(
+        `codex-security: Missing value for flag: ${pendingOption}\n`,
+      );
+      return 2;
+    }
     if (argv.length > optionTerminator + 2) {
       errorOutput.write(
         "codex-security: Unexpected positional argument for bulk-scan.\n",
@@ -1791,11 +1800,15 @@ export async function main(
   }
 }
 
-function defaultScansList(argv: readonly string[]): readonly string[] {
-  const commandIndex = argv.findIndex((value, index) => {
+function commandArgumentIndex(argv: readonly string[]): number {
+  return argv.findIndex((value, index) => {
     if (value.startsWith("-")) return false;
     return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
   });
+}
+
+function defaultScansList(argv: readonly string[]): readonly string[] {
+  const commandIndex = commandArgumentIndex(argv);
   if (
     commandIndex < 0 ||
     argv[commandIndex] !== "scans" ||

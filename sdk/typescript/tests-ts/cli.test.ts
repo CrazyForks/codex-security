@@ -816,6 +816,45 @@ describe("CLI", () => {
     }
   });
 
+  test("does not rewrite terminators belonging to other commands", async () => {
+    for (const command of ["validate", "patch"]) {
+      let codexStarted = false;
+      const stderr = capture();
+      const result = await main(
+        [command, "bulk-scan", "--", "first", "second"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onCodex: () => {
+            codexStarted = true;
+            return 0;
+          },
+        }),
+      );
+      expect(result).toBe(2);
+      expect(codexStarted).toBe(false);
+      expect(stderr.text()).toContain("Unknown flag: --");
+      expect(stderr.text()).not.toContain(
+        "Unexpected positional argument for bulk-scan",
+      );
+    }
+  });
+
+  test("rejects missing bulk-scan option values before a terminator", async () => {
+    for (const option of ["--model", "--output-dir", "--provider"]) {
+      const stderr = capture();
+      expect(
+        await main(
+          ["bulk-scan", option, "--", "repositories.csv"],
+          capture().stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(`Missing value for flag: ${option}`);
+    }
+  });
+
   test.each([
     [
       "OpenRouter",
