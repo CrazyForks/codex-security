@@ -3005,6 +3005,9 @@ def scan_result(
             "active": independent_reviews["active"],
             "completed": independent_reviews["completed"],
         }
+    current_target = connection.execute(
+        "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+    ).fetchone()
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
@@ -3033,6 +3036,12 @@ def scan_result(
         "scanId": scan["id"],
         "scope": scan["scope"],
         "targetPath": scan["target_path"],
+        **(
+            {"currentTargetPath": current_target["current_path"]}
+            if current_target is not None
+            and current_target["current_path"] != scan["target_path"]
+            else {}
+        ),
         "targetRevision": scan["target_revision"],
         "targetSummary": scan["target_summary"],
         "updatedAt": max(
@@ -3201,17 +3210,25 @@ def finding_result(
         absolute_path = safe_source_path(target, row["relative_path"]) if target else None
         location = {
             "endLine": row["end_line"],
-            "path": bounded_output_text(row["relative_path"], FINDING_LOCATION_PATH_BYTES),
+            "path": (
+                row["relative_path"]
+                if full_details
+                else bounded_output_text(row["relative_path"], FINDING_LOCATION_PATH_BYTES)
+            ),
             "role": (
-                bounded_output_text(row["role"], FINDING_LOCATION_ROLE_BYTES)
+                row["role"]
+                if full_details
+                else bounded_output_text(row["role"], FINDING_LOCATION_ROLE_BYTES)
                 if row["role"] is not None
                 else None
             ),
             "startLine": row["start_line"],
         }
         if absolute_path is not None:
-            location["absolutePath"] = bounded_output_text(
-                absolute_path, FINDING_ABSOLUTE_PATH_BYTES
+            location["absolutePath"] = (
+                str(absolute_path)
+                if full_details
+                else bounded_output_text(absolute_path, FINDING_ABSOLUTE_PATH_BYTES)
             )
         locations.append(location)
     triage = finding_triage_result(connection, occurrence["id"])
@@ -3649,6 +3666,9 @@ def main() -> None:
             scan = require_scan(connection, occurrence["scan_id"])
             backfill_legacy_finding_details(connection, scan)
             occurrence = require_occurrence(connection, occurrence["id"])
+            current_target = connection.execute(
+                "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+            ).fetchone()
             result = {
                 "scan": {
                     "findings": [
@@ -3657,6 +3677,12 @@ def main() -> None:
                     "scanDir": scan["scan_dir"],
                     "scanId": scan["id"],
                     "targetPath": scan["target_path"],
+                    **(
+                        {"currentTargetPath": current_target["current_path"]}
+                        if current_target is not None
+                        and current_target["current_path"] != scan["target_path"]
+                        else {}
+                    ),
                 }
             }
         elif args.command == "get-scan-feedback":

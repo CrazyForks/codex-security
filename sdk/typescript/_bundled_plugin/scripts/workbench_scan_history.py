@@ -32,12 +32,13 @@ def _same_repository(
         if after_identity is None
         else after_identity[0]
     )
-    if (
-        before_git_dir is not None
-        and after_git_dir is not None
-        and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
-    ):
-        return True
+    if before_git_dir is not None and after_git_dir is not None:
+        if Path(before_git_dir).resolve() == Path(after_git_dir).resolve():
+            return True
+        if before_target.is_relative_to(after_target) or after_target.is_relative_to(
+            before_target
+        ):
+            return False
     before_origin = _repository_origin(before_target)
     return before_origin is not None and before_origin == (
         _repository_origin(after_target) if after_identity is None else after_identity[1]
@@ -172,12 +173,18 @@ def list_scans(
                 repository_paths.append(str(parent))
                 registered_parent = connection.execute(
                     """
-                    SELECT 1 FROM scans WHERE target_path = ?
+                    SELECT scans.target_id
+                    FROM scans
+                    LEFT JOIN security_targets AS owner ON owner.current_path = ?
+                    WHERE scans.target_id = owner.id
+                        OR (scans.target_path = ? AND owner.id IS NULL)
                     LIMIT 1
                     """,
-                    (str(parent),),
+                    (str(parent), str(parent)),
                 ).fetchone()
                 if registered_parent is not None:
+                    if registered_parent["target_id"] is not None:
+                        related_target_ids.append(registered_parent["target_id"])
                     break
         for scan in connection.execute("SELECT target_id, target_path FROM scans"):
             target_path = Path(scan["target_path"])

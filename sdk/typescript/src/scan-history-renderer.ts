@@ -286,7 +286,7 @@ export function renderScanHistory(
       );
     }
   } else if (command === "finding") {
-    const repository = result["targetPath"];
+    const repository = result["currentTargetPath"] ?? result["targetPath"];
     const scanId = result["scanId"];
     if (typeof repository === "string") {
       lines.push(
@@ -370,7 +370,8 @@ export function renderScanHistory(
       ["VALIDATION", "validation"],
       ["ATTACK PATH", "attackPath"],
     ] as const) {
-      const value = result[key];
+      const value =
+        key === "rootCause" ? result[key] ?? result["root_cause"] : result[key];
       const detail = description(value);
       const sections = detail === undefined ? [] : [detail];
       if (
@@ -407,14 +408,33 @@ export function renderScanHistory(
               sections.push(`${nestedLabel}: ${nested}`);
           }
         }
+        const caveats: ReadonlyArray<readonly [string, string]> =
+          key === "validation"
+            ? [["Limitation", "limitations"]]
+            : key === "attackPath"
+              ? [
+                  ["Precondition", "preconditions"],
+                  ["Limitation", "limitations"],
+                ]
+              : [];
+        for (const [caveatLabel, caveatKey] of caveats) {
+          const items = value[caveatKey];
+          if (!Array.isArray(items)) continue;
+          for (const item of items) {
+            const detail = description(item);
+            if (detail !== undefined) {
+              sections.push(`${caveatLabel}: ${detail}`);
+            }
+          }
+        }
       }
       if (sections.length > 0) {
         lines.push("", `  ${strong(label)}`);
         for (const section of sections) wrap(section, 4);
       }
     }
-    const codeEvidence = result["codeEvidence"];
-    const rootCause = result["rootCause"];
+    const codeEvidence = result["codeEvidence"] ?? result["code_evidence"];
+    const rootCause = result["rootCause"] ?? result["root_cause"];
     const legacyRootCode =
       typeof rootCause === "object" &&
       rootCause !== null &&
@@ -499,10 +519,24 @@ export function renderScanHistory(
       }
     }
     if (typeof result["occurrenceId"] === "string") {
-      lines.push(
-        "",
-        `  ${strong("TRIAGE")}  codex-security findings false-positive ${clean(result["occurrenceId"])} --reason TEXT`,
-      );
+      const triage = result["triage"];
+      const details =
+        typeof triage === "object" && triage !== null && !Array.isArray(triage)
+          ? triage
+          : undefined;
+      const action =
+        details?.["status"] === "closed"
+          ? ""
+          : `  codex-security findings false-positive ${clean(result["occurrenceId"])} --reason TEXT`;
+      lines.push("", `  ${strong("TRIAGE")}${action}`);
+      for (const [label, key] of [
+        ["Reason", "closeReason"],
+        ["Note", "note"],
+      ] as const) {
+        if (typeof details?.[key] === "string" && details[key]) {
+          wrap(`${label}: ${details[key]}`, 4);
+        }
+      }
     }
   } else if (command === "list") {
     const scans = (result["scans"] as JsonObject[]).filter((scan) => {
@@ -730,7 +764,8 @@ export function renderScanHistory(
           `  ${strong("FINDING HISTORY")}  codex-security scans show ${clean(result["scanId"]).slice(0, 8)} --show-linked-findings`,
         );
       } else if (!linked && !truncated && options.showLinkedFindings) {
-        const matchingRepository = result["targetPath"];
+        const matchingRepository =
+          result["currentTargetPath"] ?? result["targetPath"];
         const repositoryContext =
           typeof matchingRepository === "string" &&
           options.currentDirectory !== undefined &&

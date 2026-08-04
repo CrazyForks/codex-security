@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
@@ -329,7 +330,10 @@ describe("scan history renderer", () => {
       "PREVENTIVE CONTROLS",
       "Require the parameterized-query wrapper.",
       "EVIDENCE ARTIFACTS",
-      "/private/codex-security/scan-results/findings/login-injection/report.md",
+      join(
+        "/private/codex-security/scan-results",
+        "findings/login-injection/report.md",
+      ),
       "findings false-positive occ_saved_finding_25 --reason TEXT",
     ]) {
       expect(detail).toContain(expected);
@@ -345,7 +349,11 @@ describe("scan history renderer", () => {
         severity: { level: "high" },
         title: "Missing authorization",
         status: "open",
-        triage: { status: "closed" },
+        triage: {
+          status: "closed",
+          closeReason: "false_positive",
+          note: "Existing authorization prevents access.",
+        },
         locations: [{ path: "src/server.ts", startLine: 4 }],
       },
       "finding",
@@ -353,6 +361,9 @@ describe("scan history renderer", () => {
     );
 
     expect(output).toContain("CLOSED");
+    expect(output).toContain("Reason: false_positive");
+    expect(output).toContain("Note: Existing authorization prevents access.");
+    expect(output).not.toContain("findings false-positive");
     expect(output).not.toContain("OPEN");
   });
 
@@ -374,12 +385,15 @@ describe("scan history renderer", () => {
           validation: {
             method: "live replay",
             assertions: ["A cross-account record was returned."],
+            limitations: ["Production traffic was not replayed."],
           },
           attackPath: {
             dataflow: { summary: "Request input reaches the SQL executor." },
             reachability: {
               summary: "An unauthenticated caller reaches the endpoint.",
             },
+            preconditions: ["An administrator account is required."],
+            limitations: ["The database is reachable only internally."],
           },
           remediation: "Parameterize the database query.",
         },
@@ -391,15 +405,50 @@ describe("scan history renderer", () => {
       "VALIDATION",
       "Method: live replay",
       "Verified: A cross-account record was returned.",
+      "Limitation: Production traffic was not replayed.",
       "ATTACK PATH",
       "Dataflow: Request input reaches the SQL executor.",
       "Reachability: An unauthenticated caller reaches the endpoint.",
+      "Precondition: An administrator account is required.",
+      "Limitation: The database is reachable only internally.",
       "CODE EVIDENCE",
       "Root-cause source",
       "execute(untrusted_query)",
     ]) {
       expect(output).toContain(expected);
     }
+  });
+
+  test("renders legacy snake-case finding evidence", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "legacy-scan",
+          targetPath: "/demo/previous-checkout",
+          currentTargetPath: "/demo/current-checkout",
+          occurrenceId: "legacy-occurrence",
+          severity: { level: "high" },
+          title: "Unsafe legacy query",
+          locations: [{ path: "src/query.py", startLine: 12 }],
+          root_cause: { summary: "Legacy authorization bypass." },
+          code_evidence: [
+            {
+              label: "Legacy source proof",
+              code: "bypass_authorization()",
+            },
+          ],
+        },
+        "finding",
+      ),
+    );
+
+    expect(output).toContain("current-checkout");
+    expect(output).not.toContain("previous-checkout");
+    expect(output).toContain("ROOT CAUSE");
+    expect(output).toContain("Legacy authorization bypass.");
+    expect(output).toContain("CODE EVIDENCE");
+    expect(output).toContain("Legacy source proof");
+    expect(output).toContain("bypass_authorization()");
   });
 
   test("connects scan history with the next useful commands", () => {
@@ -781,6 +830,38 @@ describe("scan history renderer", () => {
     expect(output).toContain(
       "from /demo/plain-directory, run codex-security scans match --all",
     );
+  });
+
+  test("directs historical matching to the relocated checkout", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/previous-checkout",
+          currentTargetPath: "/demo/current-checkout",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "src/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        {
+          currentDirectory: "/demo/current-checkout/src",
+          showLinkedFindings: true,
+        },
+      ),
+    );
+
+    expect(output).toContain(
+      "from /demo/current-checkout, run codex-security scans match --all",
+    );
+    expect(output).not.toContain("from /demo/previous-checkout");
   });
 
   test("shows saved completion warnings without marking a scan failed", () => {

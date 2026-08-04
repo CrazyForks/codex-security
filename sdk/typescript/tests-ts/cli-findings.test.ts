@@ -183,6 +183,33 @@ describe("CLI findings history", () => {
     }
   });
 
+  test("preserves the current checkout when opening a relocated finding", async () => {
+    const stdout = capture();
+    const deps = dependencies({
+      onWorkbench: (): JsonObject => ({
+        scan: {
+          scanId: "historical-scan",
+          targetPath: "/previous/checkout",
+          currentTargetPath: "/current/repository",
+          findings: [{ occurrenceId: "historical-occurrence" }],
+        },
+      }),
+    });
+
+    expect(
+      await main(
+        ["findings", "show", "historical-occurrence", "--json"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      targetPath: "/previous/checkout",
+      currentTargetPath: "/current/repository",
+    });
+  });
+
   test("scopes multiple moved targets by identity instead of reusable checkout paths", async () => {
     const calls: Array<readonly string[]> = [];
     expect(

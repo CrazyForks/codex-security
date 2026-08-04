@@ -915,6 +915,7 @@ export async function main(
               const scanDir = result["scanDir"];
               const scanId = result["scanId"];
               const targetPath = result["targetPath"];
+              const currentTargetPath = result["currentTargetPath"];
               const finding = (result["findings"] as JsonObject[]).find(
                 (entry) => entry["occurrenceId"] === args.occurrenceId,
               );
@@ -932,6 +933,9 @@ export async function main(
                 ...(typeof scanDir === "string" ? { scanDir } : {}),
                 scanId,
                 targetPath,
+                ...(typeof currentTargetPath === "string"
+                  ? { currentTargetPath }
+                  : {}),
               };
             },
           ),
