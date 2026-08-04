@@ -202,7 +202,13 @@ def list_scans(
             repository_paths.append(str(target_path))
         repository_paths = list(dict.fromkeys(repository_paths))
         repository_placeholders = ", ".join("?" for _ in repository_paths)
-        repository_clauses = [f"scans.target_path IN ({repository_placeholders})"]
+        repository_clauses = [
+            f"scans.target_path IN ({repository_placeholders}) "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM security_targets AS path_owner "
+            "WHERE path_owner.current_path = scans.target_path "
+            "AND path_owner.id != scans.target_id)"
+        ]
         values.extend(repository_paths)
         if related_target_ids:
             placeholders = ", ".join("?" for _ in related_target_ids)

@@ -122,6 +122,19 @@ const nestedDirectoryScanProbe = [
   "    for label, path in [('unversionedRoot', plain_root), ('unversionedService', plain_service_a), ('nestedGitCheckout', nested_checkout)]:",
   "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    moved_checkout = (pathlib.Path(directory) / 'moved-checkout').resolve()",
+  "    reused_checkout = (pathlib.Path(directory) / 'reused-checkout').resolve()",
+  "    for path in (moved_checkout, reused_checkout): path.mkdir()",
+  "    moved_target = ensure_security_target(connection, str(moved_checkout))",
+  "    current_target = ensure_security_target(connection, str(reused_checkout))",
+  "    for scan_id, target in [('stale-reused-scan', moved_target), ('current-reused-scan', current_target)]:",
+  "        workspace_id = scan_id + '-workspace'",
+  "        connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', (workspace_id, target, str(reused_checkout), timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan_id, workspace_id, target, str(reused_checkout), 'unversioned', '.', 'standard', directory + '/results/' + scan_id, 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', (scan_id, timestamp))",
+  "    for label, path in [('reusedCheckout', reused_checkout), ('movedCheckout', moved_checkout)]:",
+  "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
   "    print(json.dumps(output))",
 ].join("\n");
 
@@ -359,6 +372,8 @@ describe("workbench findings index", () => {
       unversionedRoot: ["plain-a", "plain-b"],
       unversionedService: ["plain-a"],
       nestedGitCheckout: ["nested-git"],
+      reusedCheckout: ["current-reused-scan"],
+      movedCheckout: ["stale-reused-scan"],
     });
   });
 
