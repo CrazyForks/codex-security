@@ -20,7 +20,8 @@ const findingsIndexProbe = [
   "stale_directory = sys.argv[1] if settings.get('coverageFailure') == 'noncanonical' else '/private/tmp/codex-security-findings-index-missing-stale'",
   "connection.executemany('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old', 'current-target', '/current/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/current-old'),",
-  "    ('current-new', None, '/current/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/current-new'),",
+  "    ('current-new', 'current-target', '/current/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/current-new'),",
+  "    ('reused-legacy', None, '/current/repository', 'complete', 'sealed', '2026-03-01', '2026-03-01', '.', '/private/tmp/reused-legacy'),",
   "    ('stale-old', 'stale-target', '/stale/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/stale-old'),",
   "    ('stale-new', 'stale-target', '/stale/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', stale_directory),",
   "    ('orphan-old', None, '/orphan/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/orphan-old'),",
@@ -29,6 +30,7 @@ const findingsIndexProbe = [
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
   "    ('current-new-occurrence', 'current-new-finding', 'current-new', 'critical', '2026-02-01', 'Current CLI finding', 'Latest issue'),",
+  "    ('reused-legacy-occurrence', 'previous-owner-finding', 'reused-legacy', 'critical', '2026-03-01', 'Previous owner secret', 'Must never cross checkout owners'),",
   "    ('stale-old-occurrence', 'stale-finding', 'stale-old', 'medium', '2026-01-01', 'Unavailable follow-up', 'Coverage is unavailable'),",
   "    ('orphan-old-occurrence', 'orphan-old-finding', 'orphan-old', 'high', '2026-01-01', 'Older orphan finding', 'Still outside follow-up coverage'),",
   "    ('orphan-new-occurrence', 'orphan-new-finding', 'orphan-new', 'medium', '2026-02-01', 'Latest orphan finding', 'Target row does not exist'),",
@@ -37,6 +39,8 @@ const findingsIndexProbe = [
   "    ('current-old-occurrence', 'src/old.py', 'root_control', 0),",
   "    ('current-new-occurrence', 'src/new.py', 'root_control', 0),",
   "    ('current-new-occurrence', 'src/secondary.py', 'sink', 1),",
+  "    ('current-new-occurrence', 'src/ÄUTH-Straße.py', 'sink', 2),",
+  "    ('reused-legacy-occurrence', 'src/previous-owner.py', 'root_control', 0),",
   "    ('stale-old-occurrence', 'src/stale.py', 'root_control', 0),",
   "    ('orphan-old-occurrence', 'src/orphan-old.py', 'root_control', 0),",
   "    ('orphan-new-occurrence', 'src/orphan-new.py', 'root_control', 0),",
@@ -279,7 +283,7 @@ function probeFindingsIndex(
 }
 
 describe("workbench findings index", () => {
-  test("includes CLI scans without target IDs and scopes coverage reads", () => {
+  test("isolates targetless previous-owner findings and coverage reads", () => {
     const result = probeFindingsIndex("current-target");
 
     expect(result.findings).toEqual([
@@ -290,6 +294,9 @@ describe("workbench findings index", () => {
       }),
     ]);
     expect(result.coverageReads).toEqual(["current-new"]);
+    expect(result.findings).not.toContainEqual(
+      expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
+    );
   });
 
   test("keeps earlier findings when follow-up coverage is unavailable", () => {
@@ -367,14 +374,14 @@ describe("workbench findings index", () => {
   });
 
   test("searches secondary finding source locations", () => {
-    const result = probeFindingsIndex("current-target", {
-      query: "SECONDARY.PY",
-    });
+    for (const query of ["SECONDARY.PY", "äuth-strasse.py"]) {
+      const result = probeFindingsIndex("current-target", { query });
 
-    expect(result.findings).toEqual([
-      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
-    ]);
-    expect(result.locationQueryCount).toBe(1);
+      expect(result.findings).toEqual([
+        expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+      ]);
+      expect(result.locationQueryCount).toBe(1);
+    }
   });
 
   test("searches repository paths only for cross-repository queries", () => {

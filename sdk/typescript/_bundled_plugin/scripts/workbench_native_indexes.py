@@ -120,16 +120,19 @@ def _active_findings(
         target_filters.append(f"scans.target_path IN ({placeholders})")
         target_values.extend(target_paths)
     target_filter = "" if not target_filters else "AND (" + " OR ".join(target_filters) + ")"
+    current_owner_only = (
+        "AND NOT (scans.target_id IS NULL AND EXISTS ("
+        "SELECT 1 FROM security_targets AS path_owner "
+        "WHERE path_owner.current_path = scans.target_path))"
+    )
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""
         SELECT scans.*, COALESCE(targets.id, scans.target_path) AS indexed_target_id
         FROM scans
-        LEFT JOIN security_targets AS targets
-            ON targets.id = scans.target_id
-            OR (scans.target_id IS NULL AND targets.current_path = scans.target_path)
+        LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         WHERE scans.status = 'complete' AND scans.seal_manifest_digest IS NOT NULL
-            {target_filter}
+            {target_filter} {current_owner_only}
         ORDER BY scans.started_at DESC, scans.id DESC
         """,
         target_values,
@@ -137,11 +140,13 @@ def _active_findings(
         completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
 
     coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}
+    if query:
+        connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
     secondary_location_match = (
         "EXISTS ("
         "SELECT 1 FROM finding_locations AS searched_locations "
         "WHERE searched_locations.occurrence_id = selected_findings.occurrence_id "
-        "AND instr(lower(searched_locations.relative_path), ?) > 0)"
+        "AND instr(codex_security_casefold(searched_locations.relative_path), ?) > 0)"
         if query
         else "0"
     )
@@ -170,11 +175,9 @@ def _active_findings(
                 ) AS occurrence_rank
             FROM finding_occurrences AS occurrences
             JOIN scans ON scans.id = occurrences.scan_id
-            LEFT JOIN security_targets AS targets
-                ON targets.id = scans.target_id
-                OR (scans.target_id IS NULL AND targets.current_path = scans.target_path)
+            LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
             LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
-            WHERE 1 = 1 {target_filter}
+            WHERE 1 = 1 {target_filter} {current_owner_only}
         )
         SELECT
             selected_findings.*,
