@@ -41,7 +41,13 @@ from pathlib import Path, PurePosixPath
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from normalize_candidates import combine, normalize_candidate, read_scope_inventory
+from normalize_candidates import (
+    MAX_SCOPE_INVENTORY_BYTES,
+    MAX_SCOPE_INVENTORY_FILES,
+    combine,
+    normalize_candidate,
+    read_scope_inventory,
+)
 from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
 
 STANDARD_SCOPE_EXCLUDED_DIRS = {
@@ -146,8 +152,7 @@ DIRECT_SCOPE_PREVIEW_READ_BYTES = 64 * 1024
 RANK_POOL_PLAN_SCHEMA_VERSION = 1
 RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
-MAX_SCOPE_INVENTORY_FILES = 250_000
-MAX_SCOPE_COVERAGE_BYTES = 64 * 1024 * 1024
+MAX_SCOPE_COVERAGE_BYTES = MAX_SCOPE_INVENTORY_BYTES
 MAX_SCOPE_REVIEW_BYTES = MAX_SCOPE_COVERAGE_BYTES + MAX_SCOPE_INVENTORY_FILES * 128
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
@@ -474,8 +479,7 @@ def record_overlapping_scope_exclusions(
             if scope == current or scope.is_relative_to(current)
         ]
         if not requested:
-            pattern = current.relative_to(repository).as_posix()
-            exclusions[pattern] = {"pattern": pattern, "reason": reason}
+            record_scope_exclusion(repository, current, exclusions, reason)
             continue
         if any(scope == current and scope.is_dir() for scope in requested):
             continue

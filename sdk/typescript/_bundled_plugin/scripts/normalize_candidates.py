@@ -13,6 +13,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 CWE = re.compile(r"(?i)CWE-(\d+)")
+MAX_SCOPE_INVENTORY_FILES = 250_000
+MAX_SCOPE_INVENTORY_BYTES = 64 * 1024 * 1024
 ROLES = {
     "entrypoint": 0,
     "entrypoint/wrapper": 1,
@@ -214,9 +216,13 @@ def read_scope(path: Path, repo_root: Path) -> set[str]:
 def read_scope_inventory(
     path: Path, repo_root: Path, *, content_digests: dict[str, str] | None = None
 ) -> set[str]:
+    if path.stat().st_size > MAX_SCOPE_INVENTORY_BYTES:
+        raise ValueError("in-scope inventory exceeds the size limit")
     scope: set[str] = set()
     with path.open(encoding="utf-8") as handle:
         for number, line in enumerate(handle, 1):
+            if number > MAX_SCOPE_INVENTORY_FILES:
+                raise ValueError("in-scope inventory exceeds the maximum file count")
             if not line.strip():
                 raise ValueError(f"in-scope inventory row {number}: blank rows are not allowed")
             try:

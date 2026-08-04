@@ -4293,6 +4293,7 @@ describe("CodexSecurity orchestration", () => {
     const packageDirectory = join(repository, "package");
     const dependency = join(packageDirectory, "node_modules", "dependency");
     const sibling = join(packageDirectory, "node_modules", "sibling");
+    const globSibling = join(packageDirectory, "node_modules", "[d]ependency");
     const manifest = join(root, "scan-manifest.json");
     const coverage = join(root, "coverage.json");
     const scopes = join(root, "target-paths.json");
@@ -4305,11 +4306,13 @@ describe("CodexSecurity orchestration", () => {
         recursive: true,
       }),
       mkdir(sibling, { recursive: true }),
+      mkdir(globSibling, { recursive: true }),
     ]);
     await Promise.all([
       writeFile(join(packageDirectory, "app.ts"), "export {};\n"),
       writeFile(join(packageDirectory, ".git", "config"), "[core]\n"),
       writeFile(join(dependency, "index.js"), "module.exports = {};\n"),
+      writeFile(join(globSibling, "index.js"), "module.exports = {};\n"),
       writeFile(
         join(dependency, "node_modules", "transitive", "index.js"),
         "module.exports = {};\n",
@@ -4322,6 +4325,7 @@ describe("CodexSecurity orchestration", () => {
     const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
     const expectedExclusions = [
       "package/.git",
+      "package/node_modules/[[]d[]]ependency",
       "package/node_modules/dependency/**/.git",
       "package/node_modules/dependency/**/.git/**",
       "package/node_modules/dependency/**/node_modules",
@@ -5058,6 +5062,49 @@ describe("CodexSecurity orchestration", () => {
     expect(capabilities).toContain(
       'reason = "Exhaustive repository-wide and scoped-path scans use delegated workers for file review, validation, and attack-path work when available."',
     );
+  });
+
+  test("bounds standard inventories before retaining their paths", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const inventory = join(root, "scope_inventory.jsonl");
+    await mkdir(repository);
+    await writeFile(
+      inventory,
+      `${JSON.stringify({ path: "first.ts" })}\n${JSON.stringify({ path: "second.ts" })}\n`,
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import normalize_candidates as module",
+          "inventory = Path(sys.argv[2])",
+          "repository = Path(sys.argv[3])",
+          "module.MAX_SCOPE_INVENTORY_BYTES = 1",
+          "try: module.read_scope_inventory(inventory, repository)",
+          "except ValueError as error: assert 'size limit' in str(error), error",
+          "else: raise AssertionError('oversized inventory was accepted')",
+          "module.MAX_SCOPE_INVENTORY_BYTES = 1024",
+          "module.MAX_SCOPE_INVENTORY_FILES = 1",
+          "try: module.read_scope_inventory(inventory, repository)",
+          "except ValueError as error: assert 'maximum file count' in str(error), error",
+          "else: raise AssertionError('unbounded inventory was accepted')",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        inventory,
+        repository,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
   });
 
   test("rejects malformed, duplicate, and escaping standard inventory paths", async () => {
