@@ -47,9 +47,12 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  EXTERNAL_CODEX_PROVIDERS,
+  isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
   type CodexSecurityConfig,
+  type ExternalModelProvider,
   type JsonObject,
   type JsonValue,
 } from "./config.js";
@@ -169,6 +172,7 @@ const VALUE_OPTIONS = new Set([
   "--mode",
   "--model",
   "--effort",
+  "--provider",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -196,6 +200,10 @@ const VALUE_OPTIONS = new Set([
   "--limit",
   "--reason",
 ]);
+const PROVIDER_OPTION = z
+  .enum(["openai", "openrouter", "fireworks"])
+  .default("openai")
+  .describe("Inference provider for scans.");
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -252,6 +260,7 @@ interface ScanArguments extends DeepScanOptions {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
+  provider?: "openai" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -1293,6 +1302,7 @@ export async function main(
               `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
             ),
           effort: effortOption(),
+          provider: PROVIDER_OPTION,
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -1406,6 +1416,7 @@ export async function main(
             maxDiscoveryRuns: options.maxDiscoveryRuns,
             model: options.model,
             effort: options.effort,
+            provider: options.provider,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -1552,6 +1563,7 @@ export async function main(
             `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ),
         effort: effortOption(),
+        provider: PROVIDER_OPTION,
         maxAttempts: z
           .number()
           .int()
@@ -1605,6 +1617,7 @@ export async function main(
               if (
                 argument === "--model" ||
                 argument === "--effort" ||
+                argument === "--provider" ||
                 argument === "--codex" ||
                 argument === "--knowledge-base"
               ) {
@@ -1612,6 +1625,7 @@ export async function main(
               } else if (
                 argument.startsWith("--model=") ||
                 argument.startsWith("--effort=") ||
+                argument.startsWith("--provider=") ||
                 argument.startsWith("--codex=") ||
                 argument.startsWith("--knowledge-base=")
               ) {
@@ -1622,7 +1636,7 @@ export async function main(
             }
             if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1662,6 +1676,7 @@ export async function main(
                 options.codex,
                 options.model,
                 options.effort,
+                options.provider,
               ),
             },
             createSecurity: dependencies.createSecurity,
@@ -2935,6 +2950,7 @@ async function runScan(
           arguments_.codex,
           arguments_.model,
           arguments_.effort,
+          arguments_.provider,
         ),
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
@@ -2944,8 +2960,14 @@ async function runScan(
         ...config.codexOverrides,
       }));
     let auth = arguments_.auth;
-    selectedAuthentication = scanAuthentication(dependencies.environment, auth);
+    const provider = config.codexOverrides?.["model_provider"];
+    selectedAuthentication = scanAuthentication(
+      dependencies.environment,
+      auth,
+      provider,
+    );
     if (
+      !isExternalModelProvider(provider) &&
       (auth === undefined || auth === "auto") &&
       !arguments_.dryRun &&
       interactive &&
@@ -2977,6 +2999,7 @@ async function runScan(
         selectedAuthentication = scanAuthentication(
           dependencies.environment,
           auth,
+          provider,
         );
       }
     }
@@ -3583,10 +3606,17 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelReasoningEffort,
+  provider?: "openai" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
+  if (isExternalModelProvider(provider)) {
+    result["model_provider"] = provider;
+    result["model_providers"] = {
+      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+    };
+  }
   for (const value of values) {
     const separator = value.indexOf("=");
     const key = separator < 0 ? "" : value.slice(0, separator);
@@ -3642,9 +3672,19 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
+      if (isExternalModelProvider(provider) && key === "model_provider") {
+        throw new CodexSecurityError(
+          "--provider conflicts with --codex model_provider",
+        );
+      }
       throw new CodexSecurityError("Duplicate --codex key");
     }
     cursor[final] = parsed;
+  }
+  if (isExternalModelProvider(provider) && !("model" in result)) {
+    throw new CodexSecurityError(
+      `--model is required when using --provider ${provider}`,
+    );
   }
   return result;
 }
