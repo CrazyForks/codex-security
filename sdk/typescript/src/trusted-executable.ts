@@ -1,6 +1,14 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 export interface TrustedExecutable {
   executable: string;
@@ -39,9 +47,15 @@ async function inspectTrustedExecutable(
   executable: string | null;
   environment: Record<string, string | undefined>;
 }> {
-  const root = await realpath(protectedRoot).catch(() =>
-    resolve(protectedRoot),
-  );
+  let root = await realpath(protectedRoot).catch(() => resolve(protectedRoot));
+  let ancestor = dirname(root);
+  while (true) {
+    const marker = await stat(join(ancestor, ".git")).catch(() => null);
+    if (marker?.isDirectory() || marker?.isFile()) root = ancestor;
+    const parent = dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
   const path = Object.entries(environment).find(
     ([name]) => name.toUpperCase() === "PATH",
   )?.[1];
