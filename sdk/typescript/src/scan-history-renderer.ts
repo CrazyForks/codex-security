@@ -453,19 +453,19 @@ export function renderScanHistory(
         typeof result["findingCount"] === "number"
           ? result["findingCount"]
           : findings.length;
+      const truncated =
+        Boolean(result["findingsTruncated"]) || count > findings.length;
       lines.push(
         "",
         `  ${strong("FINDINGS")}  ${strong(
-          result["findingsTruncated"] || count > findings.length
-            ? `${findings.length} of ${count}`
-            : String(count),
+          truncated ? `${findings.length} of ${count}` : String(count),
         )}`,
       );
       for (const entry of findings) {
         lines.push("");
         finding(entry);
       }
-      if (result["findingsTruncated"] || count > findings.length) {
+      if (truncated) {
         lines.push(
           "",
           `  ${strong("MORE FINDINGS")}  codex-security findings list --scan ${clean(result["scanId"]).slice(0, 8)} --offset ${findings.length}`,
@@ -479,7 +479,7 @@ export function renderScanHistory(
           "",
           `  ${strong("FINDING HISTORY")}  codex-security scans show ${clean(result["scanId"]).slice(0, 8)} --show-linked-findings`,
         );
-      } else if (!linked && options.showLinkedFindings) {
+      } else if (!linked && !truncated && options.showLinkedFindings) {
         const matchingRepository = result["targetPath"];
         const repositoryContext = isCurrentCheckout(matchingRepository)
           ? "run"

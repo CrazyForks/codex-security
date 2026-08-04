@@ -56,6 +56,32 @@ const findingsIndexProbe = [
   "print(json.dumps({'findings': result['findings'], 'coverageReads': coverage_reads}))",
 ].join("\n");
 
+const nestedDirectoryScanProbe = [
+  "import argparse, json, pathlib, sqlite3, sys, tempfile",
+  "sys.path.insert(0, sys.argv[1])",
+  "from workbench_db import apply_migrations",
+  "from workbench_scan_history import list_scans",
+  "from workbench_target_state import ensure_security_target",
+  "with tempfile.TemporaryDirectory(prefix='codex-security-unversioned-scan-') as directory:",
+  "    root = (pathlib.Path(directory) / 'plain-directory').resolve()",
+  "    nested = root / 'src' / 'nested'",
+  "    nested.mkdir(parents=True)",
+  "    connection = sqlite3.connect(':memory:')",
+  "    connection.row_factory = sqlite3.Row",
+  "    apply_migrations(connection)",
+  "    timestamp = '2026-08-03T12:00:00Z'",
+  "    target = ensure_security_target(connection, str(root))",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('workspace', target, str(root), timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('scan', 'workspace', target, str(root), 'unversioned', '.', 'standard', directory + '/results', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('scan', timestamp))",
+  "    connection.commit()",
+  "    output = {}",
+  "    for label, path in [('root', root), ('nested', nested)]:",
+  "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    print(json.dumps(output))",
+].join("\n");
+
 function runFindingsIndex(
   targetId: string | null,
   settings: {
@@ -161,6 +187,47 @@ describe("workbench findings index", () => {
     expect(result.findings).toEqual([
       expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
     ]);
+  });
+
+  test("searches repository paths only for cross-repository queries", () => {
+    const scoped = probeFindingsIndex("current-target", {
+      query: "/CURRENT/REPOSITORY",
+    });
+    expect(scoped.findings).toEqual([]);
+
+    const unscoped = probeFindingsIndex(null, {
+      query: "/ORPHAN/REPOSITORY",
+    });
+    expect(unscoped.findings.map((finding) => finding.occurrenceId)).toEqual([
+      "orphan-old-occurrence",
+      "orphan-new-occurrence",
+    ]);
+  });
+
+  test("finds unversioned directory scans from nested subdirectories", () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    if (python === null)
+      throw new Error("Python is required for scan-history tests.");
+    const result = Bun.spawnSync(
+      [
+        python,
+        "-I",
+        "-B",
+        "-c",
+        nestedDirectoryScanProbe,
+        join(PLUGIN_ROOT, "scripts"),
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      root: ["scan"],
+      nested: ["scan"],
+    });
   });
 
   test("rejects tampered or noncanonical follow-up scan artifacts", () => {

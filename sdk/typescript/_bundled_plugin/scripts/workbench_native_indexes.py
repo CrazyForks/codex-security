@@ -44,7 +44,9 @@ def list_global_findings(
                 for value in (
                     row["title"],
                     row["summary"],
-                    row["target_path"],
+                    row["target_path"]
+                    if args.target_id is None and target_path is None
+                    else None,
                     row["location_path"],
                 )
                 if value is not None

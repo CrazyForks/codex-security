@@ -150,8 +150,10 @@ def list_scans(
             )
             if _same_repository(target, requested_repository, after_identity=requested_identity)
         ]
-        repository_clauses = ["scans.target_path = ?"]
-        values.append(str(repository))
+        repository_paths = [str(repository), *(str(parent) for parent in repository.parents)]
+        repository_placeholders = ", ".join("?" for _ in repository_paths)
+        repository_clauses = [f"scans.target_path IN ({repository_placeholders})"]
+        values.extend(repository_paths)
         if related_target_ids:
             placeholders = ", ".join("?" for _ in related_target_ids)
             repository_clauses.append(f"scans.target_id IN ({placeholders})")

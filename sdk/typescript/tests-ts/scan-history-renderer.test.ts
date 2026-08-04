@@ -526,6 +526,35 @@ describe("scan history renderer", () => {
     expect(output).toContain("scans match --all (uses Codex)");
   });
 
+  test("does not claim links are missing when scan findings are truncated", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          mode: "standard",
+          progress: { status: "complete" },
+          findingCount: 25,
+          findingsTruncated: true,
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "routes/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        { showLinkedFindings: true },
+      ),
+    );
+
+    expect(output).toContain("MORE FINDINGS");
+    expect(output).not.toContain("No saved links");
+    expect(output).not.toContain("scans match --all");
+  });
+
   test("shows saved completion warnings without marking a scan failed", () => {
     const output = stripVTControlCharacters(
       renderScanHistory(

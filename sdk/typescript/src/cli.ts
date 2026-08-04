@@ -2323,7 +2323,9 @@ function validateCliArguments(
     command !== "validate" &&
     command !== "patch" &&
     positionals.length >
-      (command === "logout" || command === "info"
+      (command === "logout" ||
+      command === "info" ||
+      (command === "findings" && subcommand === "list")
         ? 0
         : subcommand === "compare" || subcommand === "match"
           ? 2

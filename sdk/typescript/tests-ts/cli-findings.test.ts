@@ -576,6 +576,7 @@ describe("CLI findings history", () => {
       ["findings", "list", "--offset", "-1"],
       ["findings", "list", "--severity", "urgent"],
       ["findings", "list", "--scan"],
+      ["findings", "list", "31107fbe"],
     ];
     for (const command of invalid) {
       let called = false;
