@@ -44,7 +44,10 @@ import {
   PluginPythonUnavailableError,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  trustedExecutablePath,
+} from "./trusted-executable.js";
 import type { TrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -610,13 +613,11 @@ export async function runWorkbench(
     options.environment,
     git,
     git === null
-      ? (
-          await resolveTrustedExecutable(
-            options.python,
-            options.environment,
-            options.protectedRoot ?? process.cwd(),
-          )
-        )?.environment["PATH"]
+      ? await trustedExecutablePath(
+          "git",
+          options.environment,
+          options.protectedRoot ?? process.cwd(),
+        )
       : undefined,
   );
   let stdout: string;

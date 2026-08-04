@@ -499,14 +499,24 @@ describe("diff rank input", () => {
     git(nested, "config", "user.name", "Codex Security Test");
     git(nested, "config", "user.email", "codex-security@example.invalid");
     await writeRepositoryFile(nested, "action.yml", "name: local action\n");
-    git(nested, "add", "action.yml");
+    await writeRepositoryFile(nested, ".gitignore", "ignored.ts\n");
+    await writeRepositoryFile(
+      nested,
+      "ignored.ts",
+      "export const unbound = 'must not be reviewed';\n",
+    );
+    git(nested, "add", "action.yml", ".gitignore");
     git(nested, "commit", "-qm", "add local action");
 
-    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+    const rows = await runDiffRankInput(fixture, "local-patch");
+    expect(rows).toContainEqual({
       path: ".github/actions/local/action.yml",
       area: "diff",
       preview: "key name",
     });
+    expect(rows.map(({ path }) => path)).not.toContain(
+      ".github/actions/local/ignored.ts",
+    );
   });
 
   test("includes ignored Git submodules staged as regular files", async () => {

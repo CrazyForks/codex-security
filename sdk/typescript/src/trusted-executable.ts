@@ -12,6 +12,33 @@ export async function resolveTrustedExecutable(
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string,
 ): Promise<TrustedExecutable | null> {
+  const resolved = await inspectTrustedExecutable(
+    candidate,
+    environment,
+    protectedRoot,
+  );
+  return resolved.executable === null
+    ? null
+    : { executable: resolved.executable, environment: resolved.environment };
+}
+
+export async function trustedExecutablePath(
+  candidate: string,
+  environment: Readonly<Record<string, string | undefined>>,
+  protectedRoot: string,
+): Promise<string> {
+  return (await inspectTrustedExecutable(candidate, environment, protectedRoot))
+    .environment["PATH"]!;
+}
+
+async function inspectTrustedExecutable(
+  candidate: string,
+  environment: Readonly<Record<string, string | undefined>>,
+  protectedRoot: string,
+): Promise<{
+  executable: string | null;
+  environment: Record<string, string | undefined>;
+}> {
   const root = await realpath(protectedRoot).catch(() =>
     resolve(protectedRoot),
   );
@@ -70,8 +97,6 @@ export async function resolveTrustedExecutable(
       continue;
     }
   }
-  if (executable === null) return null;
-
   const sanitizedEnvironment = { ...environment };
   for (const name of Object.keys(sanitizedEnvironment)) {
     if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];

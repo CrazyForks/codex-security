@@ -101,7 +101,10 @@ import {
   validatedGitEnvironment,
   validateMode,
 } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  trustedExecutablePath,
+} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -546,13 +549,7 @@ export class CodexSecurity {
       );
       const sanitizedPath =
         git === null
-          ? (
-              await resolveTrustedExecutable(
-                python,
-                pluginEnvironment,
-                protectedRoot,
-              )
-            )?.environment["PATH"]
+          ? await trustedExecutablePath("git", pluginEnvironment, protectedRoot)
           : undefined;
       checkOpen();
       const scanOutputRoot =

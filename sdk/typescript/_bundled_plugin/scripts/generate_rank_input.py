@@ -48,6 +48,7 @@ from rank_preview import (
     structural_outline,
 )
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT, trusted_git_executable
+from workbench_target import git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -915,6 +916,14 @@ def git_untracked_paths(repo: Path) -> list[tuple[Path, str]]:
         path = repo / os.fsdecode(value)
         if not path.is_dir() or path.is_symlink():
             paths.append((path, "A"))
+            continue
+        nested_paths = git_directory_snapshot_paths(path)
+        if nested_paths is not None:
+            paths.extend(
+                (nested_path, "A")
+                for nested_path in nested_paths
+                if not nested_path.is_dir() or nested_path.is_symlink()
+            )
             continue
         for directory, children, files in os.walk(path, followlinks=False):
             children[:] = sorted(child for child in children if child != ".git")

@@ -1983,13 +1983,18 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const protectedBinaries = join(repository, "node_modules", ".bin");
+      const unsafeBinaries = join(root, "unsafe-binaries");
       const safeBinaries = join(root, "trusted-binaries");
       const pluginRoot = join(root, "plugin");
       await Promise.all([
         mkdir(protectedBinaries, { recursive: true }),
+        mkdir(unsafeBinaries, { recursive: true }),
         mkdir(safeBinaries, { recursive: true }),
         mkdir(join(pluginRoot, "scripts"), { recursive: true }),
       ]);
+      const repositoryGit = join(repository, "git");
+      await writeFile(repositoryGit, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+      await symlink(repositoryGit, join(unsafeBinaries, "git"));
       await writeFile(
         join(safeBinaries, "rg"),
         "#!/bin/sh\nprintf '%s\\n' trusted-ripgrep\n",
@@ -1998,9 +2003,10 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(
         join(pluginRoot, "scripts", "workbench_db.py"),
         [
-          "import json, os, subprocess",
+          "import json, os, shutil, subprocess",
           "assert os.environ.get('GIT_CONFIG_COUNT') is None",
           "assert os.environ['CODEX_SECURITY_GIT'] == ''",
+          "assert shutil.which('git') is None",
           "result = subprocess.run(['rg'], check=True, capture_output=True, text=True)",
           "print(json.dumps({'path': os.environ['PATH'], 'output': result.stdout.strip()}))",
         ].join("\n"),
@@ -2014,7 +2020,9 @@ describe("runtime directories and plugin Python boundary", () => {
           pluginRoot,
           protectedRoot: repository,
           environment: {
-            PATH: `${protectedBinaries}${delimiter}${safeBinaries}`,
+            PATH: [unsafeBinaries, protectedBinaries, safeBinaries].join(
+              delimiter,
+            ),
             GIT_CONFIG_COUNT: "1",
           },
         },
