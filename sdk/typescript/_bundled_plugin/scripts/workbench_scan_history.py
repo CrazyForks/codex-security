@@ -150,7 +150,15 @@ def list_scans(
             )
             if _same_repository(target, requested_repository, after_identity=requested_identity)
         ]
-        repository_paths = [str(repository), *(str(parent) for parent in repository.parents)]
+        repository_root = git_output(repository, "rev-parse", "--show-toplevel")
+        checkout_boundary = (
+            Path(repository_root).resolve() if repository_root is not None else None
+        )
+        repository_paths = [str(repository)]
+        for parent in repository.parents:
+            if checkout_boundary is not None and not parent.is_relative_to(checkout_boundary):
+                break
+            repository_paths.append(str(parent))
         repository_placeholders = ", ".join("?" for _ in repository_paths)
         repository_clauses = [f"scans.target_path IN ({repository_placeholders})"]
         values.extend(repository_paths)

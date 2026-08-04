@@ -409,6 +409,8 @@ describe("scan history renderer", () => {
     );
 
     expect(output).toContain("VIEW LATEST  codex-security scans show bbbbbbbb");
+    expect(output).toContain("latest: 3 findings");
+    expect(output).not.toContain("latest: 2 findings");
     expect(output).toContain(
       "COMPARE      codex-security scans compare aaaaaaaa bbbbbbbb",
     );
@@ -553,6 +555,36 @@ describe("scan history renderer", () => {
     expect(output).toContain("MORE FINDINGS");
     expect(output).not.toContain("No saved links");
     expect(output).not.toContain("scans match --all");
+  });
+
+  test("directs nested checkout matching to the scanned target root", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/plain-directory",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "src/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        {
+          currentDirectory: "/demo/plain-directory/src/nested",
+          showLinkedFindings: true,
+        },
+      ),
+    );
+
+    expect(output).toContain(
+      "from /demo/plain-directory, run codex-security scans match --all",
+    );
   });
 
   test("shows saved completion warnings without marking a scan failed", () => {

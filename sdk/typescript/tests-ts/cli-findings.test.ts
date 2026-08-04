@@ -282,6 +282,42 @@ describe("CLI findings history", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({ findings: [] });
   });
 
+  test("finds scanned checkout subdirectories from the repository root", async () => {
+    for (const command of [["findings"], ["scans", "show"]]) {
+      const calls: Array<readonly string[]> = [];
+      expect(
+        await main(
+          command,
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [
+                    {
+                      scanId: "scoped-scan",
+                      targetId: "scoped-target",
+                      targetPath: "/current/repository/src",
+                      progress: { status: "complete" },
+                    },
+                  ],
+                };
+              }
+              return args[0] === "get-scan"
+                ? { scan: { scanId: "scoped-scan", findings: [] } }
+                : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls[1]).toContain(
+        command[0] === "findings" ? "scoped-target" : "scoped-scan",
+      );
+    }
+  });
+
   test("lists findings across repositories without a target filter", async () => {
     const calls: Array<readonly string[]> = [];
     expect(

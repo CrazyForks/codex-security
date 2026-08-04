@@ -740,11 +740,16 @@ export async function main(
       const targetPath = scan["targetPath"];
       if (typeof targetPath !== "string") continue;
       const checkoutRelative = relative(targetPath, directory);
-      if (
+      const targetRelative = relative(directory, targetPath);
+      const outsideTarget =
         checkoutRelative === ".." ||
         checkoutRelative.startsWith(`..${sep}`) ||
-        isAbsolute(checkoutRelative)
-      ) {
+        isAbsolute(checkoutRelative);
+      const outsideDirectory =
+        targetRelative === ".." ||
+        targetRelative.startsWith(`..${sep}`) ||
+        isAbsolute(targetRelative);
+      if (outsideTarget && outsideDirectory) {
         continue;
       }
       if (

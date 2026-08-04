@@ -57,7 +57,7 @@ const findingsIndexProbe = [
 ].join("\n");
 
 const nestedDirectoryScanProbe = [
-  "import argparse, json, pathlib, sqlite3, sys, tempfile",
+  "import argparse, json, pathlib, sqlite3, subprocess, sys, tempfile",
   "sys.path.insert(0, sys.argv[1])",
   "from workbench_db import apply_migrations",
   "from workbench_scan_history import list_scans",
@@ -66,6 +66,10 @@ const nestedDirectoryScanProbe = [
   "    root = (pathlib.Path(directory) / 'plain-directory').resolve()",
   "    nested = root / 'src' / 'nested'",
   "    nested.mkdir(parents=True)",
+  "    independent = root / 'independent-git'",
+  "    independent_nested = independent / 'src'",
+  "    independent_nested.mkdir(parents=True)",
+  "    subprocess.run(['git', 'init', '-q', str(independent)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
   "    connection = sqlite3.connect(':memory:')",
   "    connection.row_factory = sqlite3.Row",
   "    apply_migrations(connection)",
@@ -76,7 +80,7 @@ const nestedDirectoryScanProbe = [
   "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('scan', timestamp))",
   "    connection.commit()",
   "    output = {}",
-  "    for label, path in [('root', root), ('nested', nested)]:",
+  "    for label, path in [('root', root), ('nested', nested), ('independentGit', independent), ('nestedIndependentGit', independent_nested)]:",
   "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
   "    print(json.dumps(output))",
@@ -227,6 +231,8 @@ describe("workbench findings index", () => {
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
       root: ["scan"],
       nested: ["scan"],
+      independentGit: [],
+      nestedIndependentGit: [],
     });
   });
 

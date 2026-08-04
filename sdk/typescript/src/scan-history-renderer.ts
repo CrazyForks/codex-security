@@ -280,9 +280,20 @@ export function renderScanHistory(
           "",
       ),
     );
-    const latest = scans.find(
-      (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
-    )?.["findingCount"];
+    const completed = scans
+      .filter(
+        (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
+      )
+      .sort((left, right) => {
+        const leftCompleted = String(
+          left["completedAt"] ?? left["startedAt"] ?? "",
+        );
+        const rightCompleted = String(
+          right["completedAt"] ?? right["startedAt"] ?? "",
+        );
+        return rightCompleted.localeCompare(leftCompleted);
+      });
+    const latest = completed[0]?.["findingCount"];
     const multipleRepositories =
       options.repository === undefined &&
       new Set(scans.map((scan) => scan["targetPath"])).size > 1;
@@ -318,19 +329,6 @@ export function renderScanHistory(
         );
       }
     }
-    const completed = scans
-      .filter(
-        (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
-      )
-      .sort((left, right) => {
-        const leftCompleted = String(
-          left["completedAt"] ?? left["startedAt"] ?? "",
-        );
-        const rightCompleted = String(
-          right["completedAt"] ?? right["startedAt"] ?? "",
-        );
-        return rightCompleted.localeCompare(leftCompleted);
-      });
     if (completed.length > 0) {
       const latest = completed[0]!;
       const scanPrefix = clean(latest["scanId"]).slice(0, 8);
@@ -481,9 +479,12 @@ export function renderScanHistory(
         );
       } else if (!linked && !truncated && options.showLinkedFindings) {
         const matchingRepository = result["targetPath"];
-        const repositoryContext = isCurrentCheckout(matchingRepository)
-          ? "run"
-          : `from ${clean(matchingRepository)}, run`;
+        const repositoryContext =
+          typeof matchingRepository === "string" &&
+          options.currentDirectory !== undefined &&
+          matchingRepository !== options.currentDirectory
+            ? `from ${clean(matchingRepository)}, run`
+            : "run";
         lines.push(
           "",
           `  ${strong("FINDING HISTORY")}  No saved links; ${repositoryContext} codex-security scans match --all (uses Codex).`,
