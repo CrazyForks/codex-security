@@ -98,6 +98,53 @@ describe("CLI findings history", () => {
     expect(calls[1]).not.toContain("related-target");
   });
 
+  test("keeps stable target history isolated when an older checkout path is reused", async () => {
+    const calls: Array<readonly string[]> = [];
+    expect(
+      await main(
+        ["findings", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return args[0] === "list-scans"
+              ? {
+                  scans: [
+                    {
+                      scanId: "current",
+                      targetId: "current-target",
+                      targetPath: "/current/repository",
+                    },
+                    {
+                      scanId: "historical",
+                      targetId: "current-target",
+                      targetPath: "/another/reused-checkout",
+                    },
+                    {
+                      scanId: "unrelated",
+                      targetId: "reused-target",
+                      targetPath: "/another/reused-checkout",
+                    },
+                  ],
+                }
+              : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(calls[1]).toEqual([
+      "list-global-findings",
+      "--target-id",
+      "current-target",
+      "--offset",
+      "0",
+      "--limit",
+      "20",
+    ]);
+  });
+
   test("returns an empty repository page without querying other targets", async () => {
     const calls: Array<readonly string[]> = [];
     const stdout = capture();

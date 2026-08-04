@@ -59,6 +59,8 @@ const MAX_PLUGIN_MANIFEST_SIZE = 1024 * 1024;
 const MAX_PLUGIN_COPY_ENTRIES = 4_096;
 const MAX_PLUGIN_COPY_FILE_SIZE = 128 * 1024 * 1024;
 const MAX_PLUGIN_COPY_SIZE = 512 * 1024 * 1024;
+const MAX_WORKBENCH_OUTPUT_SIZE = 4 * 1024 * 1024;
+const MAX_FINDING_DETAIL_OUTPUT_SIZE = 132 * 1024 * 1024;
 const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
@@ -613,14 +615,20 @@ export async function runWorkbench(
           ),
         ),
         encoding: "utf8",
-        maxBuffer: 4 * 1024 * 1024,
+        maxBuffer:
+          args[0] === "get-finding"
+            ? MAX_FINDING_DETAIL_OUTPUT_SIZE
+            : MAX_WORKBENCH_OUTPUT_SIZE,
         windowsHide: true,
         signal: options.signal,
       },
     ));
   } catch (error) {
     if (options.signal?.aborted) throw error;
-    const detail = processErrorDetail(error);
+    const detail =
+      nodeErrorCode(error) === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+        ? "The workbench response exceeded the maximum allowed size."
+        : processErrorDetail(error);
     const databaseFailure =
       /\b(?:unable to open database file|attempt to write a readonly database|readonly database|disk i\/o error)\b/iu.test(
         detail,

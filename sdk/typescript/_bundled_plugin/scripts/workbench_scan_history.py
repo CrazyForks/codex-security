@@ -161,8 +161,9 @@ def list_scans(
                     checkout_boundary = candidate
                     break
         repository_paths = [str(repository)]
-        registered_repository = requested_repository["target_id"] or connection.execute(
-            "SELECT 1 FROM scans WHERE target_path = ? LIMIT 1", (str(repository),)
+        registered_repository = connection.execute(
+            "SELECT 1 FROM scans WHERE target_path = ? OR target_id = ? LIMIT 1",
+            (str(repository), requested_repository["target_id"]),
         ).fetchone()
         if not registered_repository:
             for parent in repository.parents:
@@ -171,15 +172,23 @@ def list_scans(
                 repository_paths.append(str(parent))
                 registered_parent = connection.execute(
                     """
-                    SELECT 1 FROM security_targets WHERE current_path = ?
-                    UNION
                     SELECT 1 FROM scans WHERE target_path = ?
                     LIMIT 1
                     """,
-                    (str(parent), str(parent)),
+                    (str(parent),),
                 ).fetchone()
                 if registered_parent is not None:
                     break
+        if requested_identity[0] is not None:
+            for scan in connection.execute(
+                "SELECT target_id, target_path FROM scans WHERE target_id IS NULL"
+            ):
+                target_path = Path(scan["target_path"])
+                if target_path.is_relative_to(repository) and _same_repository(
+                    scan, requested_repository, after_identity=requested_identity
+                ):
+                    repository_paths.append(str(target_path))
+        repository_paths = list(dict.fromkeys(repository_paths))
         repository_placeholders = ", ".join("?" for _ in repository_paths)
         repository_clauses = [f"scans.target_path IN ({repository_placeholders})"]
         values.extend(repository_paths)

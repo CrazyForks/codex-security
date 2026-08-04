@@ -84,6 +84,7 @@ const nestedDirectoryScanProbe = [
   "        connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', (workspace_id, target, str(path), timestamp, timestamp))",
   "        connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan_id, workspace_id, target, str(path), 'unversioned', '.', 'standard', directory + '/results/' + scan_id, 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
   "        connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', (scan_id, timestamp))",
+  "    ensure_security_target(connection, str(root / 'src'))",
   "    connection.commit()",
   "    output = {}",
   "    for label, path in [('root', root), ('nested', nested), ('independentGit', independent), ('nestedIndependentGit', independent_nested), ('independentService', service), ('nestedIndependentService', nested_service)]:",
@@ -93,6 +94,19 @@ const nestedDirectoryScanProbe = [
   "        for label, path in [('independentGitWithoutGit', independent), ('nestedIndependentGitWithoutGit', independent_nested)]:",
   "            args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "            output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    git_root = (pathlib.Path(directory) / 'legacy-git-checkout').resolve()",
+  "    git_service = git_root / 'src'",
+  "    git_service.mkdir(parents=True)",
+  "    subprocess.run(['git', 'init', '-q', str(git_root)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+  "    connection.execute('INSERT INTO workspaces(id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?)', ('legacy-git-workspace', str(git_service), timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('legacy-git-scan', 'legacy-git-workspace', None, str(git_service), 'unversioned', '.', 'standard', directory + '/results/legacy-git', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('legacy-git-scan', timestamp))",
+  "    for label, path in [('legacyGitRoot', git_root), ('legacyGitSubdirectory', git_service)]:",
+  "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    ensure_security_target(connection, str(git_service))",
+  "    args = argparse.Namespace(repository=str(git_root), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    output['registeredLegacyGitRoot'] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
   "    print(json.dumps(output))",
 ].join("\n");
 
@@ -113,15 +127,19 @@ const findingDetailProbe = [
   "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('scan', 'workspace', target, str(root), 'unversioned', '.', 'standard', directory + '/results', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
   "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('scan', timestamp))",
   "    connection.execute('INSERT INTO findings(id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', ('finding', 'fingerprint', 'rule', 'anchor', timestamp, timestamp))",
-  "    details = {'fingerprints': {'algorithm': 'codex-security/v1', 'primary': 'fingerprint'}, 'rootCause': {'summary': 'Missing authorization', 'evidenceRefs': [f'evidence-{index}' for index in range(5)]}, 'codeEvidence': [{'id': f'evidence-{index}', 'label': f'Source {index}', 'path': f'src/{index}.py', 'startLine': index + 1, 'code': f'unsafe_{index}()', 'explanation': 'Untrusted source.'} for index in range(5)], 'attackPath': {'dataflow': {'evidenceRefs': ['evidence-4'], 'summary': 'Attacker input reaches the sink.'}}, 'confidence': {'level': 'high', 'rationale': 'Confirmed with live replay.'}, 'severity': {'level': 'high', 'rationale': 'Cross-account disclosure.'}, 'remediationTests': ['Reject a cross-account request.'], 'preventiveControls': ['Centralize account authorization.'], 'sourceExcerpt': 'forged excerpt', 'artifactPaths': ['/untrusted/forged-artifact']}",
-  "    connection.execute('INSERT INTO finding_occurrences(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('occurrence', 'finding', 'scan', 'Missing authorization', 'Cross-account access', 'high', 'high', 'Enforce account ownership.', json.dumps(details), timestamp))",
+  "    title = 'T' * 600",
+  "    summary = 'S' * 2500",
+  "    remediation = 'R' * 2500",
+  "    details = {'fingerprints': {'algorithm': 'codex-security/v1', 'primary': 'fingerprint'}, 'rootCause': {'summary': 'Missing authorization', 'evidenceRefs': [f'evidence-{index}' for index in range(5)]}, 'codeEvidence': [{'id': f'evidence-{index}', 'label': f'Source {index}', 'path': f'src/{index}.py', 'startLine': index + 1, 'code': f'unsafe_{index}()', 'explanation': 'Untrusted source.'} for index in range(5)], 'attackPath': {'dataflow': {'evidenceRefs': ['evidence-4'], 'summary': 'Attacker input reaches the sink.'}}, 'confidence': {'level': 'high', 'rationale': 'Confirmed with live replay.'}, 'severity': {'level': 'high', 'rationale': 'Cross-account disclosure.'}, 'remediationTests': ['Reject a cross-account request.'], 'preventiveControls': ['Centralize account authorization.'], 'status': 'open', 'matches': [{'title': 'forged history'}], 'knownSince': '2000-01-01', 'knownScanIds': ['forged-scan'], 'sourceExcerpt': 'forged excerpt', 'artifactPaths': ['/untrusted/forged-artifact']}",
+  "    connection.execute('INSERT INTO finding_occurrences(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('occurrence', 'finding', 'scan', title, summary, 'high', 'high', remediation, json.dumps(details), timestamp))",
+  "    connection.execute('INSERT INTO finding_triage(occurrence_id, status, close_reason, note, updated_at) VALUES (?, ?, ?, ?, ?)', ('occurrence', 'closed', 'false_positive', 'Reviewed', timestamp))",
   "    for index in range(9):",
   "        connection.execute('INSERT INTO finding_locations(occurrence_id, relative_path, start_line, end_line, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)', ('occurrence', f'src/{index}.py', index + 1, index + 1, 'root_control' if index == 0 else 'sink', index))",
   "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
   "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
   "    preview = finding_result(connection, scan, occurrence)",
   "    detail = finding_result(connection, scan, occurrence, full_details=True)",
-  "    print(json.dumps({'preview': {'evidenceCount': len(preview['codeEvidence']), 'locationCount': len(preview['locations']), 'hasFingerprints': 'fingerprints' in preview, 'hasRemediationTests': 'remediationTests' in preview}, 'detail': {'evidenceCount': len(detail['codeEvidence']), 'locationCount': len(detail['locations']), 'fingerprints': detail['fingerprints'], 'evidenceRefs': detail['rootCause']['evidenceRefs'], 'nestedEvidenceRefs': detail['attackPath']['dataflow']['evidenceRefs'], 'confidenceRationale': detail['confidence']['rationale'], 'severityRationale': detail['severity']['rationale'], 'remediationTests': detail['remediationTests'], 'preventiveControls': detail['preventiveControls'], 'artifactPaths': detail['artifactPaths'], 'hasForgedExcerpt': detail.get('sourceExcerpt') == 'forged excerpt'}}))",
+  "    print(json.dumps({'preview': {'evidenceCount': len(preview['codeEvidence']), 'locationCount': len(preview['locations']), 'hasFingerprints': 'fingerprints' in preview, 'hasRemediationTests': 'remediationTests' in preview, 'titleLength': len(preview['title']), 'summaryLength': len(preview['summary']), 'remediationLength': len(preview['remediation'])}, 'detail': {'evidenceCount': len(detail['codeEvidence']), 'locationCount': len(detail['locations']), 'fingerprints': detail['fingerprints'], 'evidenceRefs': detail['rootCause']['evidenceRefs'], 'nestedEvidenceRefs': detail['attackPath']['dataflow']['evidenceRefs'], 'confidenceRationale': detail['confidence']['rationale'], 'severityRationale': detail['severity']['rationale'], 'remediationTests': detail['remediationTests'], 'preventiveControls': detail['preventiveControls'], 'artifactPaths': detail['artifactPaths'], 'hasForgedExcerpt': detail.get('sourceExcerpt') == 'forged excerpt', 'hasForgedHistory': any(key in detail for key in ('matches', 'knownSince', 'knownScanIds')), 'status': detail['status'], 'triageStatus': detail['triage']['status'], 'titleLength': len(detail['title']), 'summaryLength': len(detail['summary']), 'remediationLength': len(detail['remediation'])}}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -298,6 +316,9 @@ describe("workbench findings index", () => {
       nestedIndependentService: ["independent-service-scan"],
       independentGitWithoutGit: [],
       nestedIndependentGitWithoutGit: [],
+      legacyGitRoot: ["legacy-git-scan"],
+      legacyGitSubdirectory: ["legacy-git-scan"],
+      registeredLegacyGitRoot: ["legacy-git-scan"],
     });
   });
 
@@ -327,6 +348,9 @@ describe("workbench findings index", () => {
         locationCount: 8,
         hasFingerprints: false,
         hasRemediationTests: false,
+        titleLength: 512,
+        summaryLength: 2000,
+        remediationLength: 2000,
       },
       detail: {
         evidenceCount: 5,
@@ -349,6 +373,12 @@ describe("workbench findings index", () => {
         preventiveControls: ["Centralize account authorization."],
         artifactPaths: [],
         hasForgedExcerpt: false,
+        hasForgedHistory: false,
+        status: "closed",
+        triageStatus: "closed",
+        titleLength: 600,
+        summaryLength: 2500,
+        remediationLength: 2500,
       },
     });
   });

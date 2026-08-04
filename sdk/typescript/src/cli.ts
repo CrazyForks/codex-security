@@ -849,8 +849,18 @@ export async function main(
             result["scans"] as JsonObject[],
             repository,
           );
+          const targetIds = new Set(
+            scans
+              .map((scan) => scan["targetId"])
+              .filter((id): id is string => typeof id === "string"),
+          );
           const scannedPaths = new Set(scans.map((scan) => scan["targetPath"]));
-          if (scannedPaths.size > 1) {
+          if (
+            targetIds.size === 1 &&
+            scans.every((scan) => typeof scan["targetId"] === "string")
+          ) {
+            targetId = [...targetIds][0];
+          } else if (scannedPaths.size > 1) {
             targetPaths = [...scannedPaths].filter(
               (path): path is string => typeof path === "string",
             );

@@ -232,7 +232,14 @@ describe("scan history renderer", () => {
           scanDir: "/private/codex-security/scan-results",
           targetPath: "/demo/juice-shop",
           occurrenceId: "occ_saved_finding_25",
-          severity: { level: "high" },
+          severity: {
+            level: "high",
+            rationale: "Cross-account customer data is exposed.",
+          },
+          confidence: {
+            level: "medium",
+            rationale: "The vulnerable query was reproduced locally.",
+          },
           title: "Historic login injection",
           locations: [
             { path: "routes/login.ts", startLine: 34, role: "root_control" },
@@ -252,6 +259,14 @@ describe("scan history renderer", () => {
           },
           attackPath: {
             summary: "An unauthenticated visitor submits a crafted account ID.",
+            impact: {
+              level: "high",
+              why: "Private customer data is returned.",
+            },
+            likelihood: {
+              level: "medium",
+              why: "The affected endpoint accepts public requests.",
+            },
           },
           codeEvidence: [
             {
@@ -289,6 +304,10 @@ describe("scan history renderer", () => {
       "LINKED FINDINGS",
       "Previous login injection",
       "User input reaches a SQL query.",
+      "SEVERITY",
+      "Cross-account customer data is exposed.",
+      "CONFIDENCE  MEDIUM",
+      "The vulnerable query was reproduced locally.",
       "AFFECTED LOCATIONS",
       "routes/database.ts:51-53",
       "ROOT CAUSE",
@@ -297,6 +316,8 @@ describe("scan history renderer", () => {
       "Traced account input into the database sink.",
       "ATTACK PATH",
       "An unauthenticated visitor submits a crafted account ID.",
+      "Impact: Private customer data is returned.",
+      "Likelihood: The affected endpoint accepts public requests.",
       "CODE EVIDENCE",
       "Untrusted account identifier reaches query execution",
       "The driver receives attacker-controlled SQL.",
@@ -313,6 +334,26 @@ describe("scan history renderer", () => {
     ]) {
       expect(detail).toContain(expected);
     }
+  });
+
+  test("prefers authoritative triage over a conflicting stored finding status", () => {
+    const output = renderScanHistory(
+      {
+        scanId: "scan",
+        targetPath: "/demo/repository",
+        occurrenceId: "occurrence",
+        severity: { level: "high" },
+        title: "Missing authorization",
+        status: "open",
+        triage: { status: "closed" },
+        locations: [{ path: "src/server.ts", startLine: 4 }],
+      },
+      "finding",
+      { color: false },
+    );
+
+    expect(output).toContain("CLOSED");
+    expect(output).not.toContain("OPEN");
   });
 
   test("renders structured validation, nested attack paths, and legacy source proof", () => {

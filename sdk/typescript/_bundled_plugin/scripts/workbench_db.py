@@ -3163,7 +3163,22 @@ def finding_result(
     full_details: bool = False,
 ) -> dict[str, Any]:
     stored_details = read_finding_details(occurrence["details_json"])
-    details = stored_details if full_details else bounded_finding_details(stored_details)
+    details = dict(stored_details if full_details else bounded_finding_details(stored_details))
+    for field in (
+        "artifactPaths",
+        "knownScanIds",
+        "knownSince",
+        "matches",
+        "occurrenceCount",
+        "scanDir",
+        "scanId",
+        "sourceExcerpt",
+        "status",
+        "targetId",
+        "targetPath",
+        "updatedAt",
+    ):
+        details.pop(field, None)
     confidence = details.get("confidence")
     confidence = confidence if isinstance(confidence, dict) else {}
     severity = details.get("severity")
@@ -3199,6 +3214,7 @@ def finding_result(
                 absolute_path, FINDING_ABSOLUTE_PATH_BYTES
             )
         locations.append(location)
+    triage = finding_triage_result(connection, occurrence["id"])
     result = {
         **details,
         "confidence": {
@@ -3210,14 +3226,27 @@ def finding_result(
         "locations": locations,
         "occurrenceId": occurrence["id"],
         "remediationState": finding_remediation_result(connection, occurrence["id"]),
-        "remediation": bounded_output_text(occurrence["remediation"], FINDING_REMEDIATION_BYTES),
+        "remediation": (
+            occurrence["remediation"]
+            if full_details
+            else bounded_output_text(occurrence["remediation"], FINDING_REMEDIATION_BYTES)
+        ),
         "severity": {
             **severity,
             "level": bounded_output_text(occurrence["severity"], FINDING_LEVEL_BYTES),
         },
-        "summary": bounded_output_text(occurrence["summary"], FINDING_SUMMARY_BYTES),
-        "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
-        "triage": finding_triage_result(connection, occurrence["id"]),
+        "status": triage["status"],
+        "summary": (
+            occurrence["summary"]
+            if full_details
+            else bounded_output_text(occurrence["summary"], FINDING_SUMMARY_BYTES)
+        ),
+        "title": (
+            occurrence["title"]
+            if full_details
+            else bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES)
+        ),
+        "triage": triage,
     }
     matches, known_since, known_scan_ids = scan_history.finding_matches(
         connection, occurrence["id"], scan["id"], scan["started_at"]
@@ -3226,8 +3255,6 @@ def finding_result(
         result["matches"] = matches
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
-    result.pop("artifactPaths", None)
-    result.pop("sourceExcerpt", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt

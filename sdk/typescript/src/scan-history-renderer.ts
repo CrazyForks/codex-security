@@ -185,7 +185,7 @@ export function renderScanHistory(
     if (command === "findings" || command === "finding") {
       const occurrenceId = entry["occurrenceId"];
       const triage = entry["triage"] as JsonObject | undefined;
-      const status = entry["status"] ?? triage?.["status"];
+      const status = triage?.["status"] ?? entry["status"];
       const scanId = entry["scanId"];
       const occurrenceCount = entry["occurrenceCount"];
       const details = [
@@ -327,12 +327,35 @@ export function renderScanHistory(
         "conclusion",
         "rationale",
         "explanation",
+        "why",
       ]) {
         const candidate = (value as JsonObject)[key];
         if (typeof candidate === "string" && candidate) return candidate;
       }
       return undefined;
     };
+    for (const [label, key] of [
+      ["SEVERITY", "severity"],
+      ["CONFIDENCE", "confidence"],
+    ] as const) {
+      const value = result[key];
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        continue;
+      }
+      const level = value["level"];
+      const rationale = description(value);
+      if (
+        (key === "severity" && rationale === undefined) ||
+        (typeof level !== "string" && rationale === undefined)
+      ) {
+        continue;
+      }
+      lines.push(
+        "",
+        `  ${strong(label)}${typeof level === "string" ? `  ${strong(clean(level).toUpperCase())}` : ""}`,
+      );
+      if (rationale !== undefined) wrap(rationale, 4);
+    }
     for (const [label, key] of [
       ["ROOT CAUSE", "rootCause"],
       ["VALIDATION", "validation"],
