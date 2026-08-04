@@ -3159,8 +3159,13 @@ def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
+    *,
+    include_remediation_details: bool = False,
 ) -> dict[str, Any]:
-    details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
+    details = bounded_finding_details(
+        read_finding_details(occurrence["details_json"]),
+        include_remediation=include_remediation_details,
+    )
     confidence = details.get("confidence")
     confidence = confidence if isinstance(confidence, dict) else {}
     severity = details.get("severity")
@@ -3620,7 +3625,11 @@ def main() -> None:
             occurrence = require_occurrence(connection, occurrence["id"])
             result = {
                 "scan": {
-                    "findings": [finding_result(connection, scan, occurrence)],
+                    "findings": [
+                        finding_result(
+                            connection, scan, occurrence, include_remediation_details=True
+                        )
+                    ],
                     "scanId": scan["id"],
                     "targetPath": scan["target_path"],
                 }

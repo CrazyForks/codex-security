@@ -252,6 +252,53 @@ describe("CLI findings history", () => {
     expect(calls[1]).not.toContain("sibling-target");
   });
 
+  test("prefers checkout-root scans over separately scanned subdirectories", async () => {
+    for (const command of [["findings"], ["scans", "show"]]) {
+      const calls: Array<readonly string[]> = [];
+      expect(
+        await main(
+          command,
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [
+                    {
+                      scanId: "newer-nested-scan",
+                      targetId: "nested-target",
+                      targetPath: "/current/repository/src",
+                      completedAt: "2026-08-03T12:00:00Z",
+                      progress: { status: "complete" },
+                    },
+                    {
+                      scanId: "root-scan",
+                      targetId: "root-target",
+                      targetPath: "/current/repository",
+                      completedAt: "2026-08-02T12:00:00Z",
+                      progress: { status: "complete" },
+                    },
+                  ],
+                };
+              }
+              return args[0] === "get-scan"
+                ? { scan: { scanId: "root-scan", findings: [] } }
+                : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls[1]).toContain(
+        command[0] === "findings" ? "root-target" : "root-scan",
+      );
+      expect(calls[1]).not.toContain(
+        command[0] === "findings" ? "nested-target" : "newer-nested-scan",
+      );
+    }
+  });
+
   test("does not display a sibling checkout when this checkout has no scans", async () => {
     const calls: Array<readonly string[]> = [];
     const stdout = capture();
@@ -434,6 +481,8 @@ describe("CLI findings history", () => {
       severity: { level: "high" },
       title: "Historic SQL injection",
       matches: [{ scanId: "previous-scan", title: "Previous injection" }],
+      remediationTests: ["Reject interpolated account identifiers."],
+      preventiveControls: ["Require parameterized query helpers."],
     };
     expect(
       await main(

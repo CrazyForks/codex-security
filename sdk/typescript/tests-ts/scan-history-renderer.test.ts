@@ -233,9 +233,40 @@ describe("scan history renderer", () => {
           occurrenceId: "occ_saved_finding_25",
           severity: { level: "high" },
           title: "Historic login injection",
-          locations: [{ path: "routes/login.ts", startLine: 34 }],
+          locations: [
+            { path: "routes/login.ts", startLine: 34, role: "root_control" },
+            {
+              path: "routes/database.ts",
+              startLine: 51,
+              endLine: 53,
+              role: "sink",
+            },
+          ],
           summary: "User input reaches a SQL query.",
+          rootCause: {
+            summary: "Account input bypasses query parameterization.",
+          },
+          validation: {
+            summary: "Traced account input into the database sink.",
+          },
+          attackPath: {
+            summary: "An unauthenticated visitor submits a crafted account ID.",
+          },
+          codeEvidence: [
+            {
+              label: "Untrusted account identifier reaches query execution",
+              path: "routes/database.ts",
+              startLine: 51,
+              explanation: "The driver receives attacker-controlled SQL.",
+              code: "database.query(accountId);",
+            },
+          ],
+          sourceExcerpt:
+            "50  const accountId = request.body.accountId;\n51  database.query(accountId);",
           remediation: "Use a parameterized query.",
+          remediationTests: ["Reject crafted account identifiers."],
+          preventiveControls: ["Require the parameterized-query wrapper."],
+          artifactPaths: ["findings/login-injection/report.md"],
           knownSince: "2026-06-15T12:00:00Z",
           knownScanIds: ["87654321-abcd-4567-abcd-1234567890ab"],
           matches: [
@@ -257,7 +288,26 @@ describe("scan history renderer", () => {
       "LINKED FINDINGS",
       "Previous login injection",
       "User input reaches a SQL query.",
+      "AFFECTED LOCATIONS",
+      "routes/database.ts:51-53",
+      "ROOT CAUSE",
+      "Account input bypasses query parameterization.",
+      "VALIDATION",
+      "Traced account input into the database sink.",
+      "ATTACK PATH",
+      "An unauthenticated visitor submits a crafted account ID.",
+      "CODE EVIDENCE",
+      "Untrusted account identifier reaches query execution",
+      "The driver receives attacker-controlled SQL.",
+      "SOURCE EXCERPT",
+      "database.query(accountId);",
       "Use a parameterized query.",
+      "REMEDIATION TESTS",
+      "Reject crafted account identifiers.",
+      "PREVENTIVE CONTROLS",
+      "Require the parameterized-query wrapper.",
+      "EVIDENCE ARTIFACTS",
+      "findings/login-injection/report.md",
       "findings false-positive occ_saved_finding_25 --reason TEXT",
     ]) {
       expect(detail).toContain(expected);
@@ -348,6 +398,22 @@ describe("scan history renderer", () => {
       }),
     );
     expect(list).toContain(
+      "FINDINGS     codex-security findings list --scan aaaaaaaa",
+    );
+
+    const ancestor = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [{ ...scan, targetPath: "/demo/current-checkout" }],
+        },
+        "list",
+        {
+          currentDirectory: "/demo/current-checkout/service",
+          repository: "/demo/current-checkout/service",
+        },
+      ),
+    );
+    expect(ancestor).toContain(
       "FINDINGS     codex-security findings list --scan aaaaaaaa",
     );
 

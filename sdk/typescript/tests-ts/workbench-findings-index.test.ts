@@ -70,20 +70,33 @@ const nestedDirectoryScanProbe = [
   "    independent_nested = independent / 'src'",
   "    independent_nested.mkdir(parents=True)",
   "    subprocess.run(['git', 'init', '-q', str(independent)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+  "    service = root / 'independent-service'",
+  "    nested_service = service / 'src'",
+  "    nested_service.mkdir(parents=True)",
   "    connection = sqlite3.connect(':memory:')",
   "    connection.row_factory = sqlite3.Row",
   "    apply_migrations(connection)",
   "    timestamp = '2026-08-03T12:00:00Z'",
-  "    target = ensure_security_target(connection, str(root))",
-  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('workspace', target, str(root), timestamp, timestamp))",
-  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('scan', 'workspace', target, str(root), 'unversioned', '.', 'standard', directory + '/results', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
-  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('scan', timestamp))",
+  "    for scan_id, path in [('scan', root), ('independent-service-scan', service)]:",
+  "        target = ensure_security_target(connection, str(path))",
+  "        workspace_id = scan_id + '-workspace'",
+  "        connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', (workspace_id, target, str(path), timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan_id, workspace_id, target, str(path), 'unversioned', '.', 'standard', directory + '/results/' + scan_id, 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', (scan_id, timestamp))",
   "    connection.commit()",
   "    output = {}",
-  "    for label, path in [('root', root), ('nested', nested), ('independentGit', independent), ('nestedIndependentGit', independent_nested)]:",
+  "    for label, path in [('root', root), ('nested', nested), ('independentGit', independent), ('nestedIndependentGit', independent_nested), ('independentService', service), ('nestedIndependentService', nested_service)]:",
   "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
   "    print(json.dumps(output))",
+].join("\n");
+
+const findingDetailProbe = [
+  "import json, sys",
+  "sys.path.insert(0, sys.argv[1])",
+  "from finding_preview import bounded_finding_details",
+  "finding = {'rootCause': {'summary': 'Missing authorization'}, 'remediationTests': ['Reject a cross-account request.'], 'preventiveControls': ['Centralize account authorization.']}",
+  "print(json.dumps({'preview': bounded_finding_details(finding), 'detail': bounded_finding_details(finding, include_remediation=True)}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -233,6 +246,38 @@ describe("workbench findings index", () => {
       nested: ["scan"],
       independentGit: [],
       nestedIndependentGit: [],
+      independentService: ["independent-service-scan"],
+      nestedIndependentService: ["independent-service-scan"],
+    });
+  });
+
+  test("preserves remediation guidance only in dedicated finding details", () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    if (python === null)
+      throw new Error("Python is required for finding-detail tests.");
+    const result = Bun.spawnSync(
+      [
+        python,
+        "-I",
+        "-B",
+        "-c",
+        findingDetailProbe,
+        join(PLUGIN_ROOT, "scripts"),
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      preview: { rootCause: { summary: "Missing authorization" } },
+      detail: {
+        rootCause: { summary: "Missing authorization" },
+        remediationTests: ["Reject a cross-account request."],
+        preventiveControls: ["Centralize account authorization."],
+      },
     });
   });
 

@@ -20,7 +20,7 @@ from workbench_constants import (
 )
 
 
-def bounded_finding_details(value: Any) -> dict[str, Any]:
+def bounded_finding_details(value: Any, *, include_remediation: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     prepared: dict[str, Any] = {}
@@ -121,6 +121,11 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     writeup = value.get("writeup")
     if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str):
         prepared["writeup"] = {"reportPath": bounded_json_text(writeup["reportPath"], 512)[0]}
+
+    if include_remediation:
+        for key in ("remediationTests", "preventiveControls"):
+            if isinstance(value.get(key), list):
+                prepared[key] = value[key]
 
     evidence_key = next(
         (key for key in ("codeEvidence", "code_evidence") if key in value),

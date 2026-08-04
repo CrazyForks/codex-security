@@ -735,7 +735,8 @@ export async function main(
     scans: readonly JsonObject[],
     directory: string,
   ): JsonObject[] => {
-    let checkoutPath: string | undefined;
+    let containingPath: string | undefined;
+    let descendantPath: string | undefined;
     for (const scan of scans) {
       const targetPath = scan["targetPath"];
       if (typeof targetPath !== "string") continue;
@@ -752,13 +753,21 @@ export async function main(
       if (outsideTarget && outsideDirectory) {
         continue;
       }
-      if (
-        checkoutPath === undefined ||
-        targetPath.length > checkoutPath.length
+      if (!outsideTarget) {
+        if (
+          containingPath === undefined ||
+          targetPath.length > containingPath.length
+        ) {
+          containingPath = targetPath;
+        }
+      } else if (
+        descendantPath === undefined ||
+        targetPath.length < descendantPath.length
       ) {
-        checkoutPath = targetPath;
+        descendantPath = targetPath;
       }
     }
+    const checkoutPath = containingPath ?? descendantPath;
     return checkoutPath === undefined
       ? []
       : scans.filter((scan) => scan["targetPath"] === checkoutPath);
