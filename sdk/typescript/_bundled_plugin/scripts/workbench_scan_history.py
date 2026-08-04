@@ -309,7 +309,11 @@ def list_unmatched_scan_pairs(
     for scan in selected:
         try:
             read_coverage(scan)
-        except SystemExit:
+        except SystemExit as error:
+            if snapshot_data is not None:
+                raise SystemExit(
+                    "A snapshotted scan became unavailable during matching: " + scan["id"]
+                ) from error
             continue
         available.append(scan)
 
@@ -332,7 +336,7 @@ def list_unmatched_scan_pairs(
     if snapshot is not None and snapshot_data is None:
         with snapshot.open("x", encoding="utf-8") as destination:
             json.dump(
-                {"scanIds": [scan["id"] for scan in selected], "skippedPairs": skipped},
+                {"scanIds": [scan["id"] for scan in available], "skippedPairs": skipped},
                 destination,
             )
     pair_count = len(available) * (len(available) - 1) // 2
@@ -448,6 +452,7 @@ def compare_scans(
     include_matching_inputs: bool = False,
     include_matching_status: bool = False,
     matching_status_only: bool = False,
+    findings_offset: int | None = None,
     require_matches: bool = False,
 ) -> dict[str, Any]:
     before = require_scan(connection, args.before_scan_id)
@@ -502,6 +507,9 @@ def compare_scans(
         else {}
     )
     findings: list[dict[str, Any]] = []
+    finding_count = 0
+    finding_page_bytes = 2
+    next_offset = None
     summary = {status: 0 for status in ("new", "persisting", "resolved", "reopened", "unknown")}
 
     for previous_rows, current_rows, match_reason in groups:
@@ -569,8 +577,30 @@ def compare_scans(
                 "status": current["triage_status"],
             }
         item["status"] = status
-        findings.append(item)
         summary[status] += 1
+        if findings_offset is None:
+            findings.append(item)
+        elif finding_count >= findings_offset and next_offset is None:
+            item_bytes = len(
+                json.dumps(
+                    item,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if item_bytes > MATCHING_INPUT_PAGE_BYTES:
+                raise SystemExit("A scan comparison finding exceeds the 512 KiB page size limit.")
+            separator_bytes = 1 if findings else 0
+            if (
+                len(findings) >= MATCHING_FINDING_PAGE_MAX
+                or finding_page_bytes + separator_bytes + item_bytes > MATCHING_INPUT_PAGE_BYTES
+            ):
+                next_offset = finding_count
+            else:
+                findings.append(item)
+                finding_page_bytes += separator_bytes + item_bytes
+        finding_count += 1
 
     result = {
         "afterScanId": after["id"],
@@ -583,6 +613,9 @@ def compare_scans(
     }
     if include_matching_inputs or include_matching_status:
         result["matchingCached"] = cached is not None
+    if findings_offset is not None:
+        result["nextOffset"] = next_offset
+        result["totalFindings"] = finding_count
     if include_matching_inputs:
         result["matchingInputs"] = {
             "before": [_matching_input(row) for row in before_findings.values()],

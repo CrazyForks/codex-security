@@ -125,6 +125,8 @@ describe("CLI workbench", () => {
           "--after-scan-id",
           "after",
           "--include-matching-status",
+          "--findings-offset",
+          "0",
         ],
         {
           comparable: true,
@@ -143,6 +145,8 @@ describe("CLI workbench", () => {
           "--after-scan-id",
           "after",
           "--include-matching-status",
+          "--findings-offset",
+          "0",
         ],
         {
           comparable: true,
@@ -201,9 +205,13 @@ describe("CLI workbench", () => {
           dependencies({
             onWorkbench: (args): JsonObject => {
               calls.push(args);
-              return args[0] === "compare-scans"
-                ? { matchingCached: false, matchingInputs: { before, after } }
-                : { summary: { persisting: 1 } };
+              if (args[0] !== "compare-scans") {
+                expect(args).toContain("--ack-only");
+                return { beforeScanId: "before", afterScanId: "after" };
+              }
+              return args.includes("--require-matches")
+                ? { summary: { persisting: 1 } }
+                : { matchingCached: false, matchingInputs: { before, after } };
             },
             onMatch: async (input) => {
               expect(input).toEqual({ before, after });
@@ -215,6 +223,7 @@ describe("CLI workbench", () => {
       expect(calls.map((args) => args[0])).toEqual([
         "compare-scans",
         "save-scan-comparison",
+        "compare-scans",
       ]);
       expect(JSON.parse(calls[1]![6]!)).toEqual(matching);
       expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
@@ -260,7 +269,16 @@ describe("CLI workbench", () => {
           onWorkbench: (args): JsonObject => {
             calls.push(args);
             if (args[0] === "compare-scans") {
-              return { matchingCached: false };
+              if (!args.includes("--require-matches")) {
+                return { matchingCached: false };
+              }
+              const offset = Number(args.at(-1));
+              return {
+                summary: { persisting: 2 },
+                findings: [{ findingId: `finding-${offset}` }],
+                nextOffset: offset === 0 ? 1 : null,
+                totalFindings: 2,
+              };
             }
             if (args[0] === "get-scan-matching-inputs") {
               return {
@@ -270,7 +288,8 @@ describe("CLI workbench", () => {
                 totalFindings: 1,
               };
             }
-            return { summary: { persisting: 1 } };
+            expect(args).toContain("--ack-only");
+            return { beforeScanId: "before", afterScanId: "after" };
           },
           onMatch: async () => ({
             matches: [
@@ -291,10 +310,15 @@ describe("CLI workbench", () => {
       "get-scan-matching-inputs",
       "get-scan-matching-inputs",
       "save-scan-comparison",
+      "compare-scans",
+      "compare-scans",
     ]);
     expect(calls[0]).toContain("--include-matching-status");
     expect(calls[0]).not.toContain("--include-matching-inputs");
-    expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
+    expect(JSON.parse(stdout.text())).toEqual({
+      summary: { persisting: 2 },
+      findings: [{ findingId: "finding-0" }, { findingId: "finding-1" }],
+    });
   });
 
   test("passes large valid match results through a private temporary file", async () => {
@@ -308,6 +332,9 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench: async (args): Promise<JsonObject> => {
             if (args[0] === "compare-scans") {
+              if (args.includes("--require-matches")) {
+                return { summary: { persisting: 1 } };
+              }
               return {
                 matchingCached: false,
                 matchingInputs: {
@@ -317,6 +344,7 @@ describe("CLI workbench", () => {
               };
             }
             expect(args[5]).toBe("--matches-file");
+            expect(args).toContain("--ack-only");
             matchesPath = args[6]!;
             expect(
               JSON.parse(await readFile(matchesPath, "utf8")),
@@ -608,22 +636,36 @@ describe("CLI workbench", () => {
           "snapshot_directory = tempfile.TemporaryDirectory()",
           "snapshot = os.path.join(snapshot_directory.name, 'scan-ids.json')",
           "args = argparse.Namespace(repository='/repo', force=False, offset=0, scan_snapshot=snapshot)",
-          "result = list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: {})",
+          "unavailable = scans[50][0]",
+          "available = [scan for scan in scans if scan[0] != unavailable]",
+          "available_ids = {scan[0] for scan in available}",
+          "available_saved = [(before, after) for before, after in saved if before in available_ids and after in available_ids]",
+          "def initial_coverage(scan):",
+          "    if scan['id'] == unavailable: raise SystemExit('coverage is unavailable')",
+          "    return {}",
+          "result = list_unmatched_scan_pairs(connection, args, read_coverage=initial_coverage)",
           "assert result['scanCount'] == 100, result",
-          "assert result['skippedPairs'] == len(saved), result",
+          "assert result['unavailableScans'] == 1, result",
+          "assert result['skippedPairs'] == len(available_saved), result",
           "assert result['pairs'] == [] and result['nextOffset'] is None, result",
           "with open(snapshot, encoding='utf-8') as source: persisted = json.load(source)",
-          "assert persisted['skippedPairs'] == len(saved), persisted",
-          "assert persisted['scanIds'] == [scan[0] for scan in scans], persisted",
+          "assert persisted['skippedPairs'] == len(available_saved), persisted",
+          "assert persisted['scanIds'] == [scan[0] for scan in available], persisted",
           "connection.execute(\"UPDATE scans SET status = 'complete' WHERE id = 'prepared-scan'\")",
           "connection.execute('DELETE FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?', (scans[-2][0], scans[-1][0]))",
           "statements = []",
           "connection.set_trace_callback(statements.append)",
           "result = list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: {})",
-          "assert result['scanCount'] == 100, result",
+          "assert result['scanCount'] == len(available), result",
           "assert result['pairs'] == [{'beforeScanId': scans[-2][0], 'afterScanId': scans[-1][0]}], result",
           "assert result['nextOffset'] is None, result",
           "assert not any(statement.startswith('SELECT before_scan_id, after_scan_id FROM scan_comparisons') for statement in statements), statements",
+          "try:",
+          "    list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: (_ for _ in ()).throw(SystemExit('coverage disappeared')) if scan['id'] == available[0][0] else {})",
+          "except SystemExit as error:",
+          "    assert 'became unavailable during matching' in str(error), error",
+          "else:",
+          "    raise AssertionError('a disappearing snapshotted scan was accepted')",
           "snapshot_directory.cleanup()",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
@@ -658,6 +700,44 @@ describe("CLI workbench", () => {
           "connection.execute(\"INSERT INTO scan_comparisons VALUES ('before', 'after', '{}')\")",
           "result = history.compare_scans(connection, args, require_scan=lambda _, identity: scans[identity], read_coverage=lambda _: (_ for _ in ()).throw(AssertionError('cached force probe must not project coverage')), matching_status_only=True)",
           "assert result == {'beforeScanId': 'before', 'afterScanId': 'after', 'matchingCached': True}, result",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  test("bounds cached comparison projections without dropping findings", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, json, sqlite3, sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_scan_history as history",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.execute('CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT)')",
+          "connection.execute(\"INSERT INTO scan_comparisons VALUES ('before', 'after', '{\\\"matches\\\":[],\\\"uncertain\\\":[]}')\")",
+          "scans = {identity: {'id': identity, 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'} for identity in ('before', 'after')}",
+          "history._same_repository = lambda *_: True",
+          "history._scan_findings = lambda *_: {}",
+          "history._finding_groups = lambda *_: [([], [{'id': f'occurrence-{index}', 'finding_id': f'finding-{index}', 'relative_path': 'source.py', 'severity': 'high', 'title': 'x' * 200000, 'close_reason': None, 'triage_status': 'open'}], None) for index in range(3)]",
+          "args = argparse.Namespace(before_scan_id='before', after_scan_id='after')",
+          "compare = lambda offset: history.compare_scans(connection, args, require_scan=lambda _, identity: scans[identity], read_coverage=lambda _: {'completeness': 'complete'}, findings_offset=offset)",
+          "first = compare(0)",
+          "assert len(first['findings']) == 2 and first['nextOffset'] == 2, first.keys()",
+          "assert first['totalFindings'] == 3 and first['summary']['new'] == 3, first.keys()",
+          "assert len(json.dumps(first).encode()) < 512 * 1024 + 4096",
+          "second = compare(first['nextOffset'])",
+          "assert len(second['findings']) == 1 and second['nextOffset'] is None, second.keys()",
+          "assert second['totalFindings'] == 3 and second['summary']['new'] == 3, second.keys()",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
       ],
@@ -1315,7 +1395,8 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench: (args): JsonObject => {
             calls.push(args);
-            return args[0] === "compare-scans"
+            return args[0] === "compare-scans" &&
+              !args.includes("--require-matches")
               ? {
                   matchingCached: true,
                   matchingInputs: { before: [], after: [] },
@@ -1328,6 +1409,7 @@ describe("CLI workbench", () => {
     expect(calls.map((args) => args[0])).toEqual([
       "compare-scans",
       "save-scan-comparison",
+      "compare-scans",
     ]);
     expect(calls[0]).toContain("--matching-status-only");
     expect(calls[0]).not.toContain("--include-matching-status");

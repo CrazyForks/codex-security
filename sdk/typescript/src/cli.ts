@@ -739,22 +739,34 @@ export async function main(
         beforeId,
         "--after-scan-id",
         afterId,
-        force ? "--matching-status-only" : "--include-matching-status",
+        ...(force
+          ? ["--matching-status-only"]
+          : ["--include-matching-status", "--findings-offset", "0"]),
       ],
-      async ({ matchingCached, matchingInputs, ...comparison }) => {
-        if (matchingCached !== false && !force) return comparison;
+      async ({
+        matchingCached,
+        matchingInputs,
+        nextOffset,
+        totalFindings: _totalFindings,
+        ...comparison
+      }) => {
+        if (matchingCached !== false && !force) {
+          return await readScanComparison(
+            dependencies,
+            beforeId,
+            afterId,
+            comparison,
+            nextOffset,
+          );
+        }
         const matching =
           matchingInputs === undefined
             ? await matchScanPairInBatches(dependencies, beforeId, afterId)
             : await dependencies.matchFindings(
                 matchingInputs as JsonObject & ScanComparisonInput,
               );
-        return await saveScanComparison(
-          dependencies,
-          beforeId,
-          afterId,
-          matching,
-        );
+        await saveScanComparison(dependencies, beforeId, afterId, matching);
+        return await readScanComparison(dependencies, beforeId, afterId);
       },
     );
   const presentHistory = (
@@ -2195,7 +2207,6 @@ async function matchAllScansFromSnapshot(
           beforeScanId,
           afterScanId,
           matching,
-          true,
         );
         matchedPairs += 1;
         findingMatches += matching.matches.reduce(
@@ -2344,8 +2355,7 @@ async function saveScanComparison(
   beforeScanId: string,
   afterScanId: string,
   matching: ScanComparisonResult,
-  acknowledgeOnly = false,
-): Promise<JsonObject> {
+): Promise<void> {
   const serialized = JSON.stringify(matching);
   const bytes = Buffer.byteLength(serialized);
   if (bytes > MAX_MATCH_RESULT_BYTES) throw oversizedAutomaticMatchError();
@@ -2358,27 +2368,89 @@ async function saveScanComparison(
     afterScanId,
   ];
   if (bytes <= MAX_INLINE_MATCH_RESULT_BYTES) {
-    return await dependencies.runWorkbench([
+    await dependencies.runWorkbench([
       ...arguments_,
       "--matches-json",
       serialized,
-      ...(acknowledgeOnly ? ["--ack-only"] : []),
+      "--ack-only",
     ]);
+    return;
   }
 
   const temporary = await mkdtemp(join(tmpdir(), "codex-security-matches-"));
   const path = join(temporary, "matches.json");
   try {
     await writeFile(path, serialized, { mode: 0o600, flag: "wx" });
-    return await dependencies.runWorkbench([
+    await dependencies.runWorkbench([
       ...arguments_,
       "--matches-file",
       path,
-      ...(acknowledgeOnly ? ["--ack-only"] : []),
+      "--ack-only",
     ]);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
+}
+
+async function readScanComparison(
+  dependencies: CliDependencies,
+  beforeScanId: string,
+  afterScanId: string,
+  firstPage?: JsonObject,
+  nextOffset?: unknown,
+): Promise<JsonObject> {
+  let comparison = firstPage;
+  let offset = comparison === undefined ? 0 : nextOffset;
+  while (
+    comparison === undefined ||
+    (offset !== undefined && offset !== null)
+  ) {
+    if (!Number.isSafeInteger(offset) || Number(offset) < 0) {
+      throw new CodexSecurityError(
+        "Scan comparison returned an invalid pagination cursor.",
+      );
+    }
+    const {
+      matchingCached: _matchingCached,
+      matchingInputs: _matchingInputs,
+      nextOffset: followingOffset,
+      totalFindings: _totalFindings,
+      ...page
+    } = await dependencies.runWorkbench([
+      "compare-scans",
+      "--before-scan-id",
+      beforeScanId,
+      "--after-scan-id",
+      afterScanId,
+      "--require-matches",
+      "--findings-offset",
+      String(offset),
+    ]);
+    if (comparison === undefined) {
+      comparison = page;
+    } else {
+      if (
+        !Array.isArray(comparison["findings"]) ||
+        !Array.isArray(page["findings"])
+      ) {
+        throw new CodexSecurityError(
+          "Scan comparison returned an invalid paginated finding list.",
+        );
+      }
+      comparison["findings"] = [...comparison["findings"], ...page["findings"]];
+    }
+    if (followingOffset === undefined || followingOffset === null) break;
+    if (
+      !Number.isSafeInteger(followingOffset) ||
+      Number(followingOffset) <= Number(offset)
+    ) {
+      throw new CodexSecurityError(
+        "Scan comparison returned an invalid pagination cursor.",
+      );
+    }
+    offset = followingOffset;
+  }
+  return comparison!;
 }
 
 async function matchScanPairInBatches(

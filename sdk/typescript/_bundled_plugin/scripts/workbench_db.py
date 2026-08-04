@@ -3645,6 +3645,7 @@ def main() -> None:
                 include_matching_inputs=args.include_matching_inputs,
                 include_matching_status=args.include_matching_status,
                 matching_status_only=args.matching_status_only,
+                findings_offset=args.findings_offset,
                 require_matches=args.require_matches,
             )
         elif args.command == "save-scan-comparison":
