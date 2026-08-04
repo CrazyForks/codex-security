@@ -61,11 +61,20 @@ export function checkoutScans(
   scans: readonly JsonObject[],
   directory: string,
 ): JsonObject[] {
+  const scanPath = (scan: JsonObject): string | undefined => {
+    const current = scan["currentTargetPath"];
+    const recorded = scan["targetPath"];
+    return typeof current === "string"
+      ? current
+      : typeof recorded === "string"
+        ? recorded
+        : undefined;
+  };
   let containingPath: string | undefined;
   const descendants = new Set<string>();
   for (const scan of scans) {
-    const targetPath = scan["targetPath"];
-    if (typeof targetPath !== "string") continue;
+    const targetPath = scanPath(scan);
+    if (targetPath === undefined) continue;
     const checkoutRelative = relative(targetPath, directory);
     const targetRelative = relative(directory, targetPath);
     const outsideTarget =
@@ -88,9 +97,9 @@ export function checkoutScans(
     }
   }
   const selected = scans.filter((scan) => {
-    const targetPath = scan["targetPath"];
+    const targetPath = scanPath(scan);
     return (
-      typeof targetPath === "string" &&
+      targetPath !== undefined &&
       (containingPath === undefined
         ? descendants.has(targetPath)
         : targetPath === containingPath)

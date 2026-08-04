@@ -134,7 +134,9 @@ const nestedDirectoryScanProbe = [
   "        connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', (scan_id, timestamp))",
   "    for label, path in [('reusedCheckout', reused_checkout), ('movedCheckout', moved_checkout)]:",
   "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
-  "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "        selected = list_scans(connection, args)['scans']",
+  "        output[label] = [scan['scanId'] for scan in selected]",
+  "        if label == 'movedCheckout': output['movedCheckoutCurrentPath'] = selected[0].get('currentTargetPath') == str(moved_checkout)",
   "    print(json.dumps(output))",
 ].join("\n");
 
@@ -374,6 +376,7 @@ describe("workbench findings index", () => {
       nestedGitCheckout: ["nested-git"],
       reusedCheckout: ["current-reused-scan"],
       movedCheckout: ["stale-reused-scan"],
+      movedCheckoutCurrentPath: true,
     });
   });
 

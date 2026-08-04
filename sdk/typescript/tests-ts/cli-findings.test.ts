@@ -145,6 +145,44 @@ describe("CLI findings history", () => {
     ]);
   });
 
+  test("keeps historical scans visible after their registered checkout moves", async () => {
+    for (const command of [["findings"], ["scans", "show"]]) {
+      const calls: Array<readonly string[]> = [];
+      expect(
+        await main(
+          [...command, "--json"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [
+                    {
+                      scanId: "historical-scan",
+                      targetId: "stable-target",
+                      targetPath: "/previous/checkout",
+                      currentTargetPath: "/current/repository",
+                      progress: { status: "complete" },
+                    },
+                  ],
+                };
+              }
+              return args[0] === "get-scan"
+                ? { scan: { scanId: "historical-scan", findings: [] } }
+                : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+            },
+          }),
+        ),
+      ).toBe(0);
+
+      expect(calls[1]).toContain(
+        command[0] === "findings" ? "stable-target" : "historical-scan",
+      );
+    }
+  });
+
   test("scopes multiple moved targets by identity instead of reusable checkout paths", async () => {
     const calls: Array<readonly string[]> = [];
     expect(

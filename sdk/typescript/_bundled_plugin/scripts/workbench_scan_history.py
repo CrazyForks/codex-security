@@ -252,6 +252,7 @@ def list_scans(
         f"""
         SELECT
             scans.*,
+            targets.current_path AS current_target_path,
             progress.reportable_findings_count,
             progress.scope_file_count,
             progress.review_items_completed,
@@ -264,6 +265,7 @@ def list_scans(
             ) AS finding_count
         FROM scans
         JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
@@ -302,6 +304,12 @@ def list_scans(
                 "startedAt": row["started_at"],
                 "targetId": row["target_id"],
                 "targetPath": row["target_path"],
+                **(
+                    {"currentTargetPath": row["current_target_path"]}
+                    if row["current_target_path"] is not None
+                    and row["current_target_path"] != row["target_path"]
+                    else {}
+                ),
                 "targetRevision": row["target_revision"],
                 "targetSummary": row["target_summary"],
                 "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
