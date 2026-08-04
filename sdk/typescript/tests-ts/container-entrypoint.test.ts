@@ -201,6 +201,16 @@ describe("customer container entrypoint", () => {
           "/output",
           "/input/repositories.csv",
         ],
+        [
+          "bulk-scan",
+          "--provider",
+          "openrouter",
+          "--knowledge-base",
+          "/input/threat-model.md",
+          "/input/repositories.csv",
+          "--output-dir",
+          "/output",
+        ],
       ] as const) {
         const result = await runEntrypoint(arguments_);
 
@@ -461,6 +471,8 @@ describe("customer container entrypoint", () => {
     async () => {
       for (const arguments_ of [
         ["bulk-scan", "--workers", "8"],
+        ["bulk-scan", "--provider", "openrouter"],
+        ["bulk-scan", "--knowledge-base", "/input/threat-model.md"],
         ["bulk-scan", "--mode", "deep", "--output-dir", "/output"],
         [
           "bulk-scan",

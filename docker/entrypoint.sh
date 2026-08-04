@@ -52,8 +52,9 @@ for argument do
         --)
             bulk_scan_positional_only=yes
             ;;
-        --output-dir|--workers|--mode|--model|--effort|--max-attempts|\
-            --plugin-path|--python|--codex|--filter-output|--format|\
+        --output-dir|--workers|--mode|--model|--effort|--provider|\
+            --knowledge-base|--max-attempts|--plugin-path|--python|\
+            --codex|--filter-output|--format|\
             --token-limit|--token-offset)
             expects_option_value=yes
             ;;
