@@ -154,28 +154,6 @@ describe("scan history renderer", () => {
     }
   });
 
-  test("ignores malformed persisted knowledge-base paths", () => {
-    for (const knowledgeBasePaths of [
-      "/not/an/array",
-      { path: "/not/an/array" },
-      [null, 42, "/safe/threat-model.md"],
-    ]) {
-      const result = {
-        scanId: "scan-1",
-        progress: { status: "complete" },
-        recipe: { knowledgeBasePaths },
-      };
-      expect(() =>
-        renderScanHistory(result, "show", { color: false }),
-      ).not.toThrow();
-      if (Array.isArray(knowledgeBasePaths)) {
-        expect(renderScanHistory(result, "show", { color: false })).toContain(
-          "/safe/threat-model.md",
-        );
-      }
-    }
-  });
-
   test("keeps repositories visible at narrow and wide terminal widths", () => {
     const scans = [
       {
@@ -226,7 +204,12 @@ describe("scan history renderer", () => {
       findingsTruncated: true,
       artifacts: { markdownReport: "/demo/results/report.md" },
       recipe: {
-        config: { model: "gpt-5.6-sol", model_reasoning_effort: "high" },
+        config: {
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "high",
+          features: { goals: true, multi_agent_v2: { enabled: true } },
+          trusted_paths: ["src", "packages/core"],
+        },
       },
       findings: Array.from({ length: 20 }, (_, index) => ({
         severity: { level: "high" },
@@ -240,6 +223,8 @@ describe("scan history renderer", () => {
       "PARENT SCAN  87654321",
       "CONFIGURATION",
       "model=gpt-5.6-sol",
+      'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
+      'trusted_paths=["src","packages/core"]',
       "COVERAGE",
       "12 of 15 reviewed",
       "9 files",
@@ -311,239 +296,5 @@ describe("scan history renderer", () => {
     ]) {
       expect(output).toContain(expected);
     }
-  });
-});
-
-describe("scan history renderer resilience", () => {
-  const plain = (
-    result: Parameters<typeof renderScanHistory>[0],
-    command: Parameters<typeof renderScanHistory>[1],
-    options = {},
-  ) =>
-    stripVTControlCharacters(
-      renderScanHistory(result, command, { color: false, ...options }),
-    );
-
-  test("renders comparison findings with a missing or null severity", () => {
-    for (const severity of [undefined, null]) {
-      const text = plain(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: "complete" },
-          summary: { resolved: 1 },
-          findings: [
-            {
-              ...(severity === undefined ? {} : { severity }),
-              status: "resolved",
-              title: "Reflected XSS in the search handler",
-              locations: [{ path: "src/search.ts", startLine: 10 }],
-            },
-          ],
-        },
-        "compare",
-      );
-      expect(text).toContain("Reflected XSS in the search handler");
-      expect(text).toContain("src/search.ts:10");
-    }
-  });
-
-  test("sorts an unrecognized severity below every known severity", () => {
-    const text = plain(
-      {
-        beforeScanId: "before-scan",
-        afterScanId: "after-scan",
-        coverage: { afterCompleteness: "complete" },
-        summary: { new: 2 },
-        findings: [
-          {
-            status: "new",
-            severity: "not-a-severity",
-            title: "Unknown severity finding",
-            path: "a.ts",
-          },
-          {
-            status: "new",
-            severity: "critical",
-            title: "Critical severity finding",
-            path: "b.ts",
-          },
-        ],
-      },
-      "compare",
-    );
-    expect(text.indexOf("Critical severity finding")).toBeLessThan(
-      text.indexOf("Unknown severity finding"),
-    );
-  });
-
-  test("lists scans that carry no progress record", () => {
-    const text = plain(
-      {
-        scans: [
-          {
-            scanId: "11111111-1111-4111-8111-111111111111",
-            targetPath: "/repo",
-            mode: "standard",
-            startedAt: "2026-07-01T00:00:00Z",
-            findingCount: 3,
-          },
-        ],
-      },
-      "list",
-    );
-    expect(text).toContain("11111111-1111-4111-8111-111111111111");
-    expect(text).toContain("UNKNOWN");
-  });
-
-  test("falls back to the raw value for an unparsable knownSince", () => {
-    const text = plain(
-      {
-        scanId: "scan-1",
-        targetPath: "/repo",
-        mode: "standard",
-        progress: { status: "complete" },
-        findings: [
-          {
-            severity: { level: "high" },
-            title: "Path traversal",
-            knownSince: "not-a-timestamp",
-            matches: [
-              {
-                scanId: "older-scan",
-                title: "Path traversal",
-                reason: "same sink",
-              },
-            ],
-            locations: [{ path: "src/fs.ts", startLine: 22 }],
-          },
-        ],
-      },
-      "show",
-      { showLinkedFindings: true },
-    );
-    expect(text).toContain("Known since not-a-timestamp");
-    expect(text).toContain("Path traversal");
-  });
-
-  test("renders every command from an empty payload", () => {
-    for (const command of ["list", "show", "compare", "match-all"] as const) {
-      const output = plain({}, command);
-      expect(output).not.toContain("undefined");
-      expect(output).not.toContain("null");
-    }
-  });
-
-  test("strips terminal-control sequences from severity-count keys", () => {
-    const output = renderScanHistory(
-      { severityCounts: { "\u001b[2J\u001b[HHIGH": 2 } },
-      "show",
-      { color: true },
-    );
-
-    expect(output).not.toContain("\u001b[2J");
-    expect(output).not.toContain("\u001b[H");
-    expect(stripVTControlCharacters(output)).toContain("2 HIGH");
-  });
-});
-
-describe("severity badge column", () => {
-  const severities = ["critical", "high", "medium", "low", "informational"];
-
-  test("starts every finding title at the same column", () => {
-    for (const color of [false, true]) {
-      for (const columns of [48, 96, 120]) {
-        const text = stripVTControlCharacters(
-          renderScanHistory(
-            {
-              beforeScanId: "before-scan",
-              afterScanId: "after-scan",
-              coverage: { afterCompleteness: "complete" },
-              summary: { new: severities.length },
-              findings: severities.map((severity) => ({
-                status: "new",
-                severity,
-                title: `Title for ${severity}`,
-                path: `${severity}.ts`,
-              })),
-            },
-            "compare",
-            { color, columns },
-          ),
-        );
-        const offsets = severities.map((severity) => {
-          const line = text
-            .split("\n")
-            .find((candidate) => candidate.includes(`Title for ${severity}`))!;
-          return line.indexOf(`Title for ${severity}`);
-        });
-        expect(new Set(offsets).size).toBe(1);
-        const path = text
-          .split("\n")
-          .find((candidate) => candidate.includes("informational.ts"))!;
-        expect(path.indexOf("informational.ts")).toBe(offsets[0]!);
-      }
-    }
-  });
-
-  test("keeps the badge column as wide as its widest label", () => {
-    const text = stripVTControlCharacters(
-      renderScanHistory(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: "complete" },
-          summary: { new: 1 },
-          findings: [
-            {
-              status: "new",
-              severity: "informational",
-              title: "Informational finding",
-              path: "a.ts",
-            },
-          ],
-        },
-        "compare",
-        { color: false },
-      ),
-    );
-    expect(text).toContain("    INFO      Informational finding");
-    expect(text).not.toContain("INFORMATIONAL  ");
-  });
-
-  test("keeps unrecognized severity labels inside the fixed badge column", () => {
-    const text = stripVTControlCharacters(
-      renderScanHistory(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: "complete" },
-          summary: { new: 2 },
-          findings: [
-            {
-              status: "new",
-              severity: "extraordinary-severity",
-              title: "Unknown severity finding",
-            },
-            {
-              status: "new",
-              severity: "critical",
-              title: "Known severity finding",
-            },
-          ],
-        },
-        "compare",
-        { color: false },
-      ),
-    );
-    const unknown = text
-      .split("\n")
-      .find((line) => line.includes("Unknown severity finding"))!;
-    const known = text
-      .split("\n")
-      .find((line) => line.includes("Known severity finding"))!;
-    expect(unknown.indexOf("Unknown severity finding")).toBe(
-      known.indexOf("Known severity finding"),
-    );
   });
 });

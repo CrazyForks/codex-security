@@ -662,6 +662,8 @@ def save_scan_comparison(
                 for current in match["afterOccurrenceIds"]
             ),
         )
+    if args.ack_only:
+        return {"beforeScanId": before["id"], "afterScanId": after["id"]}
     return compare_scans(connection, args, require_scan=require_scan, read_coverage=read_coverage)
 
 

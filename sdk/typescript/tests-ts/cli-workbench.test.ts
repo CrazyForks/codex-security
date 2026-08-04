@@ -622,6 +622,35 @@ describe("CLI workbench", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
+  test("returns a bounded acknowledgement when saving match-all comparisons", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, sqlite3, sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_scan_history as history",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.executescript('CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT, created_at TEXT, updated_at TEXT); CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);')",
+          "scans = {scan_id: {'id': scan_id, 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'} for scan_id in ('before', 'after')}",
+          "history._scan_findings = lambda connection, scan_id: {}",
+          "history.compare_scans = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('full comparison was generated'))",
+          "args = argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json='{\"matches\":[],\"uncertain\":[]}', matches_file=None, ack_only=True)",
+          "result = history.save_scan_comparison(connection, args, now=lambda: '2026-01-01T00:00:00Z', require_scan=lambda connection, scan_id: scans[scan_id], read_coverage=lambda scan: {})",
+          "assert result == {'beforeScanId': 'before', 'afterScanId': 'after'}, result",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  });
+
   test("pages match-all history and reconciles bounded finding batches", async () => {
     const calls: Array<readonly string[]> = [];
     const matcherInputs: Array<{
@@ -708,6 +737,7 @@ describe("CLI workbench", () => {
       { before: ["b-2"], after: ["a-2"] },
     ]);
     const save = calls.find(([command]) => command === "save-scan-comparison")!;
+    expect(save).toContain("--ack-only");
     expect(JSON.parse(save[6]!)).toEqual({
       matches: [
         {
@@ -723,6 +753,79 @@ describe("CLI workbench", () => {
       matchedPairs: 1,
       findingMatches: 4,
     });
+  });
+
+  test("drops uncertain matches superseded by a later finding page", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                repository: "/repo",
+                scanCount: 2,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: null,
+                pairs: [{ beforeScanId: "before", afterScanId: "after" }],
+              };
+            }
+            if (args[0] === "save-scan-comparison") return {};
+            const scanId = args[2]!;
+            const offset = Number(args[4]);
+            return {
+              scanId,
+              findings: [
+                {
+                  occurrenceId:
+                    scanId === "before" ? "before" : `after-${offset}`,
+                },
+              ],
+              nextOffset: scanId === "after" && offset === 0 ? 1 : null,
+              totalFindings: scanId === "after" ? 2 : 1,
+            };
+          },
+          onMatch: async ({ after }) =>
+            after[0]!.occurrenceId === "after-0"
+              ? {
+                  matches: [],
+                  uncertain: [
+                    {
+                      beforeOccurrenceId: "before",
+                      afterOccurrenceId: "after-0",
+                      reason: "Possibly related.",
+                    },
+                  ],
+                }
+              : {
+                  matches: [
+                    {
+                      beforeOccurrenceIds: ["before"],
+                      afterOccurrenceIds: ["after-1"],
+                      confidence: "high",
+                      reason: "Same root cause.",
+                    },
+                  ],
+                  uncertain: [],
+                },
+        }),
+      ),
+    ).toBe(0);
+
+    const save = calls.find(([command]) => command === "save-scan-comparison")!;
+    expect(JSON.parse(save[6]!)).toMatchObject({
+      matches: [{ beforeOccurrenceIds: ["before"] }],
+      uncertain: [],
+    });
+    expect(save).toContain("--ack-only");
+    expect(JSON.parse(stdout.text())).toMatchObject({ matchedPairs: 1 });
   });
 
   test("rejects oversized accumulated match-all results before persistence", async () => {

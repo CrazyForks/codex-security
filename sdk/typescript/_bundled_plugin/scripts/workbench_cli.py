@@ -183,6 +183,7 @@ def parse_args(description: str) -> argparse.Namespace:
     matches = save_scan_comparison.add_mutually_exclusive_group(required=True)
     matches.add_argument("--matches-json")
     matches.add_argument("--matches-file")
+    save_scan_comparison.add_argument("--ack-only", action="store_true")
 
     list_global_findings = subparsers.add_parser("list-global-findings")
     list_global_findings.add_argument("--query")

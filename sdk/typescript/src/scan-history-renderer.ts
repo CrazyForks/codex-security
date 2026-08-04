@@ -30,16 +30,6 @@ const SEVERITY_COLORS: Record<string, number> = {
   INFORMATIONAL: 37,
 };
 
-const SEVERITY_ORDER = Object.keys(SEVERITY_COLORS);
-const MAX_KNOWN_SINCE_LENGTH = 32;
-const SEVERITY_LABELS: Record<string, string> = { INFORMATIONAL: "INFO" };
-const SEVERITY_BADGE_WIDTH = Math.max(
-  ...Object.keys(SEVERITY_COLORS).map(
-    (severity) => (SEVERITY_LABELS[severity] ?? severity).length,
-  ),
-);
-const FINDING_INDENT = 4 + SEVERITY_BADGE_WIDTH + 2;
-
 const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
@@ -48,44 +38,16 @@ const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
 });
 
 function clean(value: unknown): string {
-  return String(value ?? "")
+  return String(value)
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
 }
 
-function record(value: unknown): JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as JsonObject)
-    : {};
-}
-
-function records(value: unknown): JsonObject[] {
-  return Array.isArray(value)
-    ? value.filter(
-        (entry): entry is JsonObject =>
-          typeof entry === "object" && entry !== null && !Array.isArray(entry),
-      )
-    : [];
-}
-
 function findingSeverity(finding: JsonObject): string {
   const severity = finding["severity"];
-  const level =
-    typeof severity === "string" ? severity : record(severity)["level"];
-  return clean(level).toUpperCase();
-}
-
-function severityRank(finding: JsonObject): number {
-  const index = SEVERITY_ORDER.indexOf(findingSeverity(finding));
-  return index < 0 ? Number.MAX_SAFE_INTEGER : index;
-}
-
-function knownSinceLabel(value: unknown): string {
-  const raw = clean(value);
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed)
-    ? KNOWN_SINCE_DATE.format(parsed)
-    : raw.slice(0, MAX_KNOWN_SINCE_LENGTH);
+  return clean(
+    typeof severity === "string" ? severity : (severity as JsonObject)["level"],
+  ).toUpperCase();
 }
 
 export function renderScanHistory(
@@ -133,70 +95,59 @@ export function renderScanHistory(
   const finding = (entry: JsonObject, includeReason = true): void => {
     const severity = findingSeverity(entry);
     const title = clean(entry["title"]);
-    const badge = paint(
-      (SEVERITY_LABELS[severity] ?? severity)
-        .slice(0, SEVERITY_BADGE_WIDTH)
-        .padEnd(SEVERITY_BADGE_WIDTH),
-      SEVERITY_COLORS[severity] ?? 37,
-    );
-    wrap(title, FINDING_INDENT, `    ${badge}  `);
+    const badge = paint(severity.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
+    wrap(title, 14, `    ${badge}  `);
     const before = entry["beforeOccurrenceIds"] as string[] | undefined;
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
       before?.length || after?.length
         ? `  ${accent("·")}  ${before?.length ?? 1} → ${after?.length ?? 1}`
         : "";
-    const matches = records(entry["matches"]);
+    const matches = entry["matches"] as JsonObject[] | undefined;
     const knownScanIds = entry["knownScanIds"] as string[] | undefined;
     const knownScans = knownScanIds?.length
       ? ` in ${clean(knownScanIds[0]).slice(0, 8)}${knownScanIds.length > 1 ? ` … ${clean(knownScanIds[knownScanIds.length - 1]).slice(0, 8)}` : ""}`
       : "";
     const knownSince =
-      command === "show" && matches.length && entry["knownSince"]
-        ? `  ${accent("·")}  ${strong(`Known since ${knownSinceLabel(entry["knownSince"])}`)}${knownScans}`
+      command === "show" && matches?.length && entry["knownSince"]
+        ? `  ${accent("·")}  ${strong(`Known since ${KNOWN_SINCE_DATE.format(new Date(clean(entry["knownSince"])))}`)}${knownScans}`
         : "";
-    const location = records(entry["locations"])[0];
+    const location = (entry["locations"] as JsonObject[] | undefined)?.[0];
     const path =
       entry["path"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
-    lines.push(
-      `${" ".repeat(FINDING_INDENT)}${dim(clean(path))}${grouped}${knownSince}`,
-    );
+    lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
     const showLinkedFindings = command !== "show" || options.showLinkedFindings;
-    if (matches.length && showLinkedFindings) {
-      lines.push(
-        `${" ".repeat(FINDING_INDENT)}${accent("↔")} ${strong("LINKED FINDINGS")}`,
-      );
+    if (matches?.length && showLinkedFindings) {
+      lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
       for (const match of matches) {
         lines.push(
-          `${" ".repeat(FINDING_INDENT + 2)}${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
+          `                ${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
         );
-        wrap(`↳ ${clean(match["title"])}`, FINDING_INDENT + 4);
+        wrap(`↳ ${clean(match["title"])}`, 18);
       }
     }
     const reason =
       entry["matchReason"] ??
       entry["reason"] ??
-      (matches.length
+      (matches?.length
         ? [...new Set(matches.map((match) => clean(match["reason"])))].join(
             "; ",
           )
         : undefined);
-    if (includeReason && reason && (!matches.length || showLinkedFindings)) {
-      if (matches.length) {
-        lines.push(
-          `${" ".repeat(FINDING_INDENT + 2)}${strong("SAME ROOT CAUSE")}`,
-        );
-        wrap(clean(reason), FINDING_INDENT + 4);
+    if (includeReason && reason && (!matches?.length || showLinkedFindings)) {
+      if (matches?.length) {
+        lines.push(`                ${strong("SAME ROOT CAUSE")}`);
+        wrap(clean(reason), 18);
       } else {
-        wrap(`↳ ${clean(reason)}`, FINDING_INDENT);
+        wrap(`↳ ${clean(reason)}`, 14);
       }
     }
   };
 
   if (command === "list") {
-    const scans = records(result["scans"]).filter((scan) => {
-      if (record(scan["progress"])["status"] !== "running") {
+    const scans = (result["scans"] as JsonObject[]).filter((scan) => {
+      if ((scan["progress"] as JsonObject)["status"] !== "running") {
         return true;
       }
       const updated = Date.parse(scan["updatedAt"] as string);
@@ -214,7 +165,7 @@ export function renderScanHistory(
       ),
     );
     const latest = scans.find(
-      (scan) => record(scan["progress"])["status"] === "complete",
+      (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
     )?.["findingCount"];
     const multipleRepositories =
       options.repository === undefined &&
@@ -230,7 +181,7 @@ export function renderScanHistory(
       );
     }
     for (const scan of scans) {
-      const status = clean(record(scan["progress"])["status"] ?? "unknown");
+      const status = clean((scan["progress"] as JsonObject)["status"]);
       const complete = status === "complete";
       const statusColor = complete ? 32 : status === "running" ? 36 : 31;
       const statusLabel = paint(
@@ -252,11 +203,11 @@ export function renderScanHistory(
       }
     }
   } else if (command === "show") {
-    const status = clean(record(result["progress"])["status"] ?? "unknown");
+    const status = clean((result["progress"] as JsonObject)["status"]);
     const statusColor =
       status === "complete" ? 32 : status === "running" ? 36 : 31;
     lines.push(
-      `  ${strong(basename(clean(result["targetPath"])))}  ${accent("·")}  ${clean(result["scanId"])}`,
+      `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
       `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
     if (result["failureMessage"]) {
@@ -275,13 +226,13 @@ export function renderScanHistory(
         `  ${strong("PARENT SCAN")}  ${clean(result["parentScanId"]).slice(0, 8)}`,
       );
     }
-    const summary = record(result["severityCounts"]);
-    if (Object.keys(summary).length > 0) {
+    const summary = result["severityCounts"] as JsonObject | undefined;
+    if (summary) {
       lines.push(
         `  ${Object.entries(summary)
           .filter(([, count]) => count)
           .map(([severity, count]) => {
-            const label = clean(severity).toUpperCase();
+            const label = severity.toUpperCase();
             return paint(
               `${clean(count)} ${label}`,
               SEVERITY_COLORS[label] ?? 37,
@@ -290,17 +241,23 @@ export function renderScanHistory(
           .join(`  ${accent("·")}  `)}`,
       );
     }
-    const recipe = record(result["recipe"]);
-    const config = record(recipe["config"]);
-    if (Object.keys(config).length > 0) {
+    const recipe = result["recipe"] as JsonObject | undefined;
+    const config = recipe?.["config"] as JsonObject | undefined;
+    if (config && Object.keys(config).length > 0) {
       lines.push(
         `  ${strong("CONFIGURATION")}  ${Object.entries(config)
-          .map(([key, value]) => `${clean(key)}=${clean(value)}`)
+          .map(([key, value]) => {
+            const rendered =
+              typeof value === "object" ? JSON.stringify(value) : value;
+            return `${clean(key)}=${clean(rendered)}`;
+          })
           .join(`  ${accent("·")}  `)}`,
       );
     }
-    const coverage = record(record(result["progress"])["coverage"]);
-    if (Object.keys(coverage).length > 0) {
+    const coverage = (result["progress"] as JsonObject)["coverage"] as
+      | JsonObject
+      | undefined;
+    if (coverage) {
       const parts = [
         ...(coverage["worklistRows"] == null
           ? []
@@ -317,19 +274,16 @@ export function renderScanHistory(
         );
       }
     }
-    const savedKnowledgeBase = recipe["knowledgeBasePaths"];
-    const knowledgeBase = Array.isArray(savedKnowledgeBase)
-      ? savedKnowledgeBase.filter(
-          (path): path is string => typeof path === "string",
-        )
-      : [];
-    if (knowledgeBase.length > 0) {
+    const knowledgeBase = recipe?.["knowledgeBasePaths"] as
+      | string[]
+      | undefined;
+    if (knowledgeBase?.length) {
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,
       );
     }
-    const artifacts = record(result["artifacts"]);
-    if (Object.keys(artifacts).length > 0) {
+    const artifacts = result["artifacts"] as JsonObject | undefined;
+    if (artifacts && Object.keys(artifacts).length > 0) {
       lines.push(`  ${strong("ARTIFACTS")}`);
       const scanDirectory = result["scanDir"] as string | undefined;
       if (scanDirectory) lines.push(`    ${dim(clean(scanDirectory))}`);
@@ -343,7 +297,7 @@ export function renderScanHistory(
         );
       }
     }
-    const findings = records(result["findings"]);
+    const findings = result["findings"] as JsonObject[];
     if (findings.length > 0) {
       const count =
         typeof result["findingCount"] === "number"
@@ -364,18 +318,20 @@ export function renderScanHistory(
     }
   } else if (command === "compare") {
     if (result["repository"]) {
-      lines.push(`  ${strong(basename(clean(result["repository"])))}`);
+      lines.push(
+        `  ${strong(clean(basename(result["repository"] as string)))}`,
+      );
     }
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const coverage = record(result["coverage"])["afterCompleteness"];
+    const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
     if (coverage !== "complete") {
       lines.push(
         `  ${paint(`⚠ Follow-up coverage is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
       );
     }
-    const findings = records(result["findings"]).map((entry) =>
+    const findings = (result["findings"] as JsonObject[]).map((entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===
         "The affected path was excluded or outside the later scope."
@@ -386,11 +342,12 @@ export function renderScanHistory(
       (entry) => entry["status"] === "not_rescanned",
     ).length;
     const summary: JsonObject = {
-      ...record(result["summary"]),
+      ...(result["summary"] as JsonObject),
       ...(notRescanned
         ? {
             unknown:
-              Number(record(result["summary"])["unknown"] ?? 0) - notRescanned,
+              Number((result["summary"] as JsonObject)["unknown"] ?? 0) -
+              notRescanned,
             not_rescanned: notRescanned,
           }
         : {}),
@@ -417,7 +374,11 @@ export function renderScanHistory(
         (entry) => String(entry["status"]).toLowerCase() === status,
       );
       if (group.length === 0) continue;
-      group.sort((first, second) => severityRank(first) - severityRank(second));
+      group.sort(
+        (first, second) =>
+          Object.keys(SEVERITY_COLORS).indexOf(findingSeverity(first)) -
+          Object.keys(SEVERITY_COLORS).indexOf(findingSeverity(second)),
+      );
       const style = STATUS_STYLES[status]!;
       const title = `${style.icon} ${status[0]!.toUpperCase()}${status.slice(1).replaceAll("_", " ")}`;
       const heading = `${title} (${group.length} finding${group.length === 1 ? "" : "s"})`;
@@ -433,21 +394,13 @@ export function renderScanHistory(
     }
   } else {
     lines.push(
-      `  ${strong(basename(clean(result["repository"])))}`,
+      `  ${strong(clean(basename(result["repository"] as string)))}`,
       "",
       `  ${paint("●", 36)} ${clean(result["scanCount"])} scans    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparisons    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause matches`,
     );
     if (result["unavailableScans"]) {
       lines.push(
         `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,
-      );
-    }
-    if (result["unmatchedBatches"]) {
-      lines.push(
-        `  ${paint(
-          `${clean(result["unmatchedBatches"])} comparisons could not be matched; rerun to retry`,
-          33,
-        )}`,
       );
     }
   }
