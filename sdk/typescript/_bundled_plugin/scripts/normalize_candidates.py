@@ -211,7 +211,9 @@ def read_scope(path: Path, repo_root: Path) -> set[str]:
     return scope
 
 
-def read_scope_inventory(path: Path, repo_root: Path) -> set[str]:
+def read_scope_inventory(
+    path: Path, repo_root: Path, *, content_digests: dict[str, str] | None = None
+) -> set[str]:
     scope: set[str] = set()
     with path.open(encoding="utf-8") as handle:
         for number, line in enumerate(handle, 1):
@@ -219,8 +221,8 @@ def read_scope_inventory(path: Path, repo_root: Path) -> set[str]:
                 raise ValueError(f"in-scope inventory row {number}: blank rows are not allowed")
             try:
                 row: object = json.loads(line)
-                if not isinstance(row, dict) or set(row) != {"path"}:
-                    raise ValueError("expected an object with only a path field")
+                if not isinstance(row, dict) or set(row) not in ({"path"}, {"path", "sha256"}):
+                    raise ValueError("expected an object with a path and optional content digest")
                 value = row["path"]
                 if not isinstance(value, str) or not value or "\0" in value:
                     raise ValueError("path: expected a non-empty repository-relative path")
@@ -250,6 +252,13 @@ def read_scope_inventory(path: Path, repo_root: Path) -> set[str]:
                         raise ValueError("path: expected a regular non-symlink file")
                 if relative in scope:
                     raise ValueError("path: duplicate inventory path")
+                digest = row.get("sha256")
+                if digest is not None and (
+                    not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None
+                ):
+                    raise ValueError("sha256: expected a lowercase SHA-256 content digest")
+                if content_digests is not None and isinstance(digest, str):
+                    content_digests[relative] = digest
             except (OSError, TypeError, ValueError) as error:
                 raise ValueError(f"in-scope inventory row {number}: {error}") from error
             scope.add(relative)

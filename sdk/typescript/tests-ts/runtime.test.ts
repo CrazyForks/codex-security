@@ -2130,12 +2130,8 @@ describe("runtime directories and plugin Python boundary", () => {
         (await readFile(inventory.path, "utf8"))
           .trimEnd()
           .split("\n")
-          .map((line) => JSON.parse(line)),
-      ).toEqual([
-        { path: "C:candidate.py" },
-        { path: "a:config" },
-        { path: "source\\candidate.py" },
-      ]);
+          .map((line) => JSON.parse(line).path),
+      ).toEqual(["C:candidate.py", "a:config", "source\\candidate.py"]);
       await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
 
       for (const path of [

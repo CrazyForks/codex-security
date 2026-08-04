@@ -3914,7 +3914,7 @@ describe("CodexSecurity orchestration", () => {
       .trimEnd()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(rows).toEqual(
+    expect(rows.map(({ path }: { path: string }) => path)).toEqual(
       [
         ".github/workflows/release.yml",
         ".gitignore",
@@ -3924,10 +3924,11 @@ describe("CodexSecurity orchestration", () => {
         "package/index.ts",
         `package/${unusualName}`,
         "package/test/route.test.ts",
-      ]
-        .sort()
-        .map((path) => ({ path })),
+      ].sort(),
     );
+    for (const row of rows) {
+      expect(row.sha256).toMatch(/^[a-f0-9]{64}$/u);
+    }
 
     execFileSync(
       python!,
@@ -3949,16 +3950,14 @@ describe("CodexSecurity orchestration", () => {
       (await readFile(scopedInventory, "utf8"))
         .trimEnd()
         .split("\n")
-        .map((line) => JSON.parse(line)),
+        .map((line) => JSON.parse(line).path),
     ).toEqual(
       [
         "package/README.md",
         "package/index.ts",
         `package/${unusualName}`,
         "package/test/route.test.ts",
-      ]
-        .sort()
-        .map((path) => ({ path })),
+      ].sort(),
     );
 
     execFileSync(
@@ -3981,8 +3980,8 @@ describe("CodexSecurity orchestration", () => {
       (await readFile(dependencyInventory, "utf8"))
         .trimEnd()
         .split("\n")
-        .map((line) => JSON.parse(line)),
-    ).toEqual([{ path: "package/node_modules/dependency/index.js" }]);
+        .map((line) => JSON.parse(line).path),
+    ).toEqual(["package/node_modules/dependency/index.js"]);
 
     for (const [scope, path] of [
       [
@@ -4012,8 +4011,8 @@ describe("CodexSecurity orchestration", () => {
         (await readFile(manualDependencyInventory, "utf8"))
           .trimEnd()
           .split("\n")
-          .map((line) => JSON.parse(line)),
-      ).toEqual([{ path }]);
+          .map((line) => JSON.parse(line).path),
+      ).toEqual([path]);
     }
 
     execFileSync(
@@ -4034,7 +4033,10 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(
       JSON.parse((await readFile(binaryInventory, "utf8")).trim()),
-    ).toEqual({ path: "package/asset.bin" });
+    ).toMatchObject({
+      path: "package/asset.bin",
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
 
     execFileSync(
       python!,
@@ -4185,7 +4187,7 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("does not claim coverage for nested excluded-directory marker files", async () => {
+  test("excludes Git metadata without dropping dependency-named regular files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const submodule = join(repository, "submodule");
@@ -4231,9 +4233,12 @@ describe("CodexSecurity orchestration", () => {
       ],
       { stdio: "pipe" },
     );
-    expect(JSON.parse((await readFile(inventory, "utf8")).trim())).toEqual({
-      path: "submodule/app.ts",
-    });
+    expect(
+      (await readFile(inventory, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line).path),
+    ).toEqual(["submodule/app.ts", "submodule/node_modules"]);
     execFileSync(
       python!,
       [
@@ -4278,7 +4283,7 @@ describe("CodexSecurity orchestration", () => {
     expect(covered).toEqual({
       source: true,
       gitMarker: false,
-      dependencyMarker: false,
+      dependencyMarker: true,
     });
   });
 
@@ -4375,11 +4380,8 @@ describe("CodexSecurity orchestration", () => {
         (await readFile(inventory, "utf8"))
           .trimEnd()
           .split("\n")
-          .map((row) => JSON.parse(row)),
-      ).toEqual([
-        { path: "package/app.ts" },
-        { path: "package/node_modules/dependency/index.js" },
-      ]);
+          .map((row) => JSON.parse(row).path),
+      ).toEqual(["package/app.ts", "package/node_modules/dependency/index.js"]);
 
       execFileSync(
         python!,
@@ -4550,7 +4552,11 @@ describe("CodexSecurity orchestration", () => {
     expect(python).not.toBeNull();
     const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
 
-    for (const scope of ["root-link.ts", "package/directory-link"]) {
+    for (const scope of [
+      "root-link.ts",
+      "package/directory-link",
+      "package/directory-link/dependency/index.js",
+    ]) {
       const result = spawnSync(
         python!,
         [
@@ -4793,6 +4799,133 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("reviews regular files named like excluded dependency directories", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(join(repository, "nested"), { recursive: true });
+    const names = [".venv", "node_modules", "vendor"];
+    await Promise.all(
+      names.flatMap((name) => [
+        writeFile(join(repository, name), `source: ${name}\n`),
+        writeFile(join(repository, "nested", name), `nested: ${name}\n`),
+      ]),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
+
+    for (const [index, scope] of [".", ...names].entries()) {
+      const inventory = join(root, `inventory-${index}.jsonl`);
+      execFileSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          generator,
+          "make-scope-inventory",
+          "--repo",
+          repository,
+          "--scope",
+          scope,
+          "--out",
+          inventory,
+        ],
+        { stdio: "pipe" },
+      );
+      expect(
+        (await readFile(inventory, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line).path),
+      ).toEqual(
+        scope === "."
+          ? [...names, ...names.map((name) => `nested/${name}`)].sort()
+          : [scope],
+      );
+    }
+  });
+
+  test("binds the exclusion snapshot captured with a manual inventory", async () => {
+    if (process.platform === "win32") return;
+
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const inventory = join(root, "scope_inventory.jsonl");
+    const manifest = join(root, "scan-manifest.json");
+    const coverage = join(root, "coverage.json");
+    await mkdir(repository);
+    await Promise.all([
+      writeFile(join(repository, "source.ts"), "export const source = true;\n"),
+      writeFile(
+        manifest,
+        JSON.stringify({
+          scan: { scope: { includePaths: ["."], excludePaths: [] } },
+        }),
+      ),
+      writeFile(
+        coverage,
+        JSON.stringify({
+          includePaths: ["."],
+          excludePaths: [],
+          explicitExclusions: [],
+        }),
+      ),
+    ]);
+    const removed = join(repository, "removed-link.ts");
+    await symlink("source.ts", removed);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const generator = join(PLUGIN_ROOT, "scripts", "generate_rank_input.py");
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        generator,
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--out",
+        inventory,
+      ],
+      { stdio: "pipe" },
+    );
+    await rm(removed);
+    execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        generator,
+        "bind-scope-exclusions",
+        "--repo",
+        repository,
+        "--inventory",
+        inventory,
+        "--manifest",
+        manifest,
+        "--coverage",
+        coverage,
+      ],
+      { stdio: "pipe" },
+    );
+
+    expect(
+      (
+        JSON.parse(await readFile(manifest, "utf8")) as {
+          scan: { scope: { excludePaths: string[] } };
+        }
+      ).scan.scope.excludePaths,
+    ).toContain("removed-link.ts");
+    expect(
+      (
+        JSON.parse(await readFile(coverage, "utf8")) as {
+          explicitExclusions: Array<{ pattern: string }>;
+        }
+      ).explicitExclusions,
+    ).toContainEqual(expect.objectContaining({ pattern: "removed-link.ts" }));
+  });
+
   test("keeps glob metacharacters in excluded symbolic-link names literal", async () => {
     if (process.platform === "win32") return;
 
@@ -4957,7 +5090,11 @@ describe("CodexSecurity orchestration", () => {
       { contents: '{"path":\n', message: "in-scope inventory row 1" },
       {
         contents: '{"path":"safe.ts","extra":true}\n',
-        message: "only a path field",
+        message: "path and optional content digest",
+      },
+      {
+        contents: '{"path":"safe.ts","sha256":"not-a-digest"}\n',
+        message: "lowercase SHA-256 content digest",
       },
       {
         contents: '{"path":"../outside.ts"}\n',
@@ -5154,11 +5291,8 @@ describe("CodexSecurity orchestration", () => {
         (await readFile(inventory, "utf8"))
           .trimEnd()
           .split("\n")
-          .map((line) => JSON.parse(line)),
-      ).toEqual([
-        { path: "package/README.md" },
-        { path: "package/test/route.test.ts" },
-      ]);
+          .map((line) => JSON.parse(line).path),
+      ).toEqual(["package/README.md", "package/test/route.test.ts"]);
       expect(prompt).toContain(
         '"$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl"',
       );
@@ -5323,7 +5457,12 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("rejects filtered standard coverage before completing a scan", async () => {
-    for (const attack of ["missing", "filtered", "out-of-scope-candidate"]) {
+    for (const attack of [
+      "missing",
+      "filtered",
+      "out-of-scope-candidate",
+      "changed-source",
+    ]) {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -5437,6 +5576,12 @@ describe("CodexSecurity orchestration", () => {
                   join(scanDir, "findings.json"),
                   `${JSON.stringify({ findings: [] })}\n`,
                 );
+                if (attack === "changed-source") {
+                  await writeFile(
+                    join(repository, "safe.ts"),
+                    "export const safe = false;\n",
+                  );
+                }
                 return { events: completedEvents() };
               },
             }),
@@ -5445,7 +5590,7 @@ describe("CodexSecurity orchestration", () => {
       );
 
       await expect(client.run(repository)).rejects.toThrow(
-        /standard scan scope coverage|authoritative scope inventory|in-scope/u,
+        /standard scan scope coverage|authoritative scope inventory|in-scope|changed inventory/u,
       );
       expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
       expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);

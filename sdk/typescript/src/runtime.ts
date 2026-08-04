@@ -880,11 +880,16 @@ async function readScopeInventorySnapshot(
     }
     if (
       !isRecord(row) ||
-      Object.keys(row).length !== 1 ||
+      (Object.keys(row).length !== 1 && Object.keys(row).length !== 2) ||
       typeof row["path"] !== "string" ||
-      row["path"].length === 0
+      row["path"].length === 0 ||
+      (Object.keys(row).length === 2 &&
+        (typeof row["sha256"] !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(row["sha256"])))
     ) {
-      throw new Error(`inventory row ${index + 1} must contain only a path`);
+      throw new Error(
+        `inventory row ${index + 1} must contain a path and optional content digest`,
+      );
     }
     const inventoryPath = row["path"];
     if (

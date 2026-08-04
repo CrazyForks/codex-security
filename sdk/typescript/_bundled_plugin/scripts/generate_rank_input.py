@@ -251,6 +251,9 @@ def parse_args() -> argparse.Namespace:
         "--manifest", required=True, help="Unsealed scan-manifest.json path."
     )
     exclusions.add_argument("--coverage", required=True, help="Unsealed coverage.json path.")
+    exclusions.add_argument(
+        "--inventory", help="Inventory whose captured exclusions should be bound."
+    )
 
     diff = subparsers.add_parser(
         "make-diff-rank-input",
@@ -369,8 +372,13 @@ def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
-    if scope_path.is_symlink():
-        raise SystemExit(f"Scope must not be a symbolic link: {scope_path}")
+    current = scope_path
+    while current != repo:
+        if current.is_symlink():
+            raise SystemExit(f"Scope must not be a symbolic link or contain one: {current}")
+        if current.parent == current:
+            break
+        current = current.parent
     scope_path = scope_path.resolve()
     repo_resolved = repo.resolve()
     try:
@@ -420,7 +428,9 @@ def record_scope_path_exclusions(
         try:
             if child.is_symlink():
                 record_scope_exclusion(repository, child, exclusions)
-            elif child.name in STANDARD_SCOPE_EXCLUDED_DIRS:
+            elif child.name == ".git":
+                continue
+            elif child.is_dir() and child.name in STANDARD_SCOPE_EXCLUDED_DIRS:
                 if child.name not in STANDARD_SCOPE_ALWAYS_DECLARED_DIRS:
                     record_scope_exclusion(
                         repository,
@@ -430,6 +440,11 @@ def record_scope_path_exclusions(
                     )
             elif child.is_dir():
                 pending.append((child, child.iterdir()))
+            elif child.name in STANDARD_SCOPE_ALWAYS_DECLARED_DIRS:
+                relative = child.relative_to(repository).as_posix()
+                for pattern in list(exclusions):
+                    if fnmatch.fnmatchcase(relative, pattern):
+                        exclusions.pop(pattern)
             elif (
                 child.suffix.lower() in STANDARD_SCOPE_BINARY_SUFFIXES
                 and child not in requested_files
@@ -509,7 +524,9 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
                                 repository, child, exclusions
                             )
                             continue
-                        if child.name in STANDARD_SCOPE_EXCLUDED_DIRS:
+                        if child.name == ".git" or (
+                            child.is_dir() and child.name in STANDARD_SCOPE_EXCLUDED_DIRS
+                        ):
                             record_overlapping_scope_exclusions(
                                 repository,
                                 child,
@@ -544,6 +561,12 @@ def standard_scope_exclusions(repo: Path, scopes: list[str]) -> list[dict[str, s
                 (scope_prefix / "**" / directory).as_posix(),
                 (scope_prefix / "**" / directory / "**").as_posix(),
             ):
+                if (
+                    directory != ".git"
+                    and "**" not in pattern
+                    and (scope_path / directory).is_file()
+                ):
+                    continue
                 exclusions[pattern] = {"pattern": pattern, "reason": reason}
         record_scope_path_exclusions(
             repository, scope_path, exclusions, requested_files
@@ -764,11 +787,15 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
         if explicit_scopes
         else [args.scope]
     )
+    captured_exclusions = None
+    if expected_exclusions is None:
+        captured_exclusions = standard_scope_exclusions(repo, scopes)
+        expected_exclusions = [exclusion["pattern"] for exclusion in captured_exclusions]
     resolved_scopes = [
         resolve_scope(repo, scope, expand_user=not explicit_scopes) for scope in scopes
     ]
 
-    paths: set[str] = set()
+    paths: dict[str, str] = {}
     inventory_bytes = 0
     for scope_abs in resolved_scopes:
         scope_root = scope_abs if scope_abs.is_dir() else scope_abs.parent
@@ -801,6 +828,9 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     if scoped_exclusions
                     else relative
                 )
+                excluded_parts = (
+                    excluded_path.parts if path.is_dir() else excluded_path.parts[:-1]
+                )
                 requested_carve_out = any(
                     selected != scope_abs
                     and selected.is_relative_to(scope_abs)
@@ -812,7 +842,10 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     for selected in resolved_scopes
                 )
                 if (
-                    any(part in STANDARD_SCOPE_EXCLUDED_DIRS for part in excluded_path.parts)
+                    (
+                        path.name == ".git"
+                        or any(part in STANDARD_SCOPE_EXCLUDED_DIRS for part in excluded_parts)
+                    )
                     and not requested_carve_out
                 ):
                     if path.is_dir() and any(
@@ -853,10 +886,15 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                         )
                     if relative_path in paths:
                         continue
+                    digest = hashlib.sha256()
+                    with path.open("rb") as contents:
+                        for chunk in iter(lambda: contents.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    row = {"path": relative_path, "sha256": digest.hexdigest()}
                     row_bytes = len(
                         (
                             json.dumps(
-                                {"path": relative_path},
+                                row,
                                 ensure_ascii=True,
                                 separators=(",", ":"),
                             )
@@ -865,13 +903,20 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                     )
                     if len(paths) >= args.max_files or inventory_bytes + row_bytes > args.max_bytes:
                         raise SystemExit("Exceeded the standard scan scope inventory limit")
-                    paths.add(relative_path)
+                    paths[relative_path] = row["sha256"]
                     inventory_bytes += row_bytes
             except (OSError, ValueError) as exc:
                 raise SystemExit(f"Unable to safely inventory scope path: {path}") from exc
 
     output = Path(args.out).expanduser()
-    write_jsonl(output, [{"path": path} for path in sorted(paths)])
+    write_jsonl(
+        output,
+        [{"path": path, "sha256": digest} for path, digest in sorted(paths.items())],
+    )
+    if captured_exclusions is not None:
+        output.with_suffix(".exclusions.json").write_text(
+            json.dumps(captured_exclusions, ensure_ascii=True) + "\n", encoding="utf-8"
+        )
     print(f"Wrote {len(paths)} inventory rows to {output}")
 
 
@@ -1102,7 +1147,8 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
         inventory = Path(args.inventory).expanduser().resolve(strict=True)
         if not repository.is_dir() or not scan_dir.is_dir():
             raise ValueError("repository and scan directory must be directories")
-        scope = read_scope_inventory(inventory, repository)
+        inventory_digests: dict[str, str] = {}
+        scope = read_scope_inventory(inventory, repository, content_digests=inventory_digests)
     except (OSError, UnicodeError, ValueError) as error:
         raise SystemExit(f"Unable to read the authoritative scope inventory: {error}") from error
 
@@ -1167,6 +1213,28 @@ def verify_scope_coverage(args: argparse.Namespace) -> None:
         raise SystemExit(
             "Scope-review ledger marks unavailable inventory paths as reviewed: "
             + ", ".join(repr(path) for path in unavailable_reviewed[:10])
+        )
+    changed_reviewed = []
+    for row in reviews:
+        if row["disposition"] != "reviewed":
+            continue
+        relative = str(row["path"])
+        expected = inventory_digests.get(relative)
+        if expected is None:
+            continue
+        digest = hashlib.sha256()
+        try:
+            with (repository / relative).open("rb") as contents:
+                for chunk in iter(lambda: contents.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise SystemExit(f"Unable to attest reviewed inventory path: {relative}") from exc
+        if digest.hexdigest() != expected:
+            changed_reviewed.append(relative)
+    if changed_reviewed:
+        raise SystemExit(
+            "Scope-review ledger marks changed inventory paths as reviewed: "
+            + ", ".join(repr(path) for path in sorted(changed_reviewed)[:10])
         )
 
     coverage_path = require_standard_scope_artifact(scan_dir, "coverage.json", "Scan coverage")
@@ -1489,7 +1557,21 @@ def bind_scope_exclusions(args: argparse.Namespace) -> None:
         if args.scopes_file is not None
         else [args.scope]
     )
-    exclusions = standard_scope_exclusions(repo, scopes)
+    if args.inventory is None:
+        exclusions = standard_scope_exclusions(repo, scopes)
+    else:
+        snapshot = Path(args.inventory).expanduser().with_suffix(".exclusions.json")
+        try:
+            exclusions = json.loads(snapshot.read_text(encoding="utf-8"))
+            if not isinstance(exclusions, list) or any(
+                not isinstance(exclusion, dict)
+                or set(exclusion) != {"pattern", "reason"}
+                or any(not isinstance(value, str) or not value for value in exclusion.values())
+                for exclusion in exclusions
+            ):
+                raise ValueError("invalid captured exclusions")
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise SystemExit("Unable to read the captured standard scope exclusions") from exc
     manifest_path = Path(args.manifest).expanduser()
     coverage_path = Path(args.coverage).expanduser()
     try:
