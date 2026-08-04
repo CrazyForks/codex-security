@@ -111,6 +111,9 @@ export function checkoutScans(
       .filter((targetId): targetId is string => typeof targetId === "string"),
   );
   const selectedScans = new Set(selected);
+  if (selectedScans.size === 0) {
+    return scans.filter((scan) => scan["relatedCheckout"] === true);
+  }
   return scans.filter(
     (scan) =>
       selectedScans.has(scan) ||
@@ -477,8 +480,8 @@ export function renderScanHistory(
           wrap(evidence["explanation"], 6);
         }
         if (typeof evidence["code"] === "string") {
-          for (const sourceLine of evidence["code"].split("\n").slice(0, 12)) {
-            lines.push(`      ${dim(clean(sourceLine).slice(0, width - 8))}`);
+          for (const sourceLine of evidence["code"].split("\n")) {
+            lines.push(`      ${dim(clean(sourceLine))}`);
           }
         }
       }
@@ -486,8 +489,8 @@ export function renderScanHistory(
     const sourceExcerpt = result["sourceExcerpt"];
     if (typeof sourceExcerpt === "string" && sourceExcerpt) {
       lines.push("", `  ${strong("SOURCE EXCERPT")}`);
-      for (const sourceLine of sourceExcerpt.split("\n").slice(0, 60)) {
-        lines.push(`    ${dim(clean(sourceLine).slice(0, width - 6))}`);
+      for (const sourceLine of sourceExcerpt.split("\n")) {
+        lines.push(`    ${dim(clean(sourceLine))}`);
       }
     }
     if (typeof result["remediation"] === "string" && result["remediation"]) {

@@ -186,7 +186,11 @@ def list_scans(
                     if registered_parent["target_id"] is not None:
                         related_target_ids.append(registered_parent["target_id"])
                     break
-        for scan in connection.execute("SELECT target_id, target_path FROM scans"):
+        repository_prefix = str(repository).rstrip(os.sep) + os.sep
+        for scan in connection.execute(
+            "SELECT target_id, target_path FROM scans WHERE substr(target_path, 1, ?) = ?",
+            (len(repository_prefix), repository_prefix),
+        ):
             target_path = Path(scan["target_path"])
             if target_path == repository or not target_path.is_relative_to(repository):
                 continue
@@ -214,7 +218,7 @@ def list_scans(
             "AND NOT EXISTS ("
             "SELECT 1 FROM security_targets AS path_owner "
             "WHERE path_owner.current_path = scans.target_path "
-            "AND path_owner.id != scans.target_id)"
+            "AND path_owner.id IS NOT scans.target_id)"
         ]
         values.extend(repository_paths)
         if related_target_ids:
@@ -311,6 +315,14 @@ def list_scans(
                 "startedAt": row["started_at"],
                 "targetId": row["target_id"],
                 "targetPath": row["target_path"],
+                **(
+                    {"relatedCheckout": True}
+                    if args is not None
+                    and args.repository
+                    and row["target_id"] in related_target_ids
+                    and row["target_path"] not in repository_paths
+                    else {}
+                ),
                 **(
                     {"currentTargetPath": row["current_target_path"]}
                     if row["current_target_path"] is not None

@@ -47,6 +47,7 @@ def list_global_findings(
             read_coverage,
             target_ids=target_ids,
             target_paths=target_paths,
+            query=query,
         )
         if (
             (target_ids is None and target_paths is None)
@@ -69,13 +70,7 @@ def list_global_findings(
                 )
                 if value is not None
             )
-            or any(
-                query in location["relative_path"].casefold()
-                for location in connection.execute(
-                    "SELECT relative_path FROM finding_locations WHERE occurrence_id = ?",
-                    (row["occurrence_id"],),
-                )
-            )
+            or row["secondary_location_match"]
         )
     )
     rows = list(islice(findings, args.offset, args.offset + limit + 1))
@@ -112,6 +107,7 @@ def _active_findings(
     *,
     target_ids: set[str] | None = None,
     target_paths: set[str] | None = None,
+    query: str = "",
 ) -> Iterator[sqlite3.Row]:
     target_filters = []
     target_values = []
@@ -141,6 +137,14 @@ def _active_findings(
         completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
 
     coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}
+    secondary_location_match = (
+        "EXISTS ("
+        "SELECT 1 FROM finding_locations AS searched_locations "
+        "WHERE searched_locations.occurrence_id = selected_findings.occurrence_id "
+        "AND instr(lower(searched_locations.relative_path), ?) > 0)"
+        if query
+        else "0"
+    )
     rows = connection.execute(
         f"""
         WITH ranked_findings AS (
@@ -176,6 +180,7 @@ def _active_findings(
             selected_findings.*,
             occurrences.title,
             occurrences.summary,
+            {secondary_location_match} AS secondary_location_match,
             (
                 SELECT locations.relative_path
                 FROM finding_locations AS locations
@@ -202,7 +207,7 @@ def _active_findings(
             selected_findings.created_at DESC,
             selected_findings.occurrence_id
         """,
-        target_values,
+        [*target_values, *([query] if query else [])],
     )
     for row in rows:
         resolved = False

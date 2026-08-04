@@ -51,9 +51,11 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
+  "location_queries = []",
+  "connection.set_trace_callback(lambda statement: location_queries.append(statement) if 'finding_locations' in statement else None)",
   "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), offset=0, limit=20)",
   "result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "print(json.dumps({'findings': result['findings'], 'coverageReads': coverage_reads}))",
+  "print(json.dumps({'findings': result['findings'], 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries)}))",
 ].join("\n");
 
 const nestedDirectoryScanProbe = [
@@ -77,6 +79,8 @@ const nestedDirectoryScanProbe = [
   "    connection = sqlite3.connect(':memory:')",
   "    connection.row_factory = sqlite3.Row",
   "    apply_migrations(connection)",
+  "    descendant_queries = []",
+  "    connection.set_trace_callback(lambda statement: descendant_queries.append(statement) if 'SELECT target_id, target_path FROM scans' in statement else None)",
   "    timestamp = '2026-08-03T12:00:00Z'",
   "    for scan_id, path in [('scan', root), ('independent-service-scan', service)]:",
   "        target = ensure_security_target(connection, str(path))",
@@ -127,7 +131,7 @@ const nestedDirectoryScanProbe = [
   "    for path in (moved_checkout, reused_checkout): path.mkdir()",
   "    moved_target = ensure_security_target(connection, str(moved_checkout))",
   "    current_target = ensure_security_target(connection, str(reused_checkout))",
-  "    for scan_id, target in [('stale-reused-scan', moved_target), ('current-reused-scan', current_target)]:",
+  "    for scan_id, target in [('stale-reused-scan', moved_target), ('current-reused-scan', current_target), ('legacy-reused-scan', None)]:",
   "        workspace_id = scan_id + '-workspace'",
   "        connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', (workspace_id, target, str(reused_checkout), timestamp, timestamp))",
   "        connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan_id, workspace_id, target, str(reused_checkout), 'unversioned', '.', 'standard', directory + '/results/' + scan_id, 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
@@ -164,6 +168,21 @@ const nestedDirectoryScanProbe = [
   "    for label, path in [('sameOriginOuter', same_origin_outer), ('sameOriginNested', same_origin_nested)]:",
   "        args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "        output[label] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    original_clone = (pathlib.Path(directory) / 'portable-original-clone').resolve()",
+  "    related_clone = (pathlib.Path(directory) / 'portable-related-clone').resolve()",
+  "    for path in (original_clone, related_clone):",
+  "        path.mkdir()",
+  "        subprocess.run(['git', 'init', '-q', str(path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+  "        subprocess.run(['git', '-C', str(path), 'remote', 'add', 'origin', 'https://github.com/example/portable.git'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+  "    portable_target = ensure_security_target(connection, str(original_clone))",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('portable-workspace', portable_target, str(original_clone), timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('portable-scan', 'portable-workspace', portable_target, str(original_clone), 'unversioned', '.', 'standard', directory + '/results/portable-scan', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('portable-scan', timestamp))",
+  "    args = argparse.Namespace(repository=str(related_clone), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    related_scans = list_scans(connection, args)['scans']",
+  "    output['relatedCheckoutHistory'] = [scan['scanId'] for scan in related_scans]",
+  "    output['relatedCheckoutVerified'] = related_scans[0].get('relatedCheckout') is True",
+  "    output['descendantQueriesScoped'] = bool(descendant_queries) and all('WHERE substr(target_path, 1,' in statement for statement in descendant_queries)",
   "    print(json.dumps(output))",
 ].join("\n");
 
@@ -251,6 +270,7 @@ function probeFindingsIndex(
     targetPath: string;
   }>;
   coverageReads: string[];
+  locationQueryCount: number;
 } {
   const result = runFindingsIndex(targetId, settings);
   expect(new TextDecoder().decode(result.stderr)).toBe("");
@@ -354,6 +374,7 @@ describe("workbench findings index", () => {
     expect(result.findings).toEqual([
       expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
     ]);
+    expect(result.locationQueryCount).toBe(1);
   });
 
   test("searches repository paths only for cross-repository queries", () => {
@@ -402,7 +423,7 @@ describe("workbench findings index", () => {
       nestedIndependentGitWithoutGit: [],
       legacyGitRoot: ["legacy-git-scan"],
       legacyGitSubdirectory: ["legacy-git-scan"],
-      registeredLegacyGitRoot: ["legacy-git-scan"],
+      registeredLegacyGitRoot: [],
       unversionedRoot: ["plain-a", "plain-b"],
       unversionedService: ["plain-a"],
       nestedGitCheckout: ["nested-git"],
@@ -414,6 +435,9 @@ describe("workbench findings index", () => {
       nestedReusedParentFallsBackToRoot: ["scan"],
       sameOriginOuter: ["same-origin-outer-scan"],
       sameOriginNested: ["same-origin-nested-scan"],
+      relatedCheckoutHistory: ["portable-scan"],
+      relatedCheckoutVerified: true,
+      descendantQueriesScoped: true,
     });
   }, 30_000);
 

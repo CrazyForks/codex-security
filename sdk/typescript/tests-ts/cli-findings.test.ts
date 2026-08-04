@@ -565,6 +565,45 @@ describe("CLI findings history", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({ findings: [] });
   });
 
+  test("recovers verified related-checkout history when the local checkout has no scan", async () => {
+    for (const command of [["findings"], ["scans", "show"]]) {
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      expect(
+        await main(
+          [...command, "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [
+                    {
+                      scanId: "related-scan",
+                      targetId: "related-target",
+                      targetPath: "/another/verified-checkout",
+                      relatedCheckout: true,
+                      progress: { status: "complete" },
+                    },
+                  ],
+                };
+              }
+              return args[0] === "get-scan"
+                ? { scan: { scanId: "related-scan", findings: [] } }
+                : { findings: [], limit: 20, nextOffset: null, offset: 0 };
+            },
+          }),
+        ),
+      ).toBe(0);
+
+      expect(calls[1]).toContain(
+        command[0] === "findings" ? "related-target" : "related-scan",
+      );
+    }
+  });
+
   test("finds scanned checkout subdirectories from the repository root", async () => {
     for (const command of [["findings"], ["scans", "show"]]) {
       const calls: Array<readonly string[]> = [];

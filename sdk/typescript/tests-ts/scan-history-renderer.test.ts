@@ -451,6 +451,34 @@ describe("scan history renderer", () => {
     expect(output).toContain("bypass_authorization()");
   });
 
+  test("preserves every line and the complete width of saved finding evidence", () => {
+    const sink = `${"argument_".repeat(18)}dangerous_sink(user_input)`;
+    const code = [
+      ...Array.from({ length: 14 }, (_, index) => `step_${index}();`),
+      sink,
+    ].join("\n");
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "complete-evidence-scan",
+          targetPath: "/demo/repository",
+          occurrenceId: "complete-evidence-occurrence",
+          severity: { level: "high" },
+          title: "Full evidence",
+          locations: [{ path: "src/server.ts" }],
+          codeEvidence: [{ label: "Complete validation trace", code }],
+          sourceExcerpt: sink,
+        },
+        "finding",
+        { columns: 48 },
+      ),
+    );
+
+    expect(output).toContain("step_13();");
+    expect(output).toContain(sink);
+    expect(output.match(/dangerous_sink\(user_input\)/g)).toHaveLength(2);
+  });
+
   test("connects scan history with the next useful commands", () => {
     const output = stripVTControlCharacters(
       renderScanHistory(
