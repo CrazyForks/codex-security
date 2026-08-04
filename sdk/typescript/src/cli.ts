@@ -669,12 +669,17 @@ export async function main(
     argv.slice(0, optionTerminator).includes("bulk-scan") &&
     terminatedInput !== undefined
   ) {
+    if (argv.length > optionTerminator + 2) {
+      errorOutput.write(
+        "codex-security: Unexpected positional argument for bulk-scan.\n",
+      );
+      return 2;
+    }
     argv = [
       ...argv.slice(0, optionTerminator),
       terminatedInput.startsWith("-")
         ? `.${sep}${terminatedInput}`
         : terminatedInput,
-      ...argv.slice(optionTerminator + 2),
     ];
   }
   argv = defaultScansList(argv);

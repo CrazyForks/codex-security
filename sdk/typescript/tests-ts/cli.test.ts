@@ -793,6 +793,29 @@ describe("CLI", () => {
     }
   });
 
+  test("rejects additional bulk-scan arguments after the option terminator", async () => {
+    for (const trailing of [
+      ["--output-dir", "results"],
+      ["--help"],
+      ["another.csv"],
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["bulk-scan", "--", "repositories.csv", ...trailing],
+          stdout.stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Unexpected positional argument for bulk-scan",
+      );
+    }
+  });
+
   test.each([
     [
       "OpenRouter",
