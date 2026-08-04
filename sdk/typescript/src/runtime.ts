@@ -634,7 +634,9 @@ export async function runWorkbench(
           Object.entries(environment).filter(
             ([name]) =>
               name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY",
+              name.toUpperCase() !== "CODEX_API_KEY" &&
+              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+              name.toUpperCase() !== "FIREWORKS_API_KEY",
           ),
         ),
         encoding: "utf8",

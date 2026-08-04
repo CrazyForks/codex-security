@@ -481,7 +481,7 @@ def immutable_diff_preview(
         raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
     if mode == b"160000" and kind == b"commit":
         return f"Git submodule pinned to commit {object_id.decode('ascii')}", False
-    if mode not in {b"100644", b"100755"} or kind != b"blob":
+    if mode not in {b"100644", b"100755", b"120000"} or kind != b"blob":
         raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
 
     return git_blob_preview(command, environment, path, object_id, preview_bytes)
@@ -908,11 +908,18 @@ def git_untracked_paths(repo: Path) -> list[tuple[Path, str]]:
         capture_output=True,
         env=environment,
     )
-    return [
-        (repo / os.fsdecode(path), "A")
-        for path in result.stdout.split(b"\0")
-        if path
-    ]
+    paths: list[tuple[Path, str]] = []
+    for value in result.stdout.split(b"\0"):
+        if not value:
+            continue
+        path = repo / os.fsdecode(value)
+        if not path.is_dir() or path.is_symlink():
+            paths.append((path, "A"))
+            continue
+        for directory, children, files in os.walk(path, followlinks=False):
+            children[:] = sorted(child for child in children if child != ".git")
+            paths.extend((Path(directory) / filename, "A") for filename in sorted(files))
+    return paths
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str, bool]]:
@@ -942,7 +949,19 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         raise SystemExit(f"Repo path not found: {repo}")
 
     rows: list[JsonRow] = []
-    for path, status, is_staged in git_changed_paths(repo, args.base, args.head, args.mode):
+    changed_paths = git_changed_paths(repo, args.base, args.head, args.mode)
+    replaced_gitlinks = (
+        {
+            path
+            for path, status, _ in changed_paths
+            if status == "D"
+            and path.is_dir()
+            and is_immutable_gitlink(repo, args.base, path.relative_to(repo))
+        }
+        if args.mode == "local-patch"
+        else set()
+    )
+    for path, status, is_staged in changed_paths:
         rel = path.relative_to(repo)
         gitlink_revision = None
         index_is_gitlink = False
@@ -969,7 +988,13 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 and is_immutable_gitlink(repo, args.base, rel)
             ):
                 gitlink_revision = args.base
-        if not diff_path_is_included(rel) and gitlink_revision is None:
+        replacement_source = any(
+            path != root
+            and path.is_relative_to(root)
+            and diff_path_is_included(path.relative_to(root))
+            for root in replaced_gitlinks
+        )
+        if not diff_path_is_included(rel) and gitlink_revision is None and not replacement_source:
             continue
 
         if status == "D":

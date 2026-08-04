@@ -47,6 +47,7 @@ from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
+    _validate_existing_seal,
     _write_prepared_scan_finalization,
     csv_cell,
     finalize_scan,
@@ -379,14 +380,10 @@ def require_diff_target(
                 "Select Uncommitted changes again."
             )
         if content_digest and content_digest != current_digest:
-            if content_digest not in {
-                worktree_content_digest(target, include_conflicted_index=False),
-                worktree_content_digest(target, legacy=True),
-            }:
-                raise SystemExit(
-                    "Working-tree contents changed after they were selected. "
-                    "Select Uncommitted changes again."
-                )
+            raise SystemExit(
+                "Working-tree contents changed after they were selected. "
+                "Select Uncommitted changes again."
+            )
         return {
             "kind": kind,
             "baseRevision": current_head,
@@ -1403,7 +1400,18 @@ def complete_scan_locked(
     if scan["status"] == "complete":
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
-        verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
+        manifest = read_json_object(scan_dir / ARTIFACTS["manifest"])
+        verify_manifest_binding(scan, manifest)
+        if (
+            scan["mode"] == "diff"
+            and scan["diff_target_kind"] in {"commit", "range"}
+            and scan["diff_content_digest"] is None
+        ):
+            try:
+                _validate_existing_seal(scan_dir, manifest["scan"])
+            except ContractError as exc:
+                raise SystemExit(str(exc)) from exc
+            return scan_context(connection, scan["id"])
         try:
             manifest, _, _ = finalize_scan(
                 scan_dir,
@@ -1569,6 +1577,8 @@ def backfill_legacy_immutable_diff_digest(
         require_recorded_manifest_digest(scan, scan_dir)
         target = manifest_scan.get("target", {}) if isinstance(manifest_scan, dict) else {}
         digest = target.get("snapshotDigest") if isinstance(target, dict) else None
+        if digest is None:
+            return scan
         if not isinstance(digest, str) or re.fullmatch(
             r"codex-security-snapshot/v1:sha256:[a-f0-9]{64}", digest
         ) is None:

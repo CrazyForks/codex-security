@@ -92,14 +92,20 @@ def trusted_git_executable(protected_root: Path | None = None) -> str | None:
             if not entry:
                 continue
             for name in names:
+                executable_path = (Path(entry) / name).absolute()
                 try:
-                    candidate = (Path(entry) / name).resolve(strict=True)
+                    candidate = executable_path.resolve(strict=True)
                 except OSError:
                     continue
-                if root is not None and (candidate == root or root in candidate.parents):
+                if root is not None and (
+                    candidate == root
+                    or root in candidate.parents
+                    or executable_path == root
+                    or root in executable_path.parents
+                ):
                     continue
                 if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(candidate)
+                    return str(executable_path)
         return None
     candidate = Path(executable)
     if not candidate.is_absolute():
@@ -111,9 +117,14 @@ def trusted_git_executable(protected_root: Path | None = None) -> str | None:
     if not canonical.is_file() or not os.access(canonical, os.X_OK):
         raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.")
     if root is not None:
-        if canonical == root or root in canonical.parents:
+        if (
+            canonical == root
+            or root in canonical.parents
+            or candidate == root
+            or root in candidate.parents
+        ):
             raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
-    return str(canonical)
+    return str(candidate)
 
 
 def main() -> None:

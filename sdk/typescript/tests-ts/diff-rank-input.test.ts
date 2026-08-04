@@ -236,7 +236,7 @@ describe("diff rank input", () => {
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout.trim()).toBe(await realpath(trustedGit!));
+    expect(result.stdout.trim()).toBe(trustedGit!);
     await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
 
     const nested = join(fixture.repository, "vendor", "nested");
@@ -261,9 +261,56 @@ describe("diff rank input", () => {
       { encoding: "utf8", env: environment },
     );
     expect(nestedResult.status, nestedResult.stderr).toBe(0);
-    expect(nestedResult.stdout.trim()).toBe(await realpath(trustedGit!));
+    expect(nestedResult.stdout.trim()).toBe(trustedGit!);
     await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves the executable identity of trusted Git wrappers",
+    async () => {
+      const fixture = await createRepository();
+      const trustedGit = Bun.which("git");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(trustedGit).not.toBeNull();
+      expect(python).not.toBeNull();
+      const wrapper = join(fixture.root, "dispatch");
+      const executable = join(fixture.root, "git");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh\ncase "$0" in */git) exec '${trustedGit}' "$@" ;; *) exit 64 ;; esac\n`,
+        { mode: 0o755 },
+      );
+      await symlink(wrapper, executable);
+
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import subprocess, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "from workbench_constants import trusted_git_executable",
+            "git = trusted_git_executable(Path(sys.argv[2]))",
+            "subprocess.run([git, '--version'], check=True)",
+            "print(git)",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          fixture.repository,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_GIT: executable },
+        },
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("git version ");
+      expect(result.stdout).toContain(executable);
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "treats metacharacters in immutable Git paths as literal names",
@@ -412,6 +459,53 @@ describe("diff rank input", () => {
       path,
       area: "diff",
       preview: "",
+    });
+  });
+
+  test("inventories replacements after a staged Git submodule deletion", async () => {
+    const fixture = await createRepository();
+    const path = ".github/actions/local";
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},${path}`,
+    );
+    git(fixture.repository, "commit", "-qm", "add local action gitlink");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "rm", "--cached", "--quiet", path);
+    await writeRepositoryFile(
+      fixture.repository,
+      `${path}/action.yml`,
+      "name: replacement\nruns:\n  using: composite\n",
+    );
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([
+      { path, area: "diff", preview: "" },
+      {
+        path: `${path}/action.yml`,
+        area: "diff",
+        preview: "key name\nkey runs",
+      },
+    ]);
+  });
+
+  test("expands untracked embedded repositories into reviewable files", async () => {
+    const fixture = await createRepository();
+    const nested = join(fixture.repository, ".github", "actions", "local");
+    await mkdir(nested, { recursive: true });
+    git(nested, "init", "-q");
+    git(nested, "config", "user.name", "Codex Security Test");
+    git(nested, "config", "user.email", "codex-security@example.invalid");
+    await writeRepositoryFile(nested, "action.yml", "name: local action\n");
+    git(nested, "add", "action.yml");
+    git(nested, "commit", "-qm", "add local action");
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toContainEqual({
+      path: ".github/actions/local/action.yml",
+      area: "diff",
+      preview: "key name",
     });
   });
 
@@ -1007,7 +1101,7 @@ describe("diff rank input", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "never previews committed symlinks or repository paths escaping through a symlinked parent",
+    "previews committed symlink targets without dereferencing external paths",
     async () => {
       const fixture = await createRepository();
       const canary = "CODEX_SECURITY_SYNTHETIC_EXTERNAL_SECRET_7e98526d";
@@ -1054,9 +1148,12 @@ describe("diff rank input", () => {
         "dir",
       );
 
-      await expect(runDiffRankInput(fixture, "revisions")).rejects.toThrow(
-        /unsafe changed repository path/iu,
+      const rows = await runDiffRankInput(fixture, "revisions");
+      expect(rows.map(({ path }) => path)).toContain("src/linked.py");
+      expect(rows.map(({ path }) => path)).toContain(
+        ".github/workflows/linked.yml",
       );
+      expect(JSON.stringify(rows)).not.toContain(canary);
       expect(await readFile(externalFile, "utf8")).toContain(canary);
     },
   );
@@ -1105,9 +1202,19 @@ describe("diff rank input", () => {
           );
         }
 
-        await expect(runDiffRankInput(fixture, mode)).rejects.toThrow(
-          /unsafe changed repository path/iu,
-        );
+        if (mode === "revisions") {
+          const rows = await runDiffRankInput(fixture, mode);
+          expect(rows).toContainEqual({
+            path: "src/app.ts",
+            area: "diff",
+            preview: externalFile,
+          });
+          expect(JSON.stringify(rows)).not.toContain(canary);
+        } else {
+          await expect(runDiffRankInput(fixture, mode)).rejects.toThrow(
+            /unsafe changed repository path/iu,
+          );
+        }
         expect(await readFile(externalFile, "utf8")).toContain(canary);
       }
     },
@@ -1189,6 +1296,22 @@ describe("diff rank input", () => {
       },
     ]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "previews immutable Git symlink blobs without dereferencing their targets",
+    async () => {
+      const fixture = await createRepository();
+      await symlink("app.ts", join(fixture.repository, "src", "config.ts"));
+      git(fixture.repository, "add", "src/config.ts");
+      git(fixture.repository, "commit", "-qm", "add source symlink");
+
+      expect(await runDiffRankInput(fixture, "revisions")).toContainEqual({
+        path: "src/config.ts",
+        area: "diff",
+        preview: "app.ts",
+      });
+    },
+  );
 
   test("previews the base contents of staged security-sensitive deletions", async () => {
     const fixture = await createRepository();
@@ -1386,7 +1509,7 @@ describe("diff rank input", () => {
     expect(digest()).not.toBe(previous);
   });
 
-  test("accepts immediately preceding snapshot digests for unresolved conflicts", async () => {
+  test("rejects outdated snapshot digests for unresolved Git conflicts", async () => {
     const fixture = await createRepository();
     const path = "src/app.ts";
     const hashes = ["base-target.ts", "ours-target.ts", "theirs-target.ts"].map(
@@ -1409,29 +1532,22 @@ describe("diff rank input", () => {
     expect(updated.status, updated.stderr).toBe(0);
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const result = execFileSync(
+    const result = spawnSync(
       python!,
       [
         "-I",
         "-B",
         "-c",
         [
-          "import json, sqlite3, sys",
+          "import sys",
           "from pathlib import Path",
           "sys.path.insert(0, sys.argv[1])",
-          "from filesystem_identity import serialize_filesystem_identity",
           "from workbench_db import require_diff_target",
-          "from workbench_target import scan_target_warning, worktree_content_digest",
+          "from workbench_target import worktree_content_digest",
           "target = Path(sys.argv[2])",
           "revision = sys.argv[3]",
           "previous = worktree_content_digest(target, include_conflicted_index=False)",
-          "current = worktree_content_digest(target)",
-          "selected = require_diff_target(target, 'working_tree', revision, revision, previous)",
-          "connection = sqlite3.connect(':memory:')",
-          "connection.row_factory = sqlite3.Row",
-          "metadata = target.stat()",
-          "scan = connection.execute('SELECT ? AS diff_target_kind, ? AS target_snapshot_digest, ? AS target_path, ? AS target_device, ? AS target_inode, ? AS target_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS scan_dir', ('working_tree', previous, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), revision, revision, previous, str(target.parent / 'scan'))).fetchone()",
-          "print(json.dumps({'previous': previous, 'current': current, 'selected': selected['contentDigest'], 'warning': scan_target_warning(scan)}))",
+          "require_diff_target(target, 'working_tree', revision, revision, previous)",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
         fixture.repository,
@@ -1439,19 +1555,12 @@ describe("diff rank input", () => {
       ],
       { encoding: "utf8" },
     );
-    const snapshots = JSON.parse(result) as {
-      previous: string;
-      current: string;
-      selected: string;
-      warning: string | null;
-    };
 
-    expect(snapshots.current).not.toBe(snapshots.previous);
-    expect(snapshots.selected).toBe(snapshots.current);
-    expect(snapshots.warning).toContain("Working-tree contents changed");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Working-tree contents changed");
   });
 
-  test("preserves legacy working-tree snapshots while binding new index digests", async () => {
+  test("rejects legacy snapshot digests that omit staged Git contents", async () => {
     const fixture = await createRepository();
     await writeRepositoryFile(
       fixture.repository,
@@ -1461,29 +1570,22 @@ describe("diff rank input", () => {
     git(fixture.repository, "add", "src/app.ts");
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const result = execFileSync(
+    const result = spawnSync(
       python!,
       [
         "-I",
         "-B",
         "-c",
         [
-          "import json, sqlite3, sys",
+          "import sys",
           "from pathlib import Path",
           "sys.path.insert(0, sys.argv[1])",
-          "from filesystem_identity import serialize_filesystem_identity",
           "from workbench_db import require_diff_target",
-          "from workbench_target import scan_target_warning, worktree_content_digest",
+          "from workbench_target import worktree_content_digest",
           "target = Path(sys.argv[2])",
           "revision = sys.argv[3]",
-          "modern = worktree_content_digest(target)",
           "legacy = worktree_content_digest(target, legacy=True)",
-          "selected = require_diff_target(target, 'working_tree', revision, revision, legacy)",
-          "connection = sqlite3.connect(':memory:')",
-          "connection.row_factory = sqlite3.Row",
-          "metadata = target.stat()",
-          "scan = connection.execute('SELECT ? AS diff_target_kind, ? AS target_snapshot_digest, ? AS target_path, ? AS target_device, ? AS target_inode, ? AS target_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS scan_dir', ('working_tree', None, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), revision, revision, selected['contentDigest'], str(target.parent / 'scan'))).fetchone()",
-          "print(json.dumps({'modern': modern, 'legacy': legacy, 'selected': selected['contentDigest'], 'warning': scan_target_warning(scan)}))",
+          "require_diff_target(target, 'working_tree', revision, revision, legacy)",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
         fixture.repository,
@@ -1491,16 +1593,9 @@ describe("diff rank input", () => {
       ],
       { encoding: "utf8" },
     );
-    const snapshot = JSON.parse(result) as {
-      modern: string;
-      legacy: string;
-      selected: string;
-      warning: string | null;
-    };
 
-    expect(snapshot.modern).not.toBe(snapshot.legacy);
-    expect(snapshot.selected).toBe(snapshot.modern);
-    expect(snapshot.warning).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Working-tree contents changed");
   });
 
   test("continues to exclude binary files and ignored dependency directories", async () => {

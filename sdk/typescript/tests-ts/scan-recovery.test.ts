@@ -453,6 +453,39 @@ describe("malformed scan artifact recovery", () => {
 
     downgrade();
     expect((await completeScan(fixture)).progress.status).toBe("complete");
+
+    const restoreLegacyManifest = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import hashlib, json, pathlib, sqlite3, sys",
+          "manifest_path = pathlib.Path(sys.argv[1])",
+          "manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
+          "manifest['scan']['target'].pop('snapshotDigest', None)",
+          "encoded = (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + '\\n').encode()",
+          "manifest_path.write_bytes(encoded)",
+          "with sqlite3.connect(sys.argv[2]) as connection:",
+          "    connection.execute('UPDATE scans SET diff_content_digest = NULL, seal_manifest_digest = ? WHERE id = ?', ('sha256:' + hashlib.sha256(encoded).hexdigest(), sys.argv[3]))",
+          "    connection.execute('UPDATE workspaces SET diff_content_digest = NULL WHERE id = (SELECT workspace_id FROM scans WHERE id = ?)', (sys.argv[3],))",
+        ].join("\n"),
+        manifestPath,
+        join(fixture.stateDir, "workbench.sqlite3"),
+        fixture.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(restoreLegacyManifest.status, restoreLegacyManifest.stderr).toBe(0);
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+    expect(
+      (
+        await readJson<{
+          scan: { target: { snapshotDigest?: string } };
+        }>(manifestPath)
+      ).scan.target.snapshotDigest,
+    ).toBeUndefined();
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {
