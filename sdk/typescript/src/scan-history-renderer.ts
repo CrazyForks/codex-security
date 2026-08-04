@@ -87,7 +87,7 @@ export function checkoutScans(
       descendants.add(targetPath);
     }
   }
-  return scans.filter((scan) => {
+  const selected = scans.filter((scan) => {
     const targetPath = scan["targetPath"];
     return (
       typeof targetPath === "string" &&
@@ -96,6 +96,18 @@ export function checkoutScans(
         : targetPath === containingPath)
     );
   });
+  const selectedTargetIds = new Set(
+    selected
+      .map((scan) => scan["targetId"])
+      .filter((targetId): targetId is string => typeof targetId === "string"),
+  );
+  const selectedScans = new Set(selected);
+  return scans.filter(
+    (scan) =>
+      selectedScans.has(scan) ||
+      (typeof scan["targetId"] === "string" &&
+        selectedTargetIds.has(scan["targetId"])),
+  );
 }
 
 export function renderScanHistory(
