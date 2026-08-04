@@ -281,10 +281,12 @@ def list_unmatched_scan_pairs(
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
     snapshot = Path(args.scan_snapshot) if args.scan_snapshot is not None else None
+    snapshot_data = None
     snapshot_scan_ids = None
     if snapshot is not None:
         try:
-            snapshot_scan_ids = set(json.loads(snapshot.read_text(encoding="utf-8")))
+            snapshot_data = json.loads(snapshot.read_text(encoding="utf-8"))
+            snapshot_scan_ids = set(snapshot_data["scanIds"])
         except FileNotFoundError:
             pass
     requested = connection.execute(
@@ -303,10 +305,6 @@ def list_unmatched_scan_pairs(
         if (snapshot_scan_ids is None or scan["id"] in snapshot_scan_ids)
         and (Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested))
     ]
-    if snapshot is not None and snapshot_scan_ids is None:
-        with snapshot.open("x", encoding="utf-8") as destination:
-            json.dump([scan["id"] for scan in selected], destination)
-
     available = []
     for scan in selected:
         try:
@@ -315,22 +313,28 @@ def list_unmatched_scan_pairs(
             continue
         available.append(scan)
 
-    saved_pairs = {
-        (row["before_scan_id"], row["after_scan_id"])
-        for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
-    }
     available_indexes = {scan["id"]: index for index, scan in enumerate(available)}
     skipped = (
         0
         if args.force
+        else snapshot_data["skippedPairs"]
+        if snapshot_data is not None
         else sum(
             1
-            for before_id, after_id in saved_pairs
+            for before_id, after_id in connection.execute(
+                "SELECT before_scan_id, after_scan_id FROM scan_comparisons"
+            )
             if before_id in available_indexes
             and after_id in available_indexes
             and available_indexes[before_id] < available_indexes[after_id]
         )
     )
+    if snapshot is not None and snapshot_data is None:
+        with snapshot.open("x", encoding="utf-8") as destination:
+            json.dump(
+                {"scanIds": [scan["id"] for scan in selected], "skippedPairs": skipped},
+                destination,
+            )
     pair_count = len(available) * (len(available) - 1) // 2
     pair_index = min(args.offset, pair_count)
     after_index = (1 + math.isqrt(1 + 8 * pair_index)) // 2
@@ -339,7 +343,10 @@ def list_unmatched_scan_pairs(
     while pair_index < pair_count and len(pairs) < MATCHING_PAIR_PAGE_MAX:
         before = available[before_index]
         after = available[after_index]
-        if args.force or (before["id"], after["id"]) not in saved_pairs:
+        if args.force or connection.execute(
+            "SELECT 1 FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
+            (before["id"], after["id"]),
+        ).fetchone() is None:
             pairs.append(
                 {
                     "afterScanId": after["id"],
@@ -467,6 +474,12 @@ def compare_scans(
         raise SystemExit(
             "No saved matches for these scans. Run 'codex-security scans match BEFORE AFTER' first."
         )
+    if cached is None and include_matching_status and not include_matching_inputs:
+        return {
+            "afterScanId": after["id"],
+            "beforeScanId": before["id"],
+            "matchingCached": False,
+        }
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)

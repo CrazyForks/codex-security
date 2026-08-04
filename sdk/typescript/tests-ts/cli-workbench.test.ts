@@ -594,7 +594,7 @@ describe("CLI workbench", () => {
         "-B",
         "-c",
         [
-          "import argparse, os, sqlite3, sys, tempfile",
+          "import argparse, json, os, sqlite3, sys, tempfile",
           "sys.path.insert(0, sys.argv[1])",
           "from workbench_scan_history import list_unmatched_scan_pairs",
           "connection = sqlite3.connect(':memory:')",
@@ -612,13 +612,49 @@ describe("CLI workbench", () => {
           "assert result['scanCount'] == 100, result",
           "assert result['skippedPairs'] == len(saved), result",
           "assert result['pairs'] == [] and result['nextOffset'] is None, result",
+          "with open(snapshot, encoding='utf-8') as source: persisted = json.load(source)",
+          "assert persisted['skippedPairs'] == len(saved), persisted",
+          "assert persisted['scanIds'] == [scan[0] for scan in scans], persisted",
           "connection.execute(\"UPDATE scans SET status = 'complete' WHERE id = 'prepared-scan'\")",
           "connection.execute('DELETE FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?', (scans[-2][0], scans[-1][0]))",
+          "statements = []",
+          "connection.set_trace_callback(statements.append)",
           "result = list_unmatched_scan_pairs(connection, args, read_coverage=lambda scan: {})",
           "assert result['scanCount'] == 100, result",
           "assert result['pairs'] == [{'beforeScanId': scans[-2][0], 'afterScanId': scans[-1][0]}], result",
           "assert result['nextOffset'] is None, result",
+          "assert not any(statement.startswith('SELECT before_scan_id, after_scan_id FROM scan_comparisons') for statement in statements), statements",
           "snapshot_directory.cleanup()",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  test("loads only matching status before building an uncached comparison", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, sqlite3, sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_scan_history as history",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.execute('CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT)')",
+          "scans = {identity: {'id': identity, 'status': 'complete', 'target_path': '/repo'} for identity in ('before', 'after')}",
+          "history._same_repository = lambda *_: True",
+          "history._scan_findings = lambda *_: (_ for _ in ()).throw(AssertionError('comparison findings must not be loaded'))",
+          "args = argparse.Namespace(before_scan_id='before', after_scan_id='after')",
+          "result = history.compare_scans(connection, args, require_scan=lambda _, identity: scans[identity], read_coverage=lambda _: (_ for _ in ()).throw(AssertionError('coverage must not be projected')), include_matching_status=True)",
+          "assert result == {'beforeScanId': 'before', 'afterScanId': 'after', 'matchingCached': False}, result",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
       ],
