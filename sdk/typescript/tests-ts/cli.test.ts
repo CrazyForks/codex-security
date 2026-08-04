@@ -19,6 +19,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   CodexSecurityConfig,
   JsonObject,
+  ScanOptions,
   ScanPreflight,
 } from "../src/index.js";
 import { redactedErrorMessage } from "../src/errors.js";
@@ -118,6 +119,20 @@ describe("CLI", () => {
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
+    });
+
+    const rerunSchema = capture();
+    expect(
+      await main(
+        ["scans", "rerun", "--schema", "--format", "json"],
+        rerunSchema.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(rerunSchema.text())).toMatchObject({
+      args: { properties: { scanId: { type: "string" } } },
+      options: { properties: { verbose: { type: "boolean" } } },
     });
 
     const matchSchema = capture();
@@ -2298,11 +2313,10 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scans", "rerun", "scan-original"],
+        ["scans", "rerun", "scan-original", "--verbose", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({
-          environment: { CODEX_SECURITY_LOG_LEVEL: "debug" },
           onWorkbench: () => ({
             recipe: {
               repository: "/original/repository",
@@ -2317,9 +2331,12 @@ describe("CLI", () => {
         }),
       ),
     ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "codex-security: debug: scan.configuration",
     );
+    expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
     expect(stderr.text()).toContain('model="gpt-original"');
     expect(stderr.text()).toContain('reasoning_effort="high"');
   });
@@ -3731,7 +3748,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("cache_write_input_tokens=200");
   });
 
-  test("reports a scan stopped when its live cost exceeds the limit", async () => {
+  test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
     const stdout = capture();
     const stderr = capture();
     const cost = fakeResult([], "complete", {
@@ -3742,11 +3759,12 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json", "--max-cost", "0.005"],
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.005"],
         stdout.stream,
         stderr.stream,
         dependencies({
-          onTurn: () => {
+          onTurn: (_repository, options) => {
+            (options as ScanOptions).onOutputDirReady?.("/tmp/scan");
             throw new ScanCostLimitExceededError(0.005, cost, "/tmp/scan");
           },
         }),
@@ -3755,6 +3773,12 @@ describe("CLI", () => {
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
       "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
+    );
+    expect(stderr.text()).toMatch(
+      /scan\.configuration[^\n]*max_cost_usd=0\.005/u,
+    );
+    expect(stderr.text()).toContain(
+      'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.005 estimated_usd=0.00625',
     );
   });
 
