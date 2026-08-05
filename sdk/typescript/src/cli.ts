@@ -1451,13 +1451,16 @@ export async function main(
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error }) => {
+            onProgress: ({ repository, status, attempt, error, warning }) => {
+              const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${error === undefined ? "" : `: ${redactedErrorMessage(error)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${redactedErrorMessage(detail)}`}\n`,
               );
             },
           });
-          exitCode = interruptedExitCode() ?? (result.failed > 0 ? 2 : 0);
+          exitCode =
+            interruptedExitCode() ??
+            (result.failed > 0 || result.incomplete > 0 ? 2 : 0);
           return { ...result };
         } catch (error) {
           exitCode =

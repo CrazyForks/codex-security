@@ -759,6 +759,110 @@ describe("CLI", () => {
     }
   });
 
+  test.each(["partial", "unknown"] as const)(
+    "keeps sealed %s-coverage bulk scans fail-closed without retrying",
+    async (completeness) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-cli-multiscan-incomplete-"),
+      );
+      try {
+        await multiscanInventory(root);
+        const outputDir = join(
+          root,
+          "results",
+          "artifacts",
+          "sample",
+          "attempt-1",
+        );
+        await mkdir(outputDir, { recursive: true });
+        await Promise.all(
+          [
+            "scan-manifest.json",
+            "findings.json",
+            "coverage.json",
+            "report.md",
+          ].map((name) => writeFile(join(outputDir, name), "{}\n")),
+        );
+        const stdout = capture();
+        const stderr = capture();
+        let attempts = 0;
+        const arguments_ = [
+          "bulk-scan",
+          "repositories.csv",
+          "--output-dir",
+          "results",
+          "--max-attempts",
+          "3",
+          "--json",
+        ];
+        const clientDependencies = dependencies({
+          currentDirectory: root,
+          result: fakeResult([], completeness),
+          onRun: () => {
+            attempts += 1;
+          },
+        });
+
+        expect(
+          await main(
+            arguments_,
+            stdout.stream,
+            stderr.stream,
+            clientDependencies,
+          ),
+        ).toBe(2);
+        expect(attempts).toBe(1);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          total: 1,
+          completed: 0,
+          incomplete: 1,
+          failed: 0,
+          skipped: 0,
+        });
+        expect(stderr.text()).toContain(
+          "sample completed_with_incomplete_coverage (attempt 1)",
+        );
+        expect(stderr.text()).toContain(
+          `Scan coverage is ${completeness}; results may be incomplete.`,
+        );
+        expect(stderr.text()).not.toContain("attempt 2");
+        const receipt = JSON.parse(
+          (
+            await readFile(join(root, "results", "results.jsonl"), "utf8")
+          ).trim(),
+        ) as Record<string, unknown>;
+        expect(receipt).toMatchObject({
+          status: "completed_with_incomplete_coverage",
+          coverage: completeness,
+          outputDir,
+        });
+
+        const resumedOutput = capture();
+        const resumedError = capture();
+        expect(
+          await main(
+            arguments_,
+            resumedOutput.stream,
+            resumedError.stream,
+            clientDependencies,
+          ),
+        ).toBe(2);
+        expect(JSON.parse(resumedOutput.text())).toMatchObject({
+          completed: 0,
+          incomplete: 1,
+          failed: 0,
+          skipped: 1,
+        });
+        expect(resumedError.text()).toContain(
+          `Scan coverage is ${completeness}; results may be incomplete.`,
+        );
+        expect(attempts).toBe(1);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each([
     [
       "OpenRouter",

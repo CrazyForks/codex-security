@@ -78,7 +78,7 @@ async function repository(
 
 async function completedScan(
   outputDir: string,
-  completeness: "complete" | "partial" = "complete",
+  completeness: "complete" | "partial" | "unknown" = "complete",
 ): Promise<ScanResult> {
   await mkdir(outputDir, { recursive: true });
   await Promise.all(
@@ -230,8 +230,146 @@ describe("multiscan", () => {
       ),
     );
 
+    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "priced", status: "completed", cost },
+      { id: "priced", status: "completed", coverage: "complete", cost },
+    ]);
+  });
+
+  test.each(["partial", "unknown"] as const)(
+    "retains sealed %s coverage without retries or multiplied costs",
+    async (completeness) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, completeness);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nsealed,${source.path},${source.revision}\n`,
+      );
+      const cost = {
+        model: "gpt-5.6-sol",
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        cacheWriteInputTokens: 0,
+        outputTokens: 30,
+        estimatedUsd: 12.5,
+      };
+      const progress: Parameters<
+        NonNullable<MultiscanOptions["onProgress"]>
+      >[0][] = [];
+      let attempts = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        attempts += 1;
+        return Object.assign(
+          await completedScan(scanOptions.outputDir!, completeness),
+          { cost },
+        );
+      });
+
+      const summary = await runMultiscan(
+        options(paths, security, {
+          maxAttempts: 3,
+          onProgress: (event) => progress.push(event),
+        }),
+      );
+
+      expect(attempts).toBe(1);
+      expect(summary).toMatchObject({
+        total: 1,
+        completed: 0,
+        incomplete: 1,
+        failed: 0,
+        skipped: 0,
+      });
+      const outputDir = join(paths.output, "artifacts", "sealed", "attempt-1");
+      const warning = `Scan coverage is ${completeness}; results may be incomplete.`;
+      const receipts = await results(summary.resultsPath);
+      expect(receipts).toMatchObject([
+        {
+          id: "sealed",
+          status: "completed_with_incomplete_coverage",
+          attempt: 1,
+          outputDir,
+          coverage: completeness,
+          cost,
+          warning,
+        },
+      ]);
+      expect(
+        receipts.reduce(
+          (total, receipt) =>
+            total + (receipt["cost"] as typeof cost).estimatedUsd,
+          0,
+        ),
+      ).toBe(cost.estimatedUsd);
+      await Promise.all(
+        [
+          "scan-manifest.json",
+          "findings.json",
+          "coverage.json",
+          "report.md",
+        ].map((name) => access(join(outputDir, name))),
+      );
+      expect(progress).toMatchObject([
+        { repository: "sealed", status: "started", attempt: 1 },
+        {
+          repository: "sealed",
+          status: "completed_with_incomplete_coverage",
+          attempt: 1,
+          warning,
+        },
+      ]);
+
+      const resumed = await runMultiscan(
+        options(paths, security, { maxAttempts: 3 }),
+      );
+      expect(resumed).toMatchObject({
+        completed: 0,
+        incomplete: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(attempts).toBe(1);
+      expect(await results(resumed.resultsPath)).toHaveLength(1);
+    },
+  );
+
+  test("retries incomplete scans that are missing required artifacts", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "missing-artifact");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nmissing,${source.path},${source.revision}\n`,
+    );
+
+    let attempts = 0;
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          attempts += 1;
+          const result = await completedScan(
+            scanOptions.outputDir!,
+            attempts === 1 ? "partial" : "complete",
+          );
+          if (attempts === 1) {
+            await rm(join(scanOptions.outputDir!, "report.md"));
+          }
+          return result;
+        }),
+      ),
+    );
+
+    expect(attempts).toBe(2);
+    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      {
+        id: "missing",
+        status: "failed",
+        attempt: 1,
+        coverage: "partial",
+        error: "Multiscan scan output is missing required artifacts.",
+      },
+      { id: "missing", status: "completed", attempt: 2, coverage: "complete" },
     ]);
   });
 
@@ -705,7 +843,7 @@ describe("multiscan", () => {
     expect(scans).toBe(0);
   });
 
-  test("treats incomplete coverage as a failure and still finishes other repositories", async () => {
+  test("records incomplete coverage separately and still finishes other repositories", async () => {
     const paths = await fixture();
     const incomplete = await repository(paths.root, "incomplete");
     const complete = await repository(paths.root, "complete");
@@ -732,14 +870,24 @@ describe("multiscan", () => {
               : "complete",
           ),
         ),
-        { maxAttempts: 1 },
+        { maxAttempts: 3 },
       ),
     );
 
-    expect(summary).toMatchObject({ total: 2, completed: 1, failed: 1 });
+    expect(summary).toMatchObject({
+      total: 2,
+      completed: 1,
+      incomplete: 1,
+      failed: 0,
+    });
     expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "incomplete", status: "failed", attempt: 1 },
-      { id: "complete", status: "completed", attempt: 1 },
+      {
+        id: "incomplete",
+        status: "completed_with_incomplete_coverage",
+        attempt: 1,
+        coverage: "partial",
+      },
+      { id: "complete", status: "completed", attempt: 1, coverage: "complete" },
     ]);
   });
 });

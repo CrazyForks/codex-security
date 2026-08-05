@@ -18,6 +18,7 @@ import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { redactedErrorMessage } from "./errors.js";
+import type { CoverageDocument } from "./models.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -38,11 +39,13 @@ interface MultiscanTask {
 }
 
 interface MultiscanReceipt extends MultiscanTask {
-  status: "completed" | "failed";
+  status: "completed" | "completed_with_incomplete_coverage" | "failed";
   attempt: number;
   outputDir: string;
+  coverage?: CoverageDocument["completeness"];
   cost?: ScanCost;
   error?: string;
+  warning?: string;
 }
 
 export interface MultiscanOptions {
@@ -60,15 +63,21 @@ export interface MultiscanOptions {
   signal?: AbortSignal;
   onProgress?(event: {
     repository: string;
-    status: "started" | "completed" | "failed";
+    status:
+      | "started"
+      | "completed"
+      | "completed_with_incomplete_coverage"
+      | "failed";
     attempt: number;
     error?: string;
+    warning?: string;
   }): void;
 }
 
 export interface MultiscanResult {
   total: number;
   completed: number;
+  incomplete: number;
   failed: number;
   skipped: number;
   resultsPath: string;
@@ -111,24 +120,39 @@ async function runCampaign(
   const receipts = await readReceipts(ledger);
   const pending: MultiscanTask[] = [];
   let completed = 0;
+  let incomplete = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
     if (
-      receipt?.status === "completed" &&
+      (receipt?.status === "completed" ||
+        receipt?.status === "completed_with_incomplete_coverage") &&
       receipt.outputDir ===
         join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
       (await hasArtifacts(receipt.outputDir))
     ) {
-      completed += 1;
+      if (receipt.status === "completed") {
+        completed += 1;
+      } else {
+        incomplete += 1;
+        options.onProgress?.({
+          repository: task.id,
+          status: receipt.status,
+          attempt: receipt.attempt,
+          warning:
+            receipt.warning ??
+            `Scan coverage is ${receipt.coverage ?? "unknown"}; results may be incomplete.`,
+        });
+      }
     } else {
       pending.push(task);
     }
   }
-  const skipped = completed;
+  const skipped = completed + incomplete;
   if (pending.length === 0) {
     return {
       total: tasks.length,
       completed,
+      incomplete,
       failed: 0,
       skipped,
       resultsPath: ledger,
@@ -158,6 +182,8 @@ async function runCampaign(
         const progress = { repository: task.id, attempt };
         options.onProgress?.({ ...progress, status: "started" });
         let failure: string | undefined;
+        let warning: string | undefined;
+        let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         try {
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
@@ -190,8 +216,14 @@ async function runCampaign(
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
-          if (result.coverage.completeness !== "complete") {
-            throw new Error("Multiscan repository coverage is incomplete.");
+          coverage = result.coverage.completeness;
+          if (coverage !== "complete") {
+            if (!(await hasArtifacts(scanDir))) {
+              throw new Error(
+                "Multiscan scan output is missing required artifacts.",
+              );
+            }
+            warning = `Scan coverage is ${coverage}; results may be incomplete.`;
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
@@ -199,7 +231,12 @@ async function runCampaign(
         } finally {
           await rm(checkout, { recursive: true, force: true });
         }
-        const status = failure === undefined ? "completed" : "failed";
+        const status =
+          failure !== undefined
+            ? "failed"
+            : warning === undefined
+              ? "completed"
+              : "completed_with_incomplete_coverage";
         await appendReceipt(
           ledger,
           `${JSON.stringify({
@@ -207,17 +244,21 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(coverage === undefined ? {} : { coverage }),
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
+            ...(warning === undefined ? {} : { warning }),
           })}\n`,
         );
         options.onProgress?.({
           ...progress,
           status,
           ...(failure === undefined ? {} : { error: failure }),
+          ...(warning === undefined ? {} : { warning }),
         });
         if (failure === undefined) {
-          completed += 1;
+          if (warning === undefined) completed += 1;
+          else incomplete += 1;
           break;
         }
         if (retry === options.maxAttempts - 1) failed += 1;
@@ -242,6 +283,7 @@ async function runCampaign(
   return {
     total: tasks.length,
     completed,
+    incomplete,
     failed,
     skipped,
     resultsPath: ledger,
