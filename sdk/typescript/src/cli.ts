@@ -831,7 +831,11 @@ export async function main(
           ...(options.severity === undefined
             ? []
             : ["--severity", options.severity]),
-          ...(options.status === undefined ? [] : ["--status", options.status]),
+          ...(options.status === undefined
+            ? options.scan === undefined
+              ? ["--status", "open"]
+              : []
+            : ["--status", options.status]),
           "--offset",
           String(options.offset),
           "--limit",

@@ -17,7 +17,7 @@ const findingsIndexProbe = [
   "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
   "''')",
   "connection.executemany('INSERT INTO security_targets VALUES (?, ?)', [('current-target', '/current/repository'), ('stale-target', '/stale/repository')])",
-  "stale_directory = sys.argv[1] if settings.get('coverageFailure') == 'noncanonical' else '/private/tmp/codex-security-findings-index-missing-stale'",
+  "stale_directory = sys.argv[1] if settings.get('coverageFailure') in ('noncanonical', 'pruned') else '/private/tmp/codex-security-findings-index-missing-stale'",
   "connection.executemany('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old', 'current-target', '/current/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/current-old'),",
   "    ('current-new', 'current-target', '/current/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/current-new'),",
@@ -35,6 +35,8 @@ const findingsIndexProbe = [
   "    ('orphan-old-occurrence', 'orphan-old-finding', 'orphan-old', 'high', '2026-01-01', 'Older orphan finding', 'Still outside follow-up coverage'),",
   "    ('orphan-new-occurrence', 'orphan-new-finding', 'orphan-new', 'medium', '2026-02-01', 'Latest orphan finding', 'Target row does not exist'),",
   "])",
+  "if settings.get('lateCompletion'):",
+  "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding', created_at = '2026-03-01' WHERE id = 'current-old-occurrence'\")",
   "connection.executemany('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'src/old.py', 'root_control', 0),",
   "    ('current-new-occurrence', 'src/new.py', 'root_control', 0),",
@@ -51,6 +53,8 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'stale-new':",
   "        if settings.get('coverageFailure') == 'tampered':",
   "            raise SystemExit('The sealed scan manifest changed after completion.')",
+  "        if settings.get('coverageFailure') == 'pruned':",
+  "            raise SystemExit('coverage.json: expected a regular file inside the scan directory.')",
   "        raise SystemExit('Scan directory must be an existing canonical non-symlink directory.')",
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
@@ -186,6 +190,15 @@ const nestedDirectoryScanProbe = [
   "    subprocess.run(['git', 'init', '-q', str(stale_owned_checkout)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
   "    stale_args = argparse.Namespace(repository=str(stale_owned_checkout), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "    output['staleRegisteredCheckout'] = [scan['scanId'] for scan in list_scans(connection, stale_args)['scans']]",
+  "    stale_matching_reads = []",
+  "    stale_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(stale_owned_checkout), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda scan: stale_matching_reads.append(scan['id']) or {})",
+  "    output['staleRegisteredMatching'] = {'scanCount': stale_matching['scanCount'], 'coverageReads': stale_matching_reads}",
+  "    current_metadata = stale_owned_checkout.stat()",
+  "    current_timestamp = '2026-08-03T12:00:01Z'",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('current-owned-workspace', stale_owned_target, str(stale_owned_checkout), current_timestamp, current_timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_device, target_inode, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('current-owned-scan', 'current-owned-workspace', stale_owned_target, str(stale_owned_checkout), serialize_filesystem_identity(current_metadata.st_dev), serialize_filesystem_identity(current_metadata.st_ino), 'unversioned', '.', 'standard', directory + '/results/current-owned', 'complete', 'reporting', current_timestamp, current_timestamp, current_timestamp, current_timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('current-owned-scan', current_timestamp))",
+  "    output['reusedRegisteredCheckout'] = [scan['scanId'] for scan in list_scans(connection, stale_args)['scans']]",
   "    sibling_root = (pathlib.Path(directory) / 'sibling-checkout').resolve()",
   "    sibling_a = sibling_root / 'service-a'",
   "    sibling_b = sibling_root / 'service-b'",
@@ -224,7 +237,7 @@ const nestedDirectoryScanProbe = [
   "    args = argparse.Namespace(repository=str(forged_git_directory), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "    output['forgedGitDirectoryHistory'] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
   "    matching_reads = []",
-  "    for label, path in [('forgedOriginMatching', forged_clone), ('forgedGitDirectoryMatching', forged_git_directory), ('relatedCheckoutMatching', related_clone), ('reusedCheckoutMatching', reused_checkout), ('movedCheckoutMatching', moved_checkout), ('staleRegisteredMatching', stale_owned_checkout), ('unscannedSiblingMatching', sibling_b)]:",
+  "    for label, path in [('forgedOriginMatching', forged_clone), ('forgedGitDirectoryMatching', forged_git_directory), ('relatedCheckoutMatching', related_clone), ('reusedCheckoutMatching', reused_checkout), ('movedCheckoutMatching', moved_checkout), ('reusedRegisteredMatching', stale_owned_checkout), ('unscannedSiblingMatching', sibling_b)]:",
   "        matching_args = argparse.Namespace(repository=str(path), force=False)",
   "        matching = list_unmatched_scan_pairs(connection, matching_args, backfill_finding_details=lambda *_: None, read_coverage=lambda scan: matching_reads.append(scan['id']) or {})",
   "        output[label] = {'scanCount': matching['scanCount'], 'coverageReads': matching_reads.copy()}",
@@ -347,7 +360,8 @@ function runFindingsIndex(
     targetPath?: string;
     targetPaths?: string[];
     query?: string;
-    coverageFailure?: "tampered" | "noncanonical";
+    coverageFailure?: "tampered" | "noncanonical" | "pruned";
+    lateCompletion?: boolean;
   } = {},
 ) {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -378,6 +392,8 @@ function probeFindingsIndex(
     targetPath?: string;
     targetPaths?: string[];
     query?: string;
+    coverageFailure?: "pruned";
+    lateCompletion?: boolean;
   } = {},
 ): {
   findings: Array<{
@@ -425,6 +441,30 @@ describe("workbench findings index", () => {
       "current-new",
       "orphan-new",
       "stale-new",
+    ]);
+  });
+
+  test("keeps active findings when a later scan artifact was pruned", () => {
+    const result = probeFindingsIndex("stale-target", {
+      coverageFailure: "pruned",
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({ occurrenceId: "stale-old-occurrence" }),
+    ]);
+    expect(result.coverageReads).toEqual(["stale-new"]);
+  });
+
+  test("ranks repeated findings by scan chronology instead of completion order", () => {
+    const result = probeFindingsIndex("current-target", {
+      lateCompletion: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        scanId: "current-new",
+      }),
     ]);
   });
 
@@ -556,6 +596,8 @@ describe("workbench findings index", () => {
       sameOriginOuter: ["same-origin-outer-scan"],
       sameOriginNested: ["same-origin-nested-scan"],
       staleRegisteredCheckout: [],
+      staleRegisteredMatching: { scanCount: 0, coverageReads: [] },
+      reusedRegisteredCheckout: ["current-owned-scan"],
       unscannedSiblingService: [],
       relatedCheckoutHistory: ["portable-scan"],
       relatedCheckoutVerified: true,
@@ -575,7 +617,10 @@ describe("workbench findings index", () => {
         scanCount: 2,
         coverageReads: ["stale-parent-scan", "stale-reused-scan"],
       },
-      staleRegisteredMatching: { scanCount: 0, coverageReads: [] },
+      reusedRegisteredMatching: {
+        scanCount: 1,
+        coverageReads: ["current-owned-scan"],
+      },
       unscannedSiblingMatching: { scanCount: 0, coverageReads: [] },
       forgedOriginMatchingScans: 0,
       forgedTargetlessIdentity: false,

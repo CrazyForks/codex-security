@@ -171,7 +171,8 @@ def _active_findings(
                 ) AS occurrence_count,
                 ROW_NUMBER() OVER (
                     PARTITION BY COALESCE(targets.id, scans.target_path), occurrences.finding_id
-                    ORDER BY occurrences.created_at DESC, occurrences.id DESC
+                    ORDER BY scans.started_at DESC, scans.id DESC,
+                        occurrences.created_at DESC, occurrences.id DESC
                 ) AS occurrence_rank
             FROM finding_occurrences AS occurrences
             JOIN scans ON scans.id = occurrences.scan_id
@@ -224,13 +225,22 @@ def _active_findings(
                 try:
                     coverage_by_scan_id[scan["id"]] = read_coverage(scan)
                 except SystemExit as error:
-                    if str(error) != (
+                    message = str(error)
+                    if message == (
                         "Scan directory must be an existing canonical non-symlink directory."
                     ):
-                        raise
-                    try:
-                        Path(scan["scan_dir"]).lstat()
-                    except FileNotFoundError:
+                        try:
+                            Path(scan["scan_dir"]).lstat()
+                        except FileNotFoundError:
+                            coverage_by_scan_id[scan["id"]] = None
+                        else:
+                            raise
+                    elif (
+                        "missing" in message.lower()
+                        or ": expected a regular file inside the scan directory." in message
+                        or ": invalid JSON:" in message
+                        or ": expected a JSON object." in message
+                    ):
                         coverage_by_scan_id[scan["id"]] = None
                     else:
                         raise

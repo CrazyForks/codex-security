@@ -50,6 +50,8 @@ describe("CLI findings history", () => {
           "list-global-findings",
           "--target-id",
           "target-1",
+          "--status",
+          "open",
           "--offset",
           "0",
           "--limit",
@@ -59,6 +61,30 @@ describe("CLI findings history", () => {
       expect(JSON.parse(stdout.text())).toMatchObject({
         findings: [{ occurrenceId: "occ-1" }],
       });
+    }
+  });
+
+  test("defaults all-repository finding lists to open without overriding explicit status", async () => {
+    for (const [arguments_, expectedStatus] of [
+      [[], "open"],
+      [["--status", "closed"], "closed"],
+    ] as const) {
+      const calls: Array<readonly string[]> = [];
+      expect(
+        await main(
+          ["findings", "list", "--all-repositories", ...arguments_],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args) => {
+              calls.push(args);
+              return { findings: [], limit: 20, nextOffset: null, offset: 0 };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls[0]).toContain("--status");
+      expect(calls[0]).toContain(expectedStatus);
     }
   });
 
@@ -138,6 +164,8 @@ describe("CLI findings history", () => {
       "list-global-findings",
       "--target-id",
       "current-target",
+      "--status",
+      "open",
       "--offset",
       "0",
       "--limit",
@@ -257,6 +285,8 @@ describe("CLI findings history", () => {
       "target-a",
       "--target-id",
       "target-b",
+      "--status",
+      "open",
       "--offset",
       "0",
       "--limit",
@@ -329,6 +359,8 @@ describe("CLI findings history", () => {
         "list-global-findings",
         "--target-path",
         "/current/repository",
+        "--status",
+        "open",
         "--offset",
         "20",
         "--limit",
@@ -376,6 +408,8 @@ describe("CLI findings history", () => {
       "list-global-findings",
       "--target-path",
       "/current/repository",
+      "--status",
+      "open",
       "--offset",
       "0",
       "--limit",
@@ -519,6 +553,8 @@ describe("CLI findings history", () => {
           "long-target",
           "--target-id",
           "short-target",
+          "--status",
+          "open",
           "--offset",
           "0",
           "--limit",

@@ -11,7 +11,10 @@ from typing import Any, Callable
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from filesystem_identity import stored_filesystem_identity_matches
+from filesystem_identity import (
+    serialize_filesystem_identity,
+    stored_filesystem_identity_matches,
+)
 from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
@@ -274,6 +277,20 @@ def list_scans(
             repository_clauses.append(f"scans.target_id IN ({placeholders})")
             values.extend(related_target_ids)
         clauses.append(f"({' OR '.join(repository_clauses)})")
+        if requested_target_id:
+            metadata = repository.stat()
+            clauses.append(
+                "(scans.target_id IS NOT ? OR scans.target_device IS NULL "
+                "OR scans.target_inode IS NULL "
+                "OR (scans.target_device = ? AND scans.target_inode = ?))"
+            )
+            values.extend(
+                (
+                    requested_target_id,
+                    serialize_filesystem_identity(metadata.st_dev),
+                    serialize_filesystem_identity(metadata.st_ino),
+                )
+            )
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -411,12 +428,22 @@ def list_unmatched_scan_pairs(
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
     requested, _replaced_target_id = _requested_repository(connection, repository)
+    metadata = repository.stat()
     selected = [
         scan
         for scan in connection.execute(
             "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
         if _same_repository(scan, requested)
+        and (
+            scan["target_id"] != requested["target_id"]
+            or scan["target_device"] is None
+            or scan["target_inode"] is None
+            or (
+                stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev)
+                and stored_filesystem_identity_matches(scan["target_inode"], metadata.st_ino)
+            )
+        )
     ]
 
     available = []
