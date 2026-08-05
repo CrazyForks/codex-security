@@ -23,6 +23,7 @@ def _same_repository(
     after: sqlite3.Row,
     *,
     after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
+    allow_origin_match: bool = True,
 ) -> bool:
     if before["target_id"] == after["target_id"]:
         return True
@@ -43,6 +44,8 @@ def _same_repository(
             before_target
         ):
             return False
+    if not allow_origin_match:
+        return False
     before_origin = _repository_origin(before_target)
     return before_origin is not None and before_origin == (
         _repository_origin(after_target) if after_identity is None else after_identity[1]
@@ -229,7 +232,10 @@ def list_scans(
                     )
                     if target["target_id"] != requested_target_id
                     and _same_repository(
-                        target, requested_repository, after_identity=requested_identity
+                        target,
+                        requested_repository,
+                        after_identity=requested_identity,
+                        allow_origin_match=False,
                     )
                 )
         repository_paths = list(dict.fromkeys(repository_paths))
