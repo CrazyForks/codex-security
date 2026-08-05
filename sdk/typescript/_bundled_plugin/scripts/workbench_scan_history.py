@@ -8,7 +8,6 @@ import sqlite3
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -22,61 +21,25 @@ def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
-    allow_origin_match: bool = True,
+    after_git_directory: str | None = None,
 ) -> bool:
-    if before["target_id"] == after["target_id"]:
+    if before["target_id"] is not None and before["target_id"] == after["target_id"]:
         return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
+    if before_target.resolve() == after_target.resolve():
+        return True
     before_git_dir = git_output(
         before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
-    after_git_dir = (
-        git_output(after_target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        if after_identity is None
-        else after_identity[0]
+    after_git_dir = after_git_directory or git_output(
+        after_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
-    if before_git_dir is not None and after_git_dir is not None:
-        if Path(before_git_dir).resolve() == Path(after_git_dir).resolve():
-            return True
-        if before_target.is_relative_to(after_target) or after_target.is_relative_to(
-            before_target
-        ):
-            return False
-    if not allow_origin_match:
-        return False
-    before_origin = _repository_origin(before_target)
-    return before_origin is not None and before_origin == (
-        _repository_origin(after_target) if after_identity is None else after_identity[1]
+    return (
+        before_git_dir is not None
+        and after_git_dir is not None
+        and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
     )
-
-
-def _repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
-    if remote is None:
-        return None
-    if "://" in remote:
-        try:
-            parsed = urlsplit(remote)
-            port = parsed.port
-        except ValueError:
-            return None
-        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
-            return None
-        if parsed.query or parsed.fragment:
-            return None
-        host = parsed.hostname
-        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
-            host = f"{host}:{port}"
-        path = parsed.path
-    else:
-        authority, separator, path = remote.partition(":")
-        if not separator or "?" in path or "#" in path:
-            return None
-        host = authority.rsplit("@", 1)[-1]
-    path = path.strip("/").removesuffix(".git")
-    return (host.lower(), path) if host and path else None
 
 
 def list_workspace_scans(
@@ -193,9 +156,8 @@ def list_scans(
                         related_target_ids.append(registered_parent["target_id"])
                     break
         if registered_repository is None and registered_parent is None:
-            requested_identity = (
-                git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-                _repository_origin(repository),
+            requested_git_directory = git_output(
+                repository, "rev-parse", "--path-format=absolute", "--git-common-dir"
             )
             descendant_found = False
             repository_prefix = str(repository).rstrip(os.sep) + os.sep
@@ -206,9 +168,9 @@ def list_scans(
                 target_path = Path(scan["target_path"])
                 if target_path == repository or not target_path.is_relative_to(repository):
                     continue
-                if requested_identity[0] is not None:
+                if requested_git_directory is not None:
                     if scan["target_id"] is not None or not _same_repository(
-                        scan, requested_repository, after_identity=requested_identity
+                        scan, requested_repository, after_git_directory=requested_git_directory
                     ):
                         continue
                 elif checkout_boundary is not None:
@@ -224,7 +186,7 @@ def list_scans(
                         continue
                 repository_paths.append(str(target_path))
                 descendant_found = True
-            if not descendant_found and requested_identity[0] is not None:
+            if not descendant_found and requested_git_directory is not None:
                 related_target_ids.extend(
                     target["target_id"]
                     for target in connection.execute(
@@ -234,8 +196,7 @@ def list_scans(
                     and _same_repository(
                         target,
                         requested_repository,
-                        after_identity=requested_identity,
-                        allow_origin_match=False,
+                        after_git_directory=requested_git_directory,
                     )
                 )
         repository_paths = list(dict.fromkeys(repository_paths))
