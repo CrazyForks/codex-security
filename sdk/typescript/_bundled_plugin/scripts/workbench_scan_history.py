@@ -23,12 +23,14 @@ def _same_repository(
     *,
     after_git_directory: str | None = None,
 ) -> bool:
-    if before["target_id"] is not None and before["target_id"] == after["target_id"]:
+    before_target_id = before["target_id"]
+    after_target_id = after["target_id"]
+    if before_target_id and before_target_id == after_target_id:
         return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
-        return True
+        return not before_target_id and not after_target_id
     before_git_dir = git_output(
         before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
@@ -362,7 +364,7 @@ def list_unmatched_scan_pairs(
         for scan in connection.execute(
             "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
-        if Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested)
+        if _same_repository(scan, requested)
     ]
 
     available = []
