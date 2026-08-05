@@ -6,17 +6,22 @@ import json
 import math
 import os
 import sqlite3
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_projection import SEVERITY_ORDER
 from workbench_constants import (
     FINDINGS_PAGE_MAX,
     MATCHING_FINDING_PAGE_MAX,
     MATCHING_INPUT_PAGE_BYTES,
     MATCHING_PAIR_PAGE_MAX,
+    MATCHING_RESULT_MAX_BYTES,
 )
+from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output
 
 
@@ -227,10 +232,11 @@ def list_scans(
             {
                 "completedAt": row["completed_at"],
                 "continuationThreadId": row["continuation_thread_id"],
-                **({"cost": json.loads(row["cost_json"])} if row["cost_json"] else {}),
+                **stored_scan_cost_fields(row["cost_json"]),
                 "findingCount": row["finding_count"],
                 "handoffStatus": row["handoff_status"],
                 "mode": row["mode"],
+                "model": row["model"],
                 "parentScanId": row["parent_scan_id"],
                 "progress": {
                     "candidates": {"reportable": row["reportable_findings_count"]},
@@ -244,6 +250,7 @@ def list_scans(
                     "updatedAt": row["progress_updated_at"],
                 },
                 "recipeAvailable": row["recipe_json"] is not None,
+                "reasoningEffort": row["reasoning_effort"],
                 "scanDir": row["scan_dir"],
                 "scanId": row["id"],
                 "scope": row["scope"],
@@ -589,12 +596,15 @@ def compare_scans(
                     separators=(",", ":"),
                 ).encode("utf-8")
             )
-            if item_bytes > MATCHING_INPUT_PAGE_BYTES:
-                raise SystemExit("A scan comparison finding exceeds the 512 KiB page size limit.")
+            if item_bytes > MATCHING_RESULT_MAX_BYTES:
+                raise SystemExit("A scan comparison finding exceeds the 1 MiB result limit.")
             separator_bytes = 1 if findings else 0
             if (
                 len(findings) >= MATCHING_FINDING_PAGE_MAX
-                or finding_page_bytes + separator_bytes + item_bytes > MATCHING_INPUT_PAGE_BYTES
+                or (
+                    findings
+                    and finding_page_bytes + separator_bytes + item_bytes > MATCHING_INPUT_PAGE_BYTES
+                )
             ):
                 next_offset = finding_count
             else:
@@ -648,8 +658,10 @@ def save_scan_comparison(
             serialized = args.matches_json
         else:
             with open(args.matches_file, "rb") as matches:
-                serialized = matches.read(1024 * 1024 + 1)
-        if len(serialized) > 1024 * 1024:
+                serialized = matches.read(MATCHING_RESULT_MAX_BYTES + 1)
+        if isinstance(serialized, str):
+            serialized = serialized.encode("utf-8")
+        if len(serialized) > MATCHING_RESULT_MAX_BYTES:
             raise ValueError("Scan comparison matches exceed the 1 MiB safety limit.")
         payload = json.loads(serialized)
     except (OSError, TypeError, ValueError) as exc:
