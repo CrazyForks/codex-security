@@ -2,23 +2,12 @@
 
 set -eu
 
-# Global options may precede the command, and scan options may precede its CSV.
 bulk_scan_command=
 bulk_scan_input=
 bulk_scan_metadata=
-bulk_scan_positional_only=
 expects_option_value=
 
 for argument do
-    if [ "$bulk_scan_positional_only" = yes ]; then
-        if [ -n "$bulk_scan_input" ]; then
-            printf '%s\n' 'codex-security: bulk-scan accepts one repository CSV after --.' >&2
-            exit 2
-        fi
-        bulk_scan_input=$argument
-        continue
-    fi
-
     case "$argument" in
         --help|-h|--llms|--llms-full|--schema|--version)
             bulk_scan_metadata=yes
@@ -27,35 +16,24 @@ for argument do
     esac
 
     if [ "$expects_option_value" = yes ]; then
-        if [ "$argument" = -- ]; then
-            printf '%s\n' 'codex-security: an option before -- requires a value.' >&2
+        if [ "$argument" = -- ] && [ "$bulk_scan_command" = yes ]; then
+            printf '%s\n' 'codex-security: bulk-scan does not support the -- option terminator.' >&2
             exit 2
         fi
         expects_option_value=
         continue
     fi
 
-    if [ "$bulk_scan_command" != yes ]; then
-        case "$argument" in
-            bulk-scan)
-                bulk_scan_command=yes
-                ;;
-            --filter-output|--format|--token-limit|--token-offset)
-                expects_option_value=yes
-                ;;
-            --filter-output=*|--format=*|--token-limit=*|--token-offset=*|\
-                --full-output|--json|--token-count|--)
-                ;;
-            *)
-                break
-                ;;
-        esac
-        continue
-    fi
-
     case "$argument" in
         --)
-            bulk_scan_positional_only=yes
+            if [ "$bulk_scan_command" = yes ]; then
+                printf '%s\n' 'codex-security: bulk-scan does not support the -- option terminator.' >&2
+                exit 2
+            fi
+            break
+            ;;
+        bulk-scan)
+            bulk_scan_command=yes
             ;;
         --output-dir|--workers|--mode|--model|--effort|--provider|\
             --knowledge-base|--max-attempts|--plugin-path|--python|\
@@ -66,9 +44,10 @@ for argument do
         -*)
             ;;
         *)
-            if [ -z "$bulk_scan_input" ]; then
-                bulk_scan_input=$argument
+            if [ "$bulk_scan_command" != yes ]; then
+                break
             fi
+            bulk_scan_input=$argument
             ;;
     esac
 done
@@ -93,9 +72,7 @@ if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_metadata" != yes ]; then
                         landlock_override=
                         expects_codex_override=
                         for argument do
-                            if [ "$argument" = -- ]; then
-                                break
-                            elif [ "$expects_codex_override" = yes ]; then
+                            if [ "$expects_codex_override" = yes ]; then
                                 case "$argument" in
                                     features.use_legacy_landlock=true)
                                         landlock_override=enabled
@@ -122,23 +99,7 @@ if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_metadata" != yes ]; then
                         done
 
                         if [ "$landlock_override" != enabled ]; then
-                            if [ "$bulk_scan_positional_only" = yes ]; then
-                                arguments_remaining=$#
-                                landlock_inserted=
-                                while [ "$arguments_remaining" -gt 0 ]; do
-                                    argument=$1
-                                    shift
-                                    if [ "$argument" = -- ] && [ "$landlock_inserted" != yes ]; then
-                                        set -- "$@" --codex features.use_legacy_landlock=true "$argument"
-                                        landlock_inserted=yes
-                                    else
-                                        set -- "$@" "$argument"
-                                    fi
-                                    arguments_remaining=$((arguments_remaining - 1))
-                                done
-                            else
-                                set -- "$@" --codex features.use_legacy_landlock=true
-                            fi
+                            set -- "$@" --codex features.use_legacy_landlock=true
                         fi
                     fi
                 fi

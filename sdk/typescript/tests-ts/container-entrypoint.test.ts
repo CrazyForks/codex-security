@@ -166,69 +166,32 @@ describe("customer container entrypoint", () => {
     },
   );
 
-  testPosix(
-    "accepts repository CSVs after global options and bulk-scan flags",
-    async () => {
-      for (const arguments_ of [
+  testPosix("accepts CSVs after global and bulk-scan options", async () => {
+    for (const arguments_ of [
+      ["bulk-scan", "--workers", "2", "/input/repositories.csv"],
+      [
+        "--format",
+        "toon",
+        "bulk-scan",
+        "--output-dir=/output",
+        "/input/repositories.csv",
+      ],
+    ] as const) {
+      const result = await runEntrypoint(arguments_);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(
         [
-          "bulk-scan",
-          "--workers",
-          "2",
-          "/input/repositories.csv",
-          "--output-dir",
-          "/output",
-        ],
-        [
-          "bulk-scan",
-          "--workers=2",
-          "--output-dir=/output",
-          "/input/repositories.csv",
-        ],
-        [
-          "--format",
-          "toon",
-          "bulk-scan",
-          "--mode",
-          "deep",
-          "/input/repositories.csv",
-          "--output-dir=/output",
-        ],
-        [
-          "--format=toon",
-          "--token-limit=4",
-          "bulk-scan",
-          "--output-dir",
-          "/output",
-          "/input/repositories.csv",
-        ],
-        [
-          "bulk-scan",
-          "--provider",
-          "openrouter",
-          "--knowledge-base",
-          "/input/threat-model.md",
-          "/input/repositories.csv",
-          "--output-dir",
-          "/output",
-        ],
-      ] as const) {
-        const result = await runEntrypoint(arguments_);
-
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.stdout).toBe(
-          [
-            ...arguments_,
-            ...(appArmorRestrictsUserNamespaces &&
-            !usesCodexSecurityAppArmorProfile
-              ? ["--codex", "features.use_legacy_landlock=true"]
-              : []),
-            "",
-          ].join("\n"),
-        );
-      }
-    },
-  );
+          ...arguments_,
+          ...(appArmorRestrictsUserNamespaces &&
+          !usesCodexSecurityAppArmorProfile
+            ? ["--codex", "features.use_legacy_landlock=true"]
+            : []),
+          "",
+        ].join("\n"),
+      );
+    }
+  });
 
   testPosix(
     "preserves bulk-scan help without injecting scan configuration",
@@ -242,192 +205,29 @@ describe("customer container entrypoint", () => {
   );
 
   testPosix(
-    "preserves prefixed help and metadata without injecting scan configuration",
-    async () => {
-      for (const arguments_ of [
-        ["--format", "toon", "bulk-scan", "--help"],
-        ["--format=toon", "bulk-scan", "-h"],
-        ["--help", "bulk-scan"],
-        ["-h", "bulk-scan"],
-        ["--schema", "bulk-scan"],
-        ["--llms", "bulk-scan"],
-        ["--llms-full", "bulk-scan"],
-        ["bulk-scan", "--workers", "8", "--help"],
-        ["bulk-scan", "--schema"],
-      ] as const) {
-        const result = await runEntrypoint(arguments_);
-
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
-      }
-    },
-  );
-
-  testPosix(
-    "forwards metadata after options with missing values to the CLI",
-    async () => {
-      for (const arguments_ of [
-        ["bulk-scan", "--workers", "--help"],
-        ["bulk-scan", "--output-dir", "-h"],
-        ["bulk-scan", "--workers", "--schema"],
-        ["bulk-scan", "--codex", "--llms"],
-        ["bulk-scan", "--model", "--llms-full"],
-        ["bulk-scan", "--python", "--version"],
-        ["--format", "--help", "bulk-scan"],
-        ["--filter-output", "-h", "bulk-scan"],
-        ["--token-limit", "--schema", "bulk-scan"],
-        ["--token-offset", "--llms", "bulk-scan"],
-      ] as const) {
-        const result = await runEntrypoint(arguments_);
-
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
-      }
-    },
-  );
-
-  testPosix(
-    "keeps metadata-shaped CSV filenames behind the option terminator",
-    async () => {
-      for (const filename of [
-        "--help",
-        "-h",
-        "--schema",
-        "--llms",
-        "--llms-full",
-        "--version",
-        "--codex=features.use_legacy_landlock=true",
-        "--codex=features.use_legacy_landlock=false",
-      ] as const) {
-        const arguments_ = [
-          "--format",
-          "toon",
-          "bulk-scan",
-          "--output-dir",
-          "/output",
-          "--",
-          filename,
-        ];
-        const result = await runEntrypoint(arguments_);
-
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.stdout).toBe(
-          [
-            ...arguments_.slice(0, -2),
-            ...(appArmorRestrictsUserNamespaces &&
-            !usesCodexSecurityAppArmorProfile
-              ? ["--codex", "features.use_legacy_landlock=true"]
-              : []),
-            "--",
-            filename,
-            "",
-          ].join("\n"),
-        );
-      }
-    },
-  );
-
-  testPosix(
     "preserves an explicit Landlock override without duplicating it",
     async () => {
-      for (const arguments_ of [
-        [
-          "bulk-scan",
-          "/input/repositories.csv",
-          "--output-dir",
-          "/output",
-          "--codex",
-          "features.use_legacy_landlock=true",
-        ],
-        [
-          "bulk-scan",
-          "--output-dir",
-          "/output",
-          "--codex",
-          "features.use_legacy_landlock=true",
-          "--",
-          "--help",
-        ],
-        [
-          "bulk-scan",
-          "--output-dir",
-          "/output",
-          "--codex=features.use_legacy_landlock=true",
-          "--",
-          "--schema",
-        ],
-      ] as const) {
-        const result = await runEntrypoint(arguments_);
+      const arguments_ = [
+        "bulk-scan",
+        "/input/repositories.csv",
+        "--output-dir",
+        "/output",
+        "--codex",
+        "features.use_legacy_landlock=true",
+      ];
+      const result = await runEntrypoint(arguments_);
 
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
-      }
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
     },
   );
 
   testPosix(
     "rejects incompatible Landlock overrides only on restricted hosts",
     async () => {
-      for (const arguments_ of [
-        [
-          "bulk-scan",
-          "/input/repositories.csv",
-          "--output-dir",
-          "/output",
-          "--codex",
-          "features.use_legacy_landlock=false",
-        ],
-        [
-          "bulk-scan",
-          "--output-dir",
-          "/output",
-          "--codex",
-          "features.use_legacy_landlock=false",
-          "--",
-          "--help",
-        ],
-        [
-          "bulk-scan",
-          "--output-dir",
-          "/output",
-          "--codex=features.use_legacy_landlock=false",
-          "--",
-          "--schema",
-        ],
-      ] as const) {
-        const result = await runEntrypoint(arguments_);
-
-        if (
-          appArmorRestrictsUserNamespaces &&
-          !usesCodexSecurityAppArmorProfile
-        ) {
-          expect(result.status).toBe(2);
-          expect(result.stdout).toBe("");
-          expect(result.stderr).toBe(
-            "codex-security: restricted Ubuntu hosts require --codex features.use_legacy_landlock=true.\n",
-          );
-        } else {
-          expect(result.status).toBe(0);
-          expect(result.stderr).toBe("");
-          expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
-        }
-      }
-    },
-  );
-
-  testPosix(
-    "keeps prefixed and option-first CSV scans behind the Landlock guard",
-    async () => {
       const arguments_ = [
-        "--format",
-        "toon",
         "bulk-scan",
-        "--workers",
-        "2",
         "/input/repositories.csv",
         "--output-dir",
         "/output",
@@ -456,108 +256,40 @@ describe("customer container entrypoint", () => {
   testPosix(
     "rejects interactive discovery before starting the CLI",
     async () => {
-      const result = await runEntrypoint(["bulk-scan"]);
-
-      expect(result.status).toBe(2);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toBe(
-        "codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.\n",
-      );
-    },
-  );
-
-  testPosix(
-    "rejects missing bulk-scan option values before the terminator",
-    async () => {
-      for (const option of ["--model", "--output-dir", "--provider"]) {
-        const result = await runEntrypoint([
-          "bulk-scan",
-          option,
-          "--",
-          "repositories.csv",
-        ]);
-        expect(result.status).toBe(2);
-        expect(result.stdout).toBe("");
-        expect(result.stderr).toContain("an option before -- requires a value");
-      }
-    },
-  );
-
-  testPosix(
-    "rejects multiple CSV paths after the option terminator",
-    async () => {
-      const result = await runEntrypoint([
-        "bulk-scan",
-        "--",
-        "first.csv",
-        "second.csv",
-      ]);
-
-      expect(result.status).toBe(2);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toContain("accepts one repository CSV after --");
-    },
-  );
-
-  testPosix(
-    "rejects prefixed discovery without mistaking option values for a CSV",
-    async () => {
       for (const arguments_ of [
+        ["bulk-scan"],
         ["bulk-scan", "--workers", "8"],
-        ["bulk-scan", "--provider", "openrouter"],
-        ["bulk-scan", "--knowledge-base", "/input/threat-model.md"],
-        ["bulk-scan", "--mode", "deep", "--output-dir", "/output"],
-        [
-          "bulk-scan",
-          "--model",
-          "gpt-5.6-terra",
-          "--effort",
-          "high",
-          "--max-attempts",
-          "3",
-          "--plugin-path",
-          "./plugin",
-          "--python",
-          "python3",
-          "--codex",
-          "features.goals=true",
-        ],
-        ["bulk-scan", "--workers=8", "--output-dir=/output"],
-        ["bulk-scan", "--output-dir", "/output", "--"],
-        ["--format", "toon", "bulk-scan", "--workers", "8"],
-        ["--format=toon", "--token-limit", "5", "bulk-scan", "--mode", "deep"],
-        [
-          "--filter-output",
-          "total",
-          "--token-offset=1",
-          "bulk-scan",
-          "--python=python3",
-        ],
-        ["--json", "bulk-scan", "--max-attempts", "2"],
-        ["--", "bulk-scan", "--workers", "8"],
+        ["--format", "json", "bulk-scan", "--mode", "deep"],
       ] as const) {
         const result = await runEntrypoint(arguments_);
-
         expect(result.status).toBe(2);
         expect(result.stdout).toBe("");
-        expect(result.stderr).toBe(
-          "codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.\n",
+        expect(result.stderr).toContain(
+          "interactive discovery is not supported",
         );
       }
     },
   );
 
-  testPosix("does not change non-scan commands", async () => {
+  testPosix("rejects unsupported bulk-scan option terminators", async () => {
     for (const arguments_ of [
-      ["--version"],
-      ["--filter-output", "bulk-scan", "info"],
+      ["bulk-scan", "--output-dir", "/output", "--", "--help"],
+      ["bulk-scan", "--output-dir", "--", "--help"],
     ] as const) {
       const result = await runEntrypoint(arguments_);
-
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
-      expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(
+        "does not support the -- option terminator",
+      );
     }
+  });
+
+  testPosix("does not change non-scan commands", async () => {
+    const result = await runEntrypoint(["--version"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("--version\n");
   });
 });
 

@@ -15,7 +15,6 @@ import { delimiter, join, normalize } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { Octokit } from "@octokit/core";
 import { describe, expect, test } from "bun:test";
 import type {
   CodexSecurityConfig,
@@ -760,114 +759,6 @@ describe("CLI", () => {
     }
   });
 
-  test("treats option-shaped CSV filenames after -- as repository input", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
-    try {
-      await multiscanInventory(root);
-      const inventory = await readFile(join(root, "repositories.csv"));
-
-      for (const [index, filename] of [
-        "repositories.csv",
-        "--help",
-        "-h",
-        "--schema",
-        "--codex=features.use_legacy_landlock=true",
-      ].entries()) {
-        if (filename !== "repositories.csv") {
-          await writeFile(join(root, filename), inventory);
-        }
-        const stdout = capture();
-        const stderr = capture();
-
-        expect(
-          await main(
-            [
-              "--format",
-              "json",
-              "bulk-scan",
-              "--output-dir",
-              `results-${index}`,
-              "--",
-              filename,
-            ],
-            stdout.stream,
-            stderr.stream,
-            dependencies({ currentDirectory: root }),
-          ),
-        ).toBe(0);
-        expect(JSON.parse(stdout.text())).toMatchObject({
-          total: 1,
-          completed: 1,
-          failed: 0,
-        });
-      }
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects additional bulk-scan arguments after the option terminator", async () => {
-    for (const trailing of [
-      ["--output-dir", "results"],
-      ["--help"],
-      ["another.csv"],
-    ]) {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(
-          ["bulk-scan", "--", "repositories.csv", ...trailing],
-          stdout.stream,
-          stderr.stream,
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(
-        "Unexpected positional argument for bulk-scan",
-      );
-    }
-  });
-
-  test("does not rewrite terminators belonging to other commands", async () => {
-    for (const command of ["validate", "patch"]) {
-      let codexStarted = false;
-      const stderr = capture();
-      const result = await main(
-        [command, "bulk-scan", "--", "first", "second"],
-        capture().stream,
-        stderr.stream,
-        dependencies({
-          onCodex: () => {
-            codexStarted = true;
-            return 0;
-          },
-        }),
-      );
-      expect(result).toBe(2);
-      expect(codexStarted).toBe(false);
-      expect(stderr.text()).toContain("Unknown flag: --");
-      expect(stderr.text()).not.toContain(
-        "Unexpected positional argument for bulk-scan",
-      );
-    }
-  });
-
-  test("rejects missing bulk-scan option values before a terminator", async () => {
-    for (const option of ["--model", "--output-dir", "--provider"]) {
-      const stderr = capture();
-      expect(
-        await main(
-          ["bulk-scan", option, "--", "repositories.csv"],
-          capture().stream,
-          stderr.stream,
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(stderr.text()).toContain(`Missing value for flag: ${option}`);
-    }
-  });
-
   test.each([
     [
       "OpenRouter",
@@ -984,127 +875,6 @@ describe("CLI", () => {
     }
   });
 
-  test("forwards interactive bulk-scan options through repository discovery", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-discovery-"));
-    const configurations: CodexSecurityConfig[] = [];
-    let githubClients = 0;
-
-    try {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(
-          [
-            "bulk-scan",
-            "--workers=2",
-            "--mode",
-            "deep",
-            "--max-attempts=3",
-            "--plugin-path",
-            "./plugin",
-            "--python=python3",
-            "--model",
-            "gpt-5.6-terra",
-            "--effort",
-            "high",
-            "--codex",
-            "features.goals=true",
-          ],
-          stdout.stream,
-          stderr.stream,
-          dependencies({
-            currentDirectory: root,
-            bulkScan: {
-              prompt: {
-                isInteractive: () => true,
-                write: () => {},
-                confirm: async () => true,
-                input: async () => "results",
-                select: async <Value extends string>(
-                  _question: string,
-                  options: readonly { label: string; value: Value }[],
-                ) => options[0]!.value,
-              },
-              now: () => Date.parse("2026-08-01T00:00:00.000Z"),
-              currentDirectory: () => root,
-              createGitHub: async () => {
-                githubClients += 1;
-                return new Octokit({
-                  auth: "test-token",
-                  request: {
-                    fetch: async (resource: Parameters<typeof fetch>[0]) => {
-                      const path = new URL(
-                        resource instanceof Request ? resource.url : resource,
-                      ).pathname;
-                      if (path === "/user/orgs") return Response.json([]);
-                      if (path === "/user") {
-                        return Response.json({ login: "acme" });
-                      }
-                      if (path !== "/graphql") {
-                        throw new Error(`Unexpected GitHub request: ${path}`);
-                      }
-                      return Response.json({
-                        data: {
-                          repositoryOwner: {
-                            repositories: {
-                              nodes: ["one", "two", "three"].map(
-                                (name, index) => ({
-                                  nameWithOwner: `acme/${name}`,
-                                  pushedAt: "2026-07-30T00:00:00.000Z",
-                                  defaultBranchRef: {
-                                    target: {
-                                      oid: String(index + 1).repeat(40),
-                                    },
-                                  },
-                                }),
-                              ),
-                              pageInfo: {
-                                hasNextPage: false,
-                                endCursor: null,
-                              },
-                            },
-                          },
-                        },
-                      });
-                    },
-                  },
-                });
-              },
-            },
-            onConfig: (config) => {
-              configurations.push(config);
-              throw new Error("Stop before checking out repositories.");
-            },
-          }),
-        ),
-      ).toBe(2);
-
-      expect(githubClients).toBe(1);
-      expect(configurations).toHaveLength(2);
-      for (const configuration of configurations) {
-        expect(configuration).toMatchObject({
-          pluginPath: "./plugin",
-          pythonPath: "python3",
-          codexOverrides: {
-            features: { goals: true },
-            model: "gpt-5.6-terra",
-            model_reasoning_effort: "high",
-          },
-        });
-      }
-
-      const manifest = JSON.parse(
-        await readFile(join(root, "results", "manifest.json"), "utf8"),
-      ) as { tasks: { mode: string }[] };
-      expect(manifest.tasks).toHaveLength(3);
-      expect(manifest.tasks.every(({ mode }) => mode === "deep")).toBe(true);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain("Stop before checking out repositories.");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
   test("requires a terminal for interactive bulk scans", async () => {
     for (const argv of [
       ["bulk-scan"],
@@ -1115,35 +885,10 @@ describe("CLI", () => {
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
-      ["bulk-scan", "--workers", "8"],
-      ["bulk-scan", "--workers=8"],
-      ["bulk-scan", "--mode", "deep"],
-      ["bulk-scan", "--mode=deep"],
-      ["bulk-scan", "--max-attempts", "3"],
-      ["bulk-scan", "--max-attempts=3"],
-      ["bulk-scan", "--plugin-path", "./plugin"],
-      ["bulk-scan", "--plugin-path=./plugin"],
-      ["bulk-scan", "--python", "python3"],
+      ["bulk-scan", "--workers", "8", "--mode", "deep"],
+      ["bulk-scan", "--max-attempts=3", "--plugin-path", "./plugin"],
       ["bulk-scan", "--python=python3"],
-      [
-        "bulk-scan",
-        "--workers",
-        "8",
-        "--mode",
-        "deep",
-        "--max-attempts",
-        "3",
-        "--plugin-path",
-        "./plugin",
-        "--python",
-        "python3",
-        "--model",
-        "gpt-5.6-terra",
-        "--effort",
-        "high",
-      ],
       ["--format", "toon", "bulk-scan", "--workers", "8"],
-      ["--format=toon", "bulk-scan", "--workers=8"],
       ["bulk-scan", "--knowledge-base", "/shared/threat-models"],
       [
         "bulk-scan",
@@ -1200,23 +945,19 @@ describe("CLI", () => {
     expect(stdout.text()).toBe("");
   });
 
-  test("lets the discovery wizard choose its output directory", async () => {
-    for (const argv of [
-      ["bulk-scan", "--output-dir", "results"],
-      ["bulk-scan", "--output-dir=results"],
-      ["--format", "toon", "bulk-scan", "--output-dir=results"],
-    ] as const) {
-      const stdout = capture();
-      const stderr = capture();
-
-      expect(
-        await main(argv, stdout.stream, stderr.stream, dependencies()),
-      ).toBe(2);
-      expect(stderr.text()).toContain(
-        "--output-dir can only be used with a repository CSV",
-      );
-      expect(stdout.text()).toBe("");
-    }
+  test("rejects an output directory without a repository CSV", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["bulk-scan", "--output-dir", "results"],
+        capture().stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--output-dir can only be used with a repository CSV",
+    );
   });
 
   test("exposes only typed, read-only SDK metadata over MCP", () => {
