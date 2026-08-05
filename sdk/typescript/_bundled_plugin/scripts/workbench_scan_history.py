@@ -37,10 +37,21 @@ def _same_repository(
     after_git_dir = after_git_directory or git_output(
         after_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
-    return (
-        before_git_dir is not None
-        and after_git_dir is not None
-        and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
+    if (
+        before_git_dir is None
+        or after_git_dir is None
+        or Path(before_git_dir).resolve() != Path(after_git_dir).resolve()
+    ):
+        return False
+    after_worktree = git_output(after_target, "rev-parse", "--show-toplevel")
+    registered_worktrees = git_output(before_target, "worktree", "list", "--porcelain", "-z")
+    if after_worktree is None or registered_worktrees is None:
+        return False
+    after_worktree_path = Path(after_worktree).resolve()
+    return after_target.resolve().is_relative_to(after_worktree_path) and any(
+        record.startswith("worktree ")
+        and Path(record.removeprefix("worktree ")).resolve() == after_worktree_path
+        for record in registered_worktrees.split("\0")
     )
 
 
