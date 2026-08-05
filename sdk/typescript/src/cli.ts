@@ -2295,33 +2295,22 @@ async function matchScanGroupInOneBatch(
   const previous: Array<{
     scanId: string;
     page: Awaited<ReturnType<typeof matchingInputPage>>;
-  }> = new Array(pairs.length);
-  let nextPair = 0;
-  let failed = false;
-  let failure: unknown;
-  await Promise.all(
-    Array.from(
-      { length: Math.min(pairs.length, MAX_GROUPED_MATCH_INPUT_CONCURRENCY) },
-      async () => {
-        while (!failed && nextPair < pairs.length) {
-          const index = nextPair++;
-          const beforeScanId = pairs[index]!.beforeScanId;
-          try {
-            previous[index] = {
-              scanId: beforeScanId,
-              page: await matchingInputPage(dependencies, beforeScanId, 0),
-            };
-          } catch (error) {
-            failed = true;
-            failure = error;
-          }
-        }
-      },
-    ),
-  );
-  if (failed) throw failure;
-  if (previous.some(({ page }) => page.nextOffset !== null)) {
-    return null;
+  }> = [];
+  for (
+    let offset = 0;
+    offset < pairs.length;
+    offset += MAX_GROUPED_MATCH_INPUT_CONCURRENCY
+  ) {
+    const pages = await Promise.all(
+      pairs
+        .slice(offset, offset + MAX_GROUPED_MATCH_INPUT_CONCURRENCY)
+        .map(async ({ beforeScanId }) => ({
+          scanId: beforeScanId,
+          page: await matchingInputPage(dependencies, beforeScanId, 0),
+        })),
+    );
+    if (pages.some(({ page }) => page.nextOffset !== null)) return null;
+    previous.push(...pages);
   }
   const input = {
     before: previous.flatMap(({ page }) => page.findings),
