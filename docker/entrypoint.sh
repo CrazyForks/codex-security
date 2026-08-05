@@ -3,7 +3,6 @@
 set -eu
 
 # Global options may precede the command, and scan options may precede its CSV.
-# Classify positional input without consuming arguments or mistaking option values for a CSV.
 bulk_scan_command=
 bulk_scan_input=
 bulk_scan_metadata=
@@ -11,10 +10,12 @@ bulk_scan_positional_only=
 expects_option_value=
 
 for argument do
-    if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_positional_only" = yes ]; then
-        if [ -z "$bulk_scan_input" ]; then
-            bulk_scan_input=$argument
+    if [ "$bulk_scan_positional_only" = yes ]; then
+        if [ -n "$bulk_scan_input" ]; then
+            printf '%s\n' 'codex-security: bulk-scan accepts one repository CSV after --.' >&2
+            exit 2
         fi
+        bulk_scan_input=$argument
         continue
     fi
 

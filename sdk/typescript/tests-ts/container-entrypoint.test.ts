@@ -484,6 +484,22 @@ describe("customer container entrypoint", () => {
   );
 
   testPosix(
+    "rejects multiple CSV paths after the option terminator",
+    async () => {
+      const result = await runEntrypoint([
+        "bulk-scan",
+        "--",
+        "first.csv",
+        "second.csv",
+      ]);
+
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("accepts one repository CSV after --");
+    },
+  );
+
+  testPosix(
     "rejects prefixed discovery without mistaking option values for a CSV",
     async () => {
       for (const arguments_ of [
