@@ -13,9 +13,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { main } from "../src/cli.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
+import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
 type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
@@ -330,6 +332,88 @@ describe("multiscan", () => {
       });
       expect(attempts).toBe(1);
       expect(await results(resumed.resultsPath)).toHaveLength(1);
+    },
+  );
+
+  test.each(["partial", "unknown"] as const)(
+    "keeps sealed %s-coverage CLI runs fail-closed without retrying",
+    async (completeness) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "sample");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nsample,${source.path},${source.revision}\n`,
+      );
+      const outputDir = join(paths.output, "artifacts", "sample", "attempt-1");
+      await completedScan(outputDir, completeness);
+      const stdout = capture();
+      const stderr = capture();
+      let attempts = 0;
+      const arguments_ = [
+        "bulk-scan",
+        "repositories.csv",
+        "--output-dir",
+        "results",
+        "--max-attempts",
+        "3",
+        "--json",
+      ];
+      const clientDependencies = dependencies({
+        currentDirectory: paths.root,
+        result: fakeResult([], completeness),
+        onRun: () => {
+          attempts += 1;
+        },
+      });
+
+      expect(
+        await main(
+          arguments_,
+          stdout.stream,
+          stderr.stream,
+          clientDependencies,
+        ),
+      ).toBe(2);
+      expect(attempts).toBe(1);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        total: 1,
+        completed: 0,
+        incomplete: 1,
+        failed: 0,
+        skipped: 0,
+      });
+      const warning = `Scan coverage is ${completeness}; results may be incomplete.`;
+      expect(stderr.text()).toContain(
+        "sample completed_with_incomplete_coverage (attempt 1)",
+      );
+      expect(stderr.text()).toContain(warning);
+      expect(stderr.text()).not.toContain("attempt 2");
+      expect(await results(join(paths.output, "results.jsonl"))).toMatchObject([
+        {
+          status: "completed_with_incomplete_coverage",
+          coverage: completeness,
+          outputDir,
+        },
+      ]);
+
+      const resumedOutput = capture();
+      const resumedError = capture();
+      expect(
+        await main(
+          arguments_,
+          resumedOutput.stream,
+          resumedError.stream,
+          clientDependencies,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(resumedOutput.text())).toMatchObject({
+        completed: 0,
+        incomplete: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(resumedError.text()).toContain(warning);
+      expect(attempts).toBe(1);
     },
   );
 
