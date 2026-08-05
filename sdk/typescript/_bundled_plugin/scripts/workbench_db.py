@@ -3197,7 +3197,17 @@ def finding_result(
     try:
         target = require_scan_target_identity(scan)
     except SystemExit:
-        target = None
+        current_target = connection.execute(
+            "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+        ).fetchone()
+        try:
+            target = (
+                require_scan_target_identity(scan, target_path=current_target["current_path"])
+                if current_target is not None
+                else None
+            )
+        except SystemExit:
+            target = None
     for row in connection.execute(
         """
         SELECT relative_path, start_line, end_line, role

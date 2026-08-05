@@ -397,6 +397,19 @@ export function renderScanHistory(
                 .map((assertion) => `Verified: ${assertion}`),
             );
           }
+          for (const [evidenceLabel, evidenceKey] of [
+            ["Evidence", "evidence"],
+            ["Counterevidence", "counterEvidence"],
+          ] as const) {
+            const items = value[evidenceKey];
+            if (!Array.isArray(items)) continue;
+            for (const item of items) {
+              const detail = description(item);
+              if (detail !== undefined) {
+                sections.push(`${evidenceLabel}: ${detail}`);
+              }
+            }
+          }
         }
         if (key === "attackPath") {
           for (const [nestedLabel, nestedKey] of [
@@ -406,9 +419,48 @@ export function renderScanHistory(
             ["Impact", "impact"],
             ["Likelihood", "likelihood"],
           ] as const) {
-            const nested = description(value[nestedKey]);
-            if (nested !== undefined)
+            const nestedValue = value[nestedKey];
+            const nested = description(nestedValue);
+            if (nested !== undefined) {
               sections.push(`${nestedLabel}: ${nested}`);
+            }
+            if (
+              typeof nestedValue !== "object" ||
+              nestedValue === null ||
+              Array.isArray(nestedValue)
+            ) {
+              continue;
+            }
+            const attributes: ReadonlyArray<readonly [string, string]> =
+              nestedKey === "dataflow" || nestedKey === "dataFlow"
+                ? [
+                    ["Source", "source"],
+                    ["Sink", "sink"],
+                    ["Outcome", "outcome"],
+                  ]
+                : nestedKey === "reachability"
+                  ? [
+                      ["Attacker", "attacker"],
+                      ["Entry point", "entrypoint"],
+                      ["Outcome", "outcome"],
+                    ]
+                  : [];
+            for (const [attributeLabel, attributeKey] of attributes) {
+              const detail = description(nestedValue[attributeKey]);
+              if (detail !== undefined) {
+                sections.push(`${attributeLabel}: ${detail}`);
+              }
+            }
+            if (nestedKey === "reachability") {
+              const preconditions = nestedValue["preconditions"];
+              if (!Array.isArray(preconditions)) continue;
+              for (const precondition of preconditions) {
+                const detail = description(precondition);
+                if (detail !== undefined) {
+                  sections.push(`Precondition: ${detail}`);
+                }
+              }
+            }
           }
         }
         const caveats: ReadonlyArray<readonly [string, string]> =

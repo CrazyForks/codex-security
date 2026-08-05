@@ -1895,6 +1895,32 @@ describe("runtime directories and plugin Python boundary", () => {
     expect((failure as Error).message).not.toContain("SENSITIVE_FINDING_");
   });
 
+  test("accepts finding details expanded by JSON-escaped Unicode", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import json",
+        "print(json.dumps({'evidence': 'é' * (23 * 1024 * 1024)}))",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const finding = await runWorkbench(
+      {
+        python: python!,
+        pluginRoot,
+        environment: { PATH: process.env["PATH"] },
+      },
+      ["get-finding"],
+    );
+
+    expect(finding["evidence"]).toHaveLength(23 * 1024 * 1024);
+  });
+
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");
     const repository = join(root, "repository");

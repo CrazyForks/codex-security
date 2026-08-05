@@ -67,6 +67,7 @@ const nestedDirectoryScanProbe = [
   "sys.path.insert(0, sys.argv[1])",
   "from workbench_db import apply_migrations",
   "from workbench_scan_history import list_scans",
+  "from workbench_target import git_output",
   "from workbench_target_state import ensure_security_target",
   "from unittest.mock import patch",
   "with tempfile.TemporaryDirectory(prefix='codex-security-unversioned-scan-') as directory:",
@@ -186,8 +187,73 @@ const nestedDirectoryScanProbe = [
   "    related_scans = list_scans(connection, args)['scans']",
   "    output['relatedCheckoutHistory'] = [scan['scanId'] for scan in related_scans]",
   "    output['relatedCheckoutVerified'] = related_scans[0].get('relatedCheckout') is True",
+  "    reused_services = (pathlib.Path(directory) / 'reused-services').resolve()",
+  "    previous_services = (pathlib.Path(directory) / 'previous-services').resolve()",
+  "    reused_services.mkdir()",
+  "    previous_services.mkdir()",
+  "    previous_services_target = ensure_security_target(connection, str(previous_services))",
+  "    ensure_security_target(connection, str(reused_services))",
+  "    for scan_id, path, target in [('stale-services-root', reused_services, previous_services_target), ('current-service-a', reused_services / 'service-a', None), ('current-service-b', reused_services / 'service-b', None)]:",
+  "        if target is None: path.mkdir(); target = ensure_security_target(connection, str(path))",
+  "        workspace_id = scan_id + '-workspace'",
+  "        connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', (workspace_id, target, str(path), timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan_id, workspace_id, target, str(path), 'unversioned', '.', 'standard', directory + '/results/' + scan_id, 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "        connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', (scan_id, timestamp))",
+  "    args = argparse.Namespace(repository=str(reused_services), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    output['reusedRootDescendantScans'] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    for index in range(50):",
+  "        unrelated = pathlib.Path(directory) / f'unrelated-{index}'",
+  "        unrelated.mkdir()",
+  "        ensure_security_target(connection, str(unrelated))",
+  "    args = argparse.Namespace(repository=str(root), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    previous_descendant_queries = len(descendant_queries)",
+  "    with patch('workbench_scan_history.git_output', wraps=git_output) as observed_git:",
+  "        output['directTargetScanIds'] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "        output['directTargetLookupBounded'] = observed_git.call_count <= 3",
+  "    output['directTargetSkipsDescendants'] = len(descendant_queries) == previous_descendant_queries",
   "    output['descendantQueriesScoped'] = bool(descendant_queries) and all('WHERE substr(target_path, 1,' in statement for statement in descendant_queries)",
   "    print(json.dumps(output))",
+].join("\n");
+
+const relocatedFindingProbe = [
+  "import json, os, pathlib, sqlite3, subprocess, sys, tempfile",
+  "sys.path.insert(0, sys.argv[1])",
+  "from workbench_db import apply_migrations, finding_result, serialize_filesystem_identity",
+  "from workbench_scan_history import finding_occurrence_rows",
+  "from workbench_target_state import ensure_security_target",
+  "with tempfile.TemporaryDirectory(prefix='codex-security-relocated-finding-') as directory:",
+  "    checkout = (pathlib.Path(directory) / 'original-checkout').resolve()",
+  "    source = checkout / 'src' / 'ÄUTH-Straße.py'",
+  "    source.parent.mkdir(parents=True)",
+  "    source.write_text('dangerous_sink(user_input)\\n', encoding='utf-8')",
+  "    subprocess.run(['git', 'init', '-q', str(checkout)], check=True)",
+  "    subprocess.run(['git', '-C', str(checkout), 'add', '.'], check=True)",
+  "    subprocess.run(['git', '-C', str(checkout), '-c', 'user.name=Codex Security Test', '-c', 'user.email=codex-security@example.com', 'commit', '-qm', 'initial finding source'], check=True)",
+  "    revision = subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip()",
+  "    connection = sqlite3.connect(':memory:')",
+  "    connection.row_factory = sqlite3.Row",
+  "    apply_migrations(connection)",
+  "    timestamp = '2026-08-03T12:00:00Z'",
+  "    target = ensure_security_target(connection, str(checkout))",
+  "    metadata = checkout.stat()",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('workspace', target, str(checkout), timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_device, target_inode, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('scan', 'workspace', target, str(checkout), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), revision, '.', 'standard', directory + '/results', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('scan', timestamp))",
+  "    connection.execute('INSERT INTO findings(id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', ('finding', 'fingerprint', 'rule', 'anchor', timestamp, timestamp))",
+  "    connection.execute('INSERT INTO finding_occurrences(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('occurrence', 'finding', 'scan', 'Äuthorization bypass', 'Über account access', 'high', 'high', 'Require authorization.', '{}', timestamp))",
+  "    connection.execute('INSERT INTO finding_locations(occurrence_id, relative_path, start_line, end_line, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)', ('occurrence', 'src/ÄUTH-Straße.py', 1, 1, 'root_control', 0))",
+  "    searches = {query: [row['id'] for row in finding_occurrence_rows(connection, 'scan', offset=0, limit=20, query=query)] for query in ['äuthorization', 'über', 'äuth-strasse']}",
+  "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
+  "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
+  "    moved_checkout = checkout.with_name('moved-checkout')",
+  "    checkout.rename(moved_checkout)",
+  "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(moved_checkout), target))",
+  "    moved = finding_result(connection, scan, occurrence, full_details=True)",
+  "    replacement = checkout.with_name('replacement-checkout')",
+  "    replacement.mkdir()",
+  "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(replacement), target))",
+  "    replaced = finding_result(connection, scan, occurrence, full_details=True)",
+  "    print(json.dumps({'searches': searches, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
 ].join("\n");
 
 const findingDetailProbe = [
@@ -444,9 +510,52 @@ describe("workbench findings index", () => {
       sameOriginNested: ["same-origin-nested-scan"],
       relatedCheckoutHistory: ["portable-scan"],
       relatedCheckoutVerified: true,
+      reusedRootDescendantScans: ["current-service-a", "current-service-b"],
+      directTargetScanIds: ["scan"],
+      directTargetLookupBounded: true,
+      directTargetSkipsDescendants: true,
       descendantQueriesScoped: true,
     });
   }, 30_000);
+
+  test("casefolds scan-specific searches and verifies moved checkout identity", () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    if (python === null)
+      throw new Error("Python is required for finding-identity tests.");
+    const result = Bun.spawnSync(
+      [
+        python,
+        "-I",
+        "-B",
+        "-c",
+        relocatedFindingProbe,
+        join(PLUGIN_ROOT, "scripts"),
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(new TextDecoder().decode(result.stdout)) as {
+      searches: Record<string, string[]>;
+      movedAbsolutePath: string;
+      expectedMovedAbsolutePath: string;
+      movedSourceExcerpt?: string;
+      replacementAbsolutePath: string | null;
+      replacementSourceExcerpt: string | null;
+    };
+    expect(output.searches).toEqual({
+      äuthorization: ["occurrence"],
+      über: ["occurrence"],
+      "äuth-strasse": ["occurrence"],
+    });
+    expect(output.movedAbsolutePath).toBe(output.expectedMovedAbsolutePath);
+    expect(output.movedSourceExcerpt).toContain("dangerous_sink(user_input)");
+    expect(output.replacementAbsolutePath).toBeNull();
+    expect(output.replacementSourceExcerpt).toBeNull();
+  });
 
   test("returns complete evidence and locations only in dedicated finding details", () => {
     const python =

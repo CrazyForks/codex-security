@@ -140,17 +140,8 @@ def list_scans(
             """,
             (str(repository), str(repository)),
         ).fetchone()
-        requested_identity = (
-            git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            _repository_origin(repository),
-        )
-        related_target_ids = [
-            target["target_id"]
-            for target in connection.execute(
-                "SELECT id AS target_id, current_path AS target_path FROM security_targets"
-            )
-            if _same_repository(target, requested_repository, after_identity=requested_identity)
-        ]
+        requested_target_id = requested_repository["target_id"]
+        related_target_ids = [requested_target_id] if requested_target_id else []
         repository_root = git_output(repository, "rev-parse", "--show-toplevel")
         checkout_boundary = (
             Path(repository_root).resolve() if repository_root is not None else None
@@ -162,11 +153,19 @@ def list_scans(
                     checkout_boundary = candidate
                     break
         repository_paths = [str(repository)]
-        registered_repository = connection.execute(
-            "SELECT 1 FROM scans WHERE target_path = ? OR target_id = ? LIMIT 1",
-            (str(repository), requested_repository["target_id"]),
-        ).fetchone()
-        if not registered_repository:
+        registered_repository = (
+            connection.execute(
+                "SELECT 1 FROM scans WHERE target_id = ? LIMIT 1",
+                (requested_target_id,),
+            ).fetchone()
+            if requested_target_id
+            else connection.execute(
+                "SELECT 1 FROM scans WHERE target_path = ? AND target_id IS NULL LIMIT 1",
+                (str(repository),),
+            ).fetchone()
+        )
+        registered_parent = None
+        if registered_repository is None:
             for parent in repository.parents:
                 if checkout_boundary is not None and not parent.is_relative_to(checkout_boundary):
                     break
@@ -186,31 +185,49 @@ def list_scans(
                     if registered_parent["target_id"] is not None:
                         related_target_ids.append(registered_parent["target_id"])
                     break
-        repository_prefix = str(repository).rstrip(os.sep) + os.sep
-        for scan in connection.execute(
-            "SELECT target_id, target_path FROM scans WHERE substr(target_path, 1, ?) = ?",
-            (len(repository_prefix), repository_prefix),
-        ):
-            target_path = Path(scan["target_path"])
-            if target_path == repository or not target_path.is_relative_to(repository):
-                continue
-            if requested_identity[0] is not None:
-                if scan["target_id"] is not None or not _same_repository(
-                    scan, requested_repository, after_identity=requested_identity
-                ):
+        if registered_repository is None and registered_parent is None:
+            requested_identity = (
+                git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+                _repository_origin(repository),
+            )
+            descendant_found = False
+            repository_prefix = str(repository).rstrip(os.sep) + os.sep
+            for scan in connection.execute(
+                "SELECT target_id, target_path FROM scans WHERE substr(target_path, 1, ?) = ?",
+                (len(repository_prefix), repository_prefix),
+            ):
+                target_path = Path(scan["target_path"])
+                if target_path == repository or not target_path.is_relative_to(repository):
                     continue
-            elif registered_repository is not None or checkout_boundary is not None:
-                continue
-            else:
-                candidate = target_path
-                while candidate != repository:
-                    marker = candidate / ".git"
-                    if marker.is_dir() or marker.is_file() or marker.is_symlink():
-                        break
-                    candidate = candidate.parent
-                if candidate != repository:
+                if requested_identity[0] is not None:
+                    if scan["target_id"] is not None or not _same_repository(
+                        scan, requested_repository, after_identity=requested_identity
+                    ):
+                        continue
+                elif checkout_boundary is not None:
                     continue
-            repository_paths.append(str(target_path))
+                else:
+                    candidate = target_path
+                    while candidate != repository:
+                        marker = candidate / ".git"
+                        if marker.is_dir() or marker.is_file() or marker.is_symlink():
+                            break
+                        candidate = candidate.parent
+                    if candidate != repository:
+                        continue
+                repository_paths.append(str(target_path))
+                descendant_found = True
+            if not descendant_found and requested_identity[0] is not None:
+                related_target_ids.extend(
+                    target["target_id"]
+                    for target in connection.execute(
+                        "SELECT id AS target_id, current_path AS target_path FROM security_targets"
+                    )
+                    if target["target_id"] != requested_target_id
+                    and _same_repository(
+                        target, requested_repository, after_identity=requested_identity
+                    )
+                )
         repository_paths = list(dict.fromkeys(repository_paths))
         repository_placeholders = ", ".join("?" for _ in repository_paths)
         repository_clauses = [
@@ -785,6 +802,8 @@ def finding_occurrence_rows(
     severity: str | None = None,
     status: str | None = None,
 ) -> list[sqlite3.Row]:
+    if query is not None and query.strip():
+        connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
     conditions, values = finding_occurrence_conditions(
         scan_id, query=query, severity=severity, status=status
     )
@@ -839,12 +858,12 @@ def finding_occurrence_conditions(
         search = query.strip().casefold()
         if search:
             conditions.append(
-                "(instr(lower(occurrences.title), ?) > 0 "
-                "OR instr(lower(occurrences.summary), ?) > 0 "
+                "(instr(codex_security_casefold(occurrences.title), ?) > 0 "
+                "OR instr(codex_security_casefold(occurrences.summary), ?) > 0 "
                 "OR EXISTS ("
                 "SELECT 1 FROM finding_locations AS locations "
                 "WHERE locations.occurrence_id = occurrences.id "
-                "AND instr(lower(locations.relative_path), ?) > 0))"
+                "AND instr(codex_security_casefold(locations.relative_path), ?) > 0))"
             )
             values.extend((search, search, search))
     return " AND ".join(conditions), values
