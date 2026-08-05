@@ -334,6 +334,8 @@ def diff_path_is_security_relevant(path: Path) -> bool:
 def diff_path_is_included(path: Path) -> bool:
     if path.parts == ("docs", "CODEOWNERS"):
         return True
+    if path.parts[:2] == (".github", "actions"):
+        return ".git" not in path.parts
     if diff_path_is_security_relevant(path):
         return not any(
             part in EXCLUDED_DIRS and part not in {".github", ".circleci", ".devcontainer"}
@@ -380,7 +382,10 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
     except (OSError, ValueError):
         return "", False
 
-    data = sample + remaining
+    return diff_preview_data(path, sample + remaining, preview_bytes)
+
+
+def diff_preview_data(path: Path, data: bytes, preview_bytes: int) -> tuple[str, bool]:
     if is_binary_sample(data):
         return "", True
 
@@ -388,6 +393,62 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
     outline = structural_outline(path, text)
     preview_lines = select_preview_lines(outline or text.splitlines())
     return fit_preview_lines(preview_lines, preview_bytes), False
+
+
+def revision_diff_preview(
+    repo: Path, path: Path, revision: str, preview_bytes: int
+) -> tuple[str, bool]:
+    if path.exists() or path.is_symlink():
+        current_preview, is_binary = confined_diff_preview(repo, path, preview_bytes)
+        if is_binary or not current_preview:
+            return "", is_binary
+
+    relative = path.relative_to(repo).as_posix()
+    try:
+        with subprocess.Popen(
+            ["git", "-C", str(repo), "cat-file", "blob", f"{revision}:{relative}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ) as process:
+            if process.stdout is None:
+                return "", False
+            data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
+            process.stdout.close()
+        if process.returncode and len(data) < DIRECT_SCOPE_PREVIEW_READ_BYTES:
+            return "", False
+    except (OSError, ValueError):
+        return "", False
+    return diff_preview_data(path, data, preview_bytes)
+
+
+def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, str] | None:
+    relative = path.relative_to(repo).as_posix()
+    arguments = (
+        ["ls-tree", "-z", head, "--", relative]
+        if mode == "revisions"
+        else ["ls-files", "--stage", "-z", "--", relative]
+    )
+    result = subprocess.run(
+        ["git", "-C", str(repo), *arguments], check=True, capture_output=True, text=True
+    )
+    if not result.stdout:
+        return None
+    fields = result.stdout.split("\0", 1)[0].split("\t", 1)[0].split()
+    return fields[0], fields[2] if mode == "revisions" else fields[1]
+
+
+def require_reviewable_diff_path(repo: Path, path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError
+        path.resolve(strict=True).relative_to(repo)
+    except (OSError, ValueError):
+        raise SystemExit(
+            "Changed diff paths must not contain symbolic links or non-regular files: "
+            + path.relative_to(repo).as_posix()
+        ) from None
 
 
 def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
@@ -629,7 +690,10 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         status = fields[index][0]
         index += 1
         if status in {"C", "R"}:
+            source = repo / fields[index]
             index += 1
+            if status == "R" and diff_path_is_security_relevant(source.relative_to(repo)):
+                changed.append((source, "D"))
         path = repo / fields[index]
         index += 1
         changed.append((path, status))
@@ -671,9 +735,23 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         if status in {"D", "U"}:
             preview = ""
         else:
-            preview, is_binary = confined_diff_preview(repo, path, args.preview_bytes)
-            if is_binary:
-                continue
+            entry = git_diff_entry(repo, path, args.mode, args.head)
+            if entry is not None and entry[0] == "160000":
+                preview = f"Git submodule commit {entry[1]}"
+            else:
+                if entry is not None and entry[0] == "120000":
+                    raise SystemExit(
+                        "Changed diff paths must not contain symbolic links: " + rel.as_posix()
+                    )
+                require_reviewable_diff_path(repo, path)
+                preview, is_binary = (
+                    revision_diff_preview(repo, path, args.head, args.preview_bytes)
+                    if args.mode == "revisions"
+                    else confined_diff_preview(repo, path, args.preview_bytes)
+                )
+                require_reviewable_diff_path(repo, path)
+                if is_binary:
+                    continue
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))

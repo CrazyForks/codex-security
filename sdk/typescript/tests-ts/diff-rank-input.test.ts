@@ -96,6 +96,7 @@ async function runDiffRankInput(
   fixture: TestRepository,
   mode: DiffMode,
   swap?: PathSwap,
+  head = "HEAD",
 ): Promise<RankInputRow[]> {
   const interpreter =
     Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -118,7 +119,7 @@ async function runDiffRankInput(
     "--mode",
     mode,
     "--head",
-    "HEAD",
+    head,
     "--out",
     output,
   ];
@@ -342,43 +343,134 @@ describe("diff rank input", () => {
     expect(rows[0]?.preview.length).toBeGreaterThan(0);
   });
 
+  test("previews revision changes from their selected head instead of the current checkout", async () => {
+    const fixture = await createRepository();
+    await Promise.all([
+      writeRepositoryFile(
+        fixture.repository,
+        "AGENTS.md",
+        "Require the head-only authorization policy.\n",
+      ),
+      writeRepositoryFile(
+        fixture.repository,
+        "SECURITY.md",
+        "Review the head-only credential boundary.\n",
+      ),
+    ]);
+    git(fixture.repository, "add", "AGENTS.md", "SECURITY.md");
+    git(fixture.repository, "commit", "-qm", "change security policy");
+    const head = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "checkout", "--quiet", fixture.base);
+
+    const rows = await runDiffRankInput(fixture, "revisions", undefined, head);
+
+    expect(rows).toEqual([
+      {
+        path: "AGENTS.md",
+        area: "diff",
+        preview: "Require the head-only authorization policy.",
+      },
+      {
+        path: "SECURITY.md",
+        area: "diff",
+        preview: "Review the head-only credential boundary.",
+      },
+    ]);
+  });
+
+  test("keeps security-relevant rename sources when destinations are excluded", async () => {
+    const fixture = await createRepository();
+    await mkdir(join(fixture.repository, "docs"));
+    await rename(
+      join(fixture.repository, "AGENTS.md"),
+      join(fixture.repository, "docs", "archived-policy.md"),
+    );
+    git(fixture.repository, "add", "-A");
+    git(fixture.repository, "commit", "-qm", "archive active security policy");
+
+    expect(await runDiffRankInput(fixture, "revisions")).toEqual([
+      { path: "AGENTS.md", area: "diff", preview: "" },
+    ]);
+  });
+
+  test("includes checked-in executable payloads from local GitHub actions", async () => {
+    const fixture = await createRepository();
+    const payloads = [
+      ".github/actions/local/dist/index.js",
+      ".github/actions/local/node_modules/pkg/index.js",
+    ];
+    await Promise.all(
+      payloads.map((path) =>
+        writeRepositoryFile(fixture.repository, path, "runTrustedAction();\n"),
+      ),
+    );
+    git(fixture.repository, "add", "--force", ...payloads);
+    git(fixture.repository, "commit", "-qm", "check in local action payloads");
+
+    expect(
+      (await runDiffRankInput(fixture, "revisions")).map(({ path }) => path),
+    ).toEqual(payloads);
+  });
+
+  test("records the pinned commit for local-action submodules", async () => {
+    const fixture = await createRepository();
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},.github/actions/local`,
+    );
+    git(fixture.repository, "commit", "-qm", "pin local action submodule");
+
+    expect(await runDiffRankInput(fixture, "revisions")).toEqual([
+      {
+        path: ".github/actions/local",
+        area: "diff",
+        preview: `Git submodule commit ${fixture.base}`,
+      },
+    ]);
+  });
+
   test.skipIf(process.platform === "win32")(
-    "never previews committed symlinks or repository paths escaping through a symlinked parent",
+    "refuses to assign changed workflow symlinks to deep reviewers",
+    async () => {
+      const fixture = await createRepository();
+      const externalFile = join(fixture.root, "external-workflow.yml");
+      await writeFile(externalFile, "name: external secret\n");
+      await mkdir(join(fixture.repository, ".github", "workflows"), {
+        recursive: true,
+      });
+      await symlink(
+        externalFile,
+        join(fixture.repository, ".github", "workflows", "deploy.yml"),
+      );
+      git(fixture.repository, "add", ".github/workflows/deploy.yml");
+
+      await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
+        /symbolic links/,
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "refuses repository paths escaping through a symlinked parent",
     async () => {
       const fixture = await createRepository();
       const canary = "CODEX_SECURITY_SYNTHETIC_EXTERNAL_SECRET_7e98526d";
-      const externalFile = join(fixture.root, "external-canary.py");
       const externalDirectory = join(fixture.root, "external-directory");
+      const externalFile = join(externalDirectory, "escaped.py");
       await mkdir(externalDirectory);
       await Promise.all([
         writeFile(externalFile, `secret = '${canary}'\n`),
-        writeFile(
-          join(externalDirectory, "escaped.py"),
-          `secret = '${canary}'\n`,
-        ),
         writeRepositoryFile(
           fixture.repository,
           "src/parent/escaped.py",
           "print('safe committed source')\n",
         ),
-        writeRepositoryFile(
-          fixture.repository,
-          "src/app.ts",
-          "export const value = 2;\n",
-        ),
-        mkdir(join(fixture.repository, ".github", "workflows"), {
-          recursive: true,
-        }),
-      ]);
-      await Promise.all([
-        symlink(externalFile, join(fixture.repository, "src", "linked.py")),
-        symlink(
-          externalFile,
-          join(fixture.repository, ".github", "workflows", "linked.yml"),
-        ),
       ]);
       git(fixture.repository, "add", "-A");
-      git(fixture.repository, "commit", "-qm", "add changed symlinks");
+      git(fixture.repository, "commit", "-qm", "add changed source");
 
       await rm(join(fixture.repository, "src", "parent"), {
         recursive: true,
@@ -390,28 +482,15 @@ describe("diff rank input", () => {
         "dir",
       );
 
-      const rows = await runDiffRankInput(fixture, "revisions");
-
-      expect(rows.map((row) => row.path)).toEqual(
-        [
-          ".github/workflows/linked.yml",
-          "src/app.ts",
-          "src/linked.py",
-          "src/parent/escaped.py",
-        ].sort(),
+      await expect(runDiffRankInput(fixture, "revisions")).rejects.toThrow(
+        /symbolic links/,
       );
-      expect(
-        rows
-          .filter((row) => row.path !== "src/app.ts")
-          .every((row) => row.preview === ""),
-      ).toBe(true);
-      expect(JSON.stringify(rows)).not.toContain(canary);
       expect(await readFile(externalFile, "utf8")).toContain(canary);
     },
   );
 
   test.skipIf(process.platform === "win32")(
-    "never previews staged symlinks in a local patch",
+    "refuses staged symlinks in a local patch",
     async () => {
       const fixture = await createRepository();
       const canary = "CODEX_SECURITY_SYNTHETIC_LOCAL_PATCH_SECRET_ef9b01d2";
@@ -425,22 +504,15 @@ describe("diff rank input", () => {
         "export const value = 2;\n",
       );
 
-      const rows = await runDiffRankInput(fixture, "local-patch");
-
-      expect(rows.map((row) => row.path)).toEqual([
-        "src/app.ts",
-        "src/linked.py",
-      ]);
-      expect(rows.find((row) => row.path === "src/linked.py")?.preview).toBe(
-        "",
+      await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
+        /symbolic links/,
       );
-      expect(JSON.stringify(rows)).not.toContain(canary);
       expect(await readFile(externalFile, "utf8")).toContain(canary);
     },
   );
 
   test.skipIf(process.platform === "win32")(
-    "inventories tracked files replaced with symlinks in committed and local diffs",
+    "refuses tracked files replaced with symlinks in committed and local diffs",
     async () => {
       for (const mode of ["revisions", "local-patch"] as const) {
         const fixture = await createRepository();
@@ -461,12 +533,9 @@ describe("diff rank input", () => {
           );
         }
 
-        const rows = await runDiffRankInput(fixture, mode);
-
-        expect(rows).toEqual([
-          { path: "src/app.ts", area: "diff", preview: "" },
-        ]);
-        expect(JSON.stringify(rows)).not.toContain(canary);
+        await expect(runDiffRankInput(fixture, mode)).rejects.toThrow(
+          /symbolic links/,
+        );
         expect(await readFile(externalFile, "utf8")).toContain(canary);
       }
     },
@@ -487,19 +556,18 @@ describe("diff rank input", () => {
       git(fixture.repository, "add", "src/app.ts");
       git(fixture.repository, "commit", "-qm", "update reviewed source");
 
-      const rows = await runDiffRankInput(fixture, "revisions", {
-        path: "src/app.ts",
-        replacement: externalFile,
-      });
-
-      expect(rows).toEqual([{ path: "src/app.ts", area: "diff", preview: "" }]);
-      expect(JSON.stringify(rows)).not.toContain(canary);
+      await expect(
+        runDiffRankInput(fixture, "revisions", {
+          path: "src/app.ts",
+          replacement: externalFile,
+        }),
+      ).rejects.toThrow(/symbolic links/);
       expect(await readFile(externalFile, "utf8")).toContain(canary);
     },
   );
 
   test.skipIf(process.platform === "win32")(
-    "inventories a changed FIFO without blocking or reading it",
+    "refuses a changed FIFO without blocking or reading it",
     async () => {
       const fixture = await createRepository();
       await writeRepositoryFile(
@@ -514,9 +582,9 @@ describe("diff rank input", () => {
       await rm(trackedFile);
       execFileSync("mkfifo", [trackedFile], { stdio: "pipe" });
 
-      const rows = await runDiffRankInput(fixture, "revisions");
-
-      expect(rows).toEqual([{ path: "src/app.ts", area: "diff", preview: "" }]);
+      await expect(runDiffRankInput(fixture, "revisions")).rejects.toThrow(
+        /non-regular files/,
+      );
     },
   );
 
