@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from filesystem_identity import stored_filesystem_identity_matches
 from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
@@ -43,15 +44,64 @@ def _same_repository(
         or Path(before_git_dir).resolve() != Path(after_git_dir).resolve()
     ):
         return False
+    before_worktree = git_output(before_target, "rev-parse", "--show-toplevel")
     after_worktree = git_output(after_target, "rev-parse", "--show-toplevel")
     registered_worktrees = git_output(before_target, "worktree", "list", "--porcelain", "-z")
-    if after_worktree is None or registered_worktrees is None:
+    if before_worktree is None or after_worktree is None or registered_worktrees is None:
         return False
+    before_worktree_path = Path(before_worktree).resolve()
     after_worktree_path = Path(after_worktree).resolve()
+    if before_worktree_path == after_worktree_path and not (
+        before_target.resolve().is_relative_to(after_target.resolve())
+        or after_target.resolve().is_relative_to(before_target.resolve())
+    ):
+        return False
     return after_target.resolve().is_relative_to(after_worktree_path) and any(
         record.startswith("worktree ")
         and Path(record.removeprefix("worktree ")).resolve() == after_worktree_path
         for record in registered_worktrees.split("\0")
+    )
+
+
+def _requested_repository(
+    connection: sqlite3.Connection, repository: Path
+) -> tuple[sqlite3.Row, str | None]:
+    requested = connection.execute(
+        """
+        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
+            ? AS target_path
+        """,
+        (str(repository), str(repository)),
+    ).fetchone()
+    target_id = requested["target_id"]
+    if not target_id:
+        return requested, None
+    recorded = connection.execute(
+        """
+        SELECT target_device, target_inode
+        FROM scans
+        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+        (target_id,),
+    ).fetchone()
+    if recorded is None:
+        return requested, None
+    try:
+        metadata = repository.stat()
+    except OSError:
+        metadata = None
+    if metadata is not None and (
+        stored_filesystem_identity_matches(recorded["target_device"], metadata.st_dev)
+        and stored_filesystem_identity_matches(recorded["target_inode"], metadata.st_ino)
+    ):
+        return requested, None
+    return (
+        connection.execute(
+            "SELECT '' AS target_id, ? AS target_path", (str(repository),)
+        ).fetchone(),
+        target_id,
     )
 
 
@@ -116,13 +166,7 @@ def list_scans(
     values: list[Any] = []
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
-        requested_repository = connection.execute(
-            """
-            SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-                ? AS target_path
-            """,
-            (str(repository), str(repository)),
-        ).fetchone()
+        requested_repository, replaced_target_id = _requested_repository(connection, repository)
         requested_target_id = requested_repository["target_id"]
         related_target_ids = [requested_target_id] if requested_target_id else []
         repository_root = git_output(repository, "rev-parse", "--show-toplevel")
@@ -222,6 +266,9 @@ def list_scans(
             "AND path_owner.id IS NOT scans.target_id)"
         ]
         values.extend(repository_paths)
+        if replaced_target_id is not None:
+            repository_clauses[0] += " AND scans.target_id IS NOT ?"
+            values.append(replaced_target_id)
         if related_target_ids:
             placeholders = ", ".join("?" for _ in related_target_ids)
             repository_clauses.append(f"scans.target_id IN ({placeholders})")
@@ -363,13 +410,7 @@ def list_unmatched_scan_pairs(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
-    requested = connection.execute(
-        """
-        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-            ? AS target_path
-        """,
-        (str(repository), str(repository)),
-    ).fetchone()
+    requested, _replaced_target_id = _requested_repository(connection, repository)
     selected = [
         scan
         for scan in connection.execute(

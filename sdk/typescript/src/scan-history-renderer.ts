@@ -346,6 +346,19 @@ export function renderScanHistory(
       }
       return undefined;
     };
+    const appendDescriptions = (
+      sections: string[],
+      value: JsonObject,
+      key: string,
+      label: string,
+    ): void => {
+      const items = value[key];
+      if (!Array.isArray(items)) return;
+      for (const item of items) {
+        const detail = description(item);
+        if (detail !== undefined) sections.push(`${label}: ${detail}`);
+      }
+    };
     for (const [label, key] of [
       ["SEVERITY", "severity"],
       ["CONFIDENCE", "confidence"],
@@ -386,29 +399,12 @@ export function renderScanHistory(
           if (typeof value["method"] === "string") {
             sections.push(`Method: ${value["method"]}`);
           }
-          const assertions = value["assertions"];
-          if (Array.isArray(assertions)) {
-            sections.push(
-              ...assertions
-                .filter(
-                  (assertion): assertion is string =>
-                    typeof assertion === "string",
-                )
-                .map((assertion) => `Verified: ${assertion}`),
-            );
-          }
           for (const [evidenceLabel, evidenceKey] of [
+            ["Verified", "assertions"],
             ["Evidence", "evidence"],
             ["Counterevidence", "counterEvidence"],
           ] as const) {
-            const items = value[evidenceKey];
-            if (!Array.isArray(items)) continue;
-            for (const item of items) {
-              const detail = description(item);
-              if (detail !== undefined) {
-                sections.push(`${evidenceLabel}: ${detail}`);
-              }
-            }
+            appendDescriptions(sections, value, evidenceKey, evidenceLabel);
           }
         }
         if (key === "attackPath") {
@@ -452,14 +448,12 @@ export function renderScanHistory(
               }
             }
             if (nestedKey === "reachability") {
-              const preconditions = nestedValue["preconditions"];
-              if (!Array.isArray(preconditions)) continue;
-              for (const precondition of preconditions) {
-                const detail = description(precondition);
-                if (detail !== undefined) {
-                  sections.push(`Precondition: ${detail}`);
-                }
-              }
+              appendDescriptions(
+                sections,
+                nestedValue,
+                "preconditions",
+                "Precondition",
+              );
             }
           }
         }
@@ -473,14 +467,7 @@ export function renderScanHistory(
                 ]
               : [];
         for (const [caveatLabel, caveatKey] of caveats) {
-          const items = value[caveatKey];
-          if (!Array.isArray(items)) continue;
-          for (const item of items) {
-            const detail = description(item);
-            if (detail !== undefined) {
-              sections.push(`${caveatLabel}: ${detail}`);
-            }
-          }
+          appendDescriptions(sections, value, caveatKey, caveatLabel);
         }
       }
       if (sections.length > 0) {
@@ -511,13 +498,6 @@ export function renderScanHistory(
     if (evidenceEntries.length > 0) {
       lines.push("", `  ${strong("CODE EVIDENCE")}`);
       for (const evidence of evidenceEntries) {
-        if (
-          typeof evidence !== "object" ||
-          evidence === null ||
-          Array.isArray(evidence)
-        ) {
-          continue;
-        }
         if (typeof evidence["label"] === "string") {
           lines.push(`    ${strong(clean(evidence["label"]))}`);
         }
