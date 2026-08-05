@@ -444,7 +444,13 @@ async function acquireRecoveryMarker(
     throw new Error("A multiscan supervisor is already running.");
   }
   const observed = await lstat(path);
-  const replacement = `${path}.pending-${owner.pid}`;
+  const replacement = join(
+    dirname(path),
+    `.lock.recovery.pending-${owner.pid}`,
+  );
+  if (replacement === path) {
+    throw new Error("A multiscan supervisor is already running.");
+  }
   await acquireRecoveryMarker(replacement, pending, token);
   try {
     const current = await readLockOwner(path);
@@ -483,11 +489,7 @@ async function readLockOwner(path: string): Promise<MultiscanLockOwner | null> {
       throw error;
     }
   }
-  if (
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.size > MAX_LOCK_OWNER_BYTES
-  ) {
+  if (!metadata.isFile() || metadata.size > MAX_LOCK_OWNER_BYTES) {
     return null;
   }
   let value: unknown;

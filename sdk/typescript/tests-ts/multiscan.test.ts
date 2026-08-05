@@ -555,6 +555,10 @@ describe("multiscan", () => {
           `${recovery}.pending-999999999`,
           JSON.stringify({ pid: 999_999_998, token: "abandoned-takeover" }),
         );
+        await writeFile(
+          `${recovery}.pending-999999998`,
+          JSON.stringify({ pid: 999_999_997, token: "older-takeover" }),
+        );
       }
 
       let active = 0;
