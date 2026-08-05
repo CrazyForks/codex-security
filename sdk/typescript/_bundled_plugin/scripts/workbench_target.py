@@ -16,7 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from workbench_constants import GIT_REPOSITORY_ENVIRONMENT, trusted_git_executable
+from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
 def git_output(
@@ -54,21 +54,10 @@ def git_command(
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
-    executable = trusted_git_executable(target)
-    command = [
-        executable or "git",
-        "--no-replace-objects",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        str(target),
-    ]
+    command = ["git", "-c", "core.fsmonitor=false", "-C", str(target)]
     if git_dir is not None and work_tree is not None:
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
-    if executable is None:
-        empty_output = "" if text else b""
-        return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
     try:
         return subprocess.run(
             full_command,
@@ -91,40 +80,10 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
-def git_diff_content_digest(target: Path, base_revision: str, head_revision: str) -> str:
-    changed_objects = git_bytes(
-        target,
-        "diff-tree",
-        "-r",
-        "--raw",
-        "-z",
-        "--no-commit-id",
-        "--no-abbrev",
-        "--no-renames",
-        base_revision,
-        head_revision,
-        "--",
-        ".",
-    )
-    if changed_objects is None:
-        raise SystemExit("Could not snapshot the selected Git diff.")
-    digest = hashlib.sha256()
-    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
-    update_digest_field(digest, b"git-tree-diff", changed_objects)
-    return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
-
-
-def worktree_content_digest(
-    target: Path, *, legacy: bool = False, include_conflicted_index: bool = True
-) -> str:
+def worktree_content_digest(target: Path) -> str:
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
-    return worktree_content_digest_for_context(
-        repository,
-        pathspec,
-        legacy=legacy,
-        include_conflicted_index=include_conflicted_index,
-    )
+    return worktree_content_digest_for_context(repository, pathspec)
 
 
 def worktree_content_digest_for_context(
@@ -133,8 +92,6 @@ def worktree_content_digest_for_context(
     *,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-    legacy: bool = False,
-    include_conflicted_index: bool = True,
 ) -> str:
     tracked = git_bytes(
         repository,
@@ -150,61 +107,6 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if legacy:
-        staged = b""
-        unstaged = b""
-        conflicted_index = b""
-    else:
-        staged = git_bytes(
-            repository,
-            "diff",
-            "--cached",
-            "--binary",
-            "--full-index",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            "HEAD",
-            "--",
-            pathspec,
-            git_dir=git_dir,
-            work_tree=work_tree,
-        )
-        unstaged = git_bytes(
-            repository,
-            "diff",
-            "--binary",
-            "--full-index",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            "--",
-            pathspec,
-            git_dir=git_dir,
-            work_tree=work_tree,
-        )
-        index_entries = git_bytes(
-            repository,
-            "ls-files",
-            "--stage",
-            "-z",
-            "--",
-            pathspec,
-            git_dir=git_dir,
-            work_tree=work_tree,
-        )
-        if index_entries is None:
-            raise SystemExit("Could not snapshot the selected Git index.")
-        conflicts: list[bytes] = []
-        for entry in (row for row in index_entries.split(b"\0") if row):
-            try:
-                metadata, _path = entry.split(b"\t", 1)
-                _mode, _object_id, stage = metadata.split(b" ", 2)
-            except ValueError as error:
-                raise SystemExit("Could not snapshot the selected Git index.") from error
-            if stage != b"0":
-                conflicts.append(entry)
-        conflicted_index = b"\0".join(sorted(conflicts)) if include_conflicted_index else b""
     untracked = git_bytes(
         repository,
         "ls-files",
@@ -216,16 +118,11 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if tracked is None or staged is None or unstaged is None or untracked is None:
+    if tracked is None or untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
     update_digest_field(digest, b"tracked-diff", tracked)
-    if staged or unstaged:
-        update_digest_field(digest, b"index-diff", staged)
-        update_digest_field(digest, b"working-tree-diff", unstaged)
-    if conflicted_index:
-        update_digest_field(digest, b"conflicted-index", conflicted_index)
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
         path = (work_tree or repository) / relative_path
@@ -316,10 +213,7 @@ def git_submodule_paths(target: Path) -> tuple[Path, ...]:
 
 
 def require_clean_submodule_worktrees(target: Path) -> None:
-    expected_revisions: dict[Path, set[str]] = {}
-    for submodule, revision in git_submodule_entries(target):
-        expected_revisions.setdefault(submodule, set()).add(revision)
-    for submodule, revisions in expected_revisions.items():
+    for submodule, expected_revision in git_submodule_entries(target):
         relative_path = str(submodule.relative_to(target))
         if not submodule.exists():
             continue
@@ -336,7 +230,7 @@ def require_clean_submodule_worktrees(target: Path) -> None:
             raise SystemExit(
                 f"Could not inspect initialized Git submodule contents: {relative_path}"
             )
-        if git_output(submodule, "rev-parse", "HEAD") not in revisions:
+        if git_output(submodule, "rev-parse", "HEAD") != expected_revision:
             raise SystemExit(
                 "Initialized Git submodules must be checked out at the revision recorded "
                 f"by the parent repository: {relative_path}"

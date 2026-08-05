@@ -47,7 +47,6 @@ from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
-    _validate_existing_seal,
     _write_prepared_scan_finalization,
     csv_cell,
     finalize_scan,
@@ -107,7 +106,6 @@ from workbench_target import (
     directory_content_digest,
     directory_snapshot_regular_file_count,
     git_command,
-    git_diff_content_digest,
     git_output,
     git_revision,
     git_submodule_paths,
@@ -375,28 +373,12 @@ def require_diff_target(
             )
             if supplied_base != parent:
                 raise SystemExit("Commit base revision must match the selected commit's parent.")
-        current_digest = git_diff_content_digest(target, parent, head)
-        if content_digest and content_digest != current_digest:
-            raise SystemExit("The selected commit contents changed. Select the commit again.")
-        return {
-            "kind": kind,
-            "baseRevision": parent,
-            "headRevision": head,
-            "contentDigest": current_digest,
-        }
+        return {"kind": kind, "baseRevision": parent, "headRevision": head}
     base = resolve_git_commit(target, base_revision or "", "Base revision")
     head = resolve_git_commit(target, head_revision or "", "Head revision")
     if base == head:
         raise SystemExit("Base and head revisions must identify different commits.")
-    current_digest = git_diff_content_digest(target, base, head)
-    if content_digest and content_digest != current_digest:
-        raise SystemExit("The selected range contents changed. Select the range again.")
-    return {
-        "kind": kind,
-        "baseRevision": base,
-        "headRevision": head,
-        "contentDigest": current_digest,
-    }
+    return {"kind": kind, "baseRevision": base, "headRevision": head}
 
 
 def inspect_setup_values(
@@ -558,7 +540,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_content_digest"]:
+        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -626,9 +608,13 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             raise SystemExit(
                 "scan-manifest.json target headRevision must match the workbench diff target."
             )
-        if target.get("snapshotDigest") != scan["diff_content_digest"]:
+        if (
+            scan["diff_target_kind"] == "working_tree"
+            and target.get("snapshotDigest") != scan["diff_content_digest"]
+        ):
             raise SystemExit(
-                "scan-manifest.json target snapshotDigest must match the selected diff contents."
+                "scan-manifest.json target snapshotDigest must match the selected "
+                "working-tree contents."
             )
     scope = manifest_scan.get("scope")
     if not isinstance(scope, dict):
@@ -1401,24 +1387,10 @@ def complete_scan_locked(
     thread_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    scan = backfill_legacy_immutable_diff_digest(connection, scan)
     if scan["status"] == "complete":
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
-        manifest = read_json_object(scan_dir / ARTIFACTS["manifest"])
-        verify_manifest_binding(scan, manifest)
-        if (
-            scan["mode"] == "diff"
-            and scan["diff_target_kind"] in {"commit", "range"}
-            and scan["diff_content_digest"] is None
-        ):
-            try:
-                _validate_existing_seal(scan_dir, manifest["scan"])
-            except ContractError as exc:
-                raise SystemExit(str(exc)) from exc
-            manifest_digest = published_manifest_digest(scan_dir, manifest)
-            pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
-            return scan_context(connection, scan["id"])
+        verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
         try:
             manifest, _, _ = finalize_scan(
                 scan_dir,
@@ -1585,60 +1557,6 @@ def complete_scan_locked(
     return context
 
 
-def backfill_legacy_immutable_diff_digest(
-    connection: sqlite3.Connection, scan: sqlite3.Row
-) -> sqlite3.Row:
-    if (
-        scan["mode"] != "diff"
-        or scan["diff_target_kind"] not in {"commit", "range"}
-        or scan["diff_content_digest"] is not None
-    ):
-        return scan
-    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-    manifest_path = scan_dir / ARTIFACTS["manifest"]
-    manifest = read_json_object(manifest_path) if manifest_path.is_file() else None
-    manifest_scan = manifest.get("scan") if isinstance(manifest, dict) else None
-    sealed = isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None
-    if scan["status"] == "complete" or sealed:
-        require_recorded_manifest_digest(scan, scan_dir)
-        target = manifest_scan.get("target", {}) if isinstance(manifest_scan, dict) else {}
-        digest = target.get("snapshotDigest") if isinstance(target, dict) else None
-        if digest is None:
-            return scan
-        if not isinstance(digest, str) or re.fullmatch(
-            r"codex-security-snapshot/v1:sha256:[a-f0-9]{64}", digest
-        ) is None:
-            raise SystemExit("Sealed immutable diff scan is missing its snapshot digest.")
-        completed_at = manifest_scan.get("completedAt")
-        if not isinstance(completed_at, str):
-            raise SystemExit("Sealed immutable diff scan is missing its completion timestamp.")
-        try:
-            _prepare_scan_finalization(
-                scan_dir,
-                expected_coverage_mode=expected_coverage_mode(scan),
-                completion_binding=workbench_completion_binding(scan, completed_at),
-            )
-        except ContractError as exc:
-            raise SystemExit(str(exc)) from exc
-    else:
-        target = require_scan_target_identity(scan)
-        digest = git_diff_content_digest(
-            target,
-            scan["diff_base_revision"],
-            scan["diff_head_revision"],
-        )
-    with connection:
-        connection.execute(
-            "UPDATE scans SET diff_content_digest = ? WHERE id = ? AND diff_content_digest IS NULL",
-            (digest, scan["id"]),
-        )
-        connection.execute(
-            "UPDATE workspaces SET diff_content_digest = ? WHERE id = ? AND diff_content_digest IS NULL",
-            (digest, scan["workspace_id"]),
-        )
-    return require_scan(connection, scan["id"])
-
-
 def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     repository = require_target(args.repository)
     require_scannable_target(repository)
@@ -1666,8 +1584,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if head != current_head:
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
-        else:
-            diff_target["contentDigest"] = git_diff_content_digest(repository, base, head)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (

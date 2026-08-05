@@ -19,14 +19,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
-import {
-  afterEach,
-  describe,
-  expect,
-  mock,
-  setDefaultTimeout,
-  test,
-} from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -70,7 +63,6 @@ type ScanObserverName = Parameters<
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
-if (process.platform === "win32") setDefaultTimeout(60_000);
 const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
 const EXTERNAL_PROVIDER_CASES = [
   [
@@ -3748,7 +3740,6 @@ describe("CodexSecurity orchestration", () => {
           const runtime = preparedRuntime(codexHome);
           return {
             ...runtime,
-            environment: { PATH: process.env["PATH"] },
             plugin: {
               ...(runtime["plugin"] as Record<string, unknown>),
               installedRoot: join(
@@ -3802,7 +3793,6 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
       CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
-      CODEX_SECURITY_GIT: expect.stringMatching(/git(?:\.exe)?$/iu),
     });
     expect(environment).not.toHaveProperty("CODEX_SECURITY_TARGET_PATHS_JSON");
     const targetPathsFile = environment?.["CODEX_SECURITY_TARGET_PATHS_FILE"];

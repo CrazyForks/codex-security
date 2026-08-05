@@ -104,10 +104,6 @@ import {
   validatedGitEnvironment,
   validateMode,
 } from "./targets.js";
-import {
-  resolveTrustedExecutable,
-  trustedExecutablePath,
-} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -563,20 +559,6 @@ export class CodexSecurity {
         protectedRoot,
         signal,
       });
-      const pluginEnvironment = selectedScanEnvironment(
-        runtime.environment,
-        options.auth,
-        modelProvider,
-      );
-      const git = await resolveTrustedExecutable(
-        "git",
-        pluginEnvironment,
-        protectedRoot,
-      );
-      const sanitizedPath =
-        git === null
-          ? await trustedExecutablePath("git", pluginEnvironment, protectedRoot)
-          : undefined;
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
@@ -715,11 +697,13 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...pluginEnvironment,
+          ...selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            modelProvider,
+          ),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
-        git,
-        protectedRoot,
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
@@ -891,9 +875,13 @@ export class CodexSecurity {
       const environment = {
         ...pluginExecutionEnvironment(
           python,
-          withoutCodexHome(pluginEnvironment),
-          git,
-          sanitizedPath,
+          withoutCodexHome(
+            selectedScanEnvironment(
+              runtime.environment,
+              options.auth,
+              modelProvider,
+            ),
+          ),
         ),
         ...(externalProvider === null
           ? {}

@@ -1,14 +1,6 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import {
-  delimiter,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface TrustedExecutable {
   executable: string;
@@ -20,42 +12,9 @@ export async function resolveTrustedExecutable(
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string,
 ): Promise<TrustedExecutable | null> {
-  const resolved = await inspectTrustedExecutable(
-    candidate,
-    environment,
-    protectedRoot,
+  const root = await realpath(protectedRoot).catch(() =>
+    resolve(protectedRoot),
   );
-  return resolved.executable === null
-    ? null
-    : { executable: resolved.executable, environment: resolved.environment };
-}
-
-export async function trustedExecutablePath(
-  candidate: string,
-  environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
-): Promise<string> {
-  return (await inspectTrustedExecutable(candidate, environment, protectedRoot))
-    .environment["PATH"]!;
-}
-
-async function inspectTrustedExecutable(
-  candidate: string,
-  environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
-): Promise<{
-  executable: string | null;
-  environment: Record<string, string | undefined>;
-}> {
-  let root = await realpath(protectedRoot).catch(() => resolve(protectedRoot));
-  let ancestor = dirname(root);
-  while (true) {
-    const marker = await stat(join(ancestor, ".git")).catch(() => null);
-    if (marker?.isDirectory() || marker?.isFile()) root = ancestor;
-    const parent = dirname(ancestor);
-    if (parent === ancestor) break;
-    ancestor = parent;
-  }
   const path = Object.entries(environment).find(
     ([name]) => name.toUpperCase() === "PATH",
   )?.[1];
@@ -111,6 +70,8 @@ async function inspectTrustedExecutable(
       continue;
     }
   }
+  if (executable === null) return null;
+
   const sanitizedEnvironment = { ...environment };
   for (const name of Object.keys(sanitizedEnvironment)) {
     if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];

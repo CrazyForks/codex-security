@@ -46,11 +46,7 @@ import {
   redactedErrorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
-import {
-  resolveTrustedExecutable,
-  trustedExecutablePath,
-} from "./trusted-executable.js";
-import type { TrustedExecutable } from "./trusted-executable.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -101,8 +97,6 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
-  git?: TrustedExecutable | null;
-  protectedRoot?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1242,26 +1236,6 @@ export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
 ): Promise<JsonObject> {
-  const git =
-    options.git === undefined
-      ? await resolveTrustedExecutable(
-          "git",
-          options.environment,
-          options.protectedRoot ?? process.cwd(),
-        )
-      : options.git;
-  const environment = pluginExecutionEnvironment(
-    options.python,
-    options.environment,
-    git,
-    git === null
-      ? await trustedExecutablePath(
-          "git",
-          options.environment,
-          options.protectedRoot ?? process.cwd(),
-        )
-      : undefined,
-  );
   let stdout: string;
   try {
     ({ stdout } = await execFile(
@@ -1274,7 +1248,7 @@ export async function runWorkbench(
       ],
       {
         env: Object.fromEntries(
-          Object.entries(environment).filter(
+          Object.entries(options.environment).filter(
             ([name]) =>
               name.toUpperCase() !== "OPENAI_API_KEY" &&
               name.toUpperCase() !== "CODEX_API_KEY" &&
@@ -2430,22 +2404,8 @@ export async function resolvePluginPython(
 export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
-  git?: TrustedExecutable | null,
-  sanitizedPath?: string,
 ): ProcessEnvironment {
-  const result = { ...environment };
-  if (git !== undefined) {
-    for (const name of Object.keys(result)) {
-      const normalized = name.toUpperCase();
-      if (normalized === "PATH" || normalized.startsWith("GIT_")) {
-        delete result[name];
-      }
-    }
-    result["PATH"] = git?.environment["PATH"] ?? sanitizedPath ?? "";
-    result["CODEX_SECURITY_GIT"] = git?.executable ?? "";
-  }
-  result["PYTHON"] = python;
-  return result;
+  return { ...environment, PYTHON: python };
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {

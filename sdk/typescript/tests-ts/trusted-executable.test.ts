@@ -110,42 +110,6 @@ describe("trusted executable resolution", () => {
     },
   );
 
-  test.skipIf(process.platform === "win32")(
-    "rejects Git shims owned by the outer checkout of a nested repository",
-    async () => {
-      const root = await temporaryDirectory();
-      const checkout = join(root, "checkout");
-      const nested = join(checkout, "vendor", "nested");
-      const unsafe = join(checkout, "node_modules", ".bin");
-      const trusted = join(root, "trusted");
-      await Promise.all([
-        mkdir(join(checkout, ".git"), { recursive: true }),
-        mkdir(join(nested, ".git"), { recursive: true }),
-        mkdir(unsafe, { recursive: true }),
-        mkdir(trusted),
-      ]);
-      await Promise.all([
-        writeFile(join(unsafe, "git"), "#!/bin/sh\nexit 1\n", {
-          mode: 0o700,
-        }),
-        writeFile(join(trusted, "git"), "#!/bin/sh\nexit 0\n", {
-          mode: 0o700,
-        }),
-      ]);
-
-      expect(
-        await resolveTrustedExecutable(
-          "git",
-          { PATH: [unsafe, trusted].join(delimiter) },
-          nested,
-        ),
-      ).toEqual({
-        executable: join(trusted, "git"),
-        environment: { PATH: trusted },
-      });
-    },
-  );
-
   test("selects runnable Windows executables ahead of extensionless and batch files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

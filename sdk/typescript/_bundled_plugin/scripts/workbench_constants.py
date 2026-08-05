@@ -1,8 +1,6 @@
 """Shared constants for the Codex Security workbench."""
 
 import argparse
-import os
-from pathlib import Path
 
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
@@ -73,58 +71,6 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_WORK_TREE",
 )
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
-
-def trusted_git_executable(protected_root: Path | None = None) -> str | None:
-    root = protected_root.resolve() if protected_root is not None else None
-    if root is not None:
-        for ancestor in root.parents:
-            marker = ancestor / ".git"
-            try:
-                if marker.is_dir() or marker.is_file():
-                    root = ancestor
-            except OSError:
-                continue
-    executable = os.environ.get("CODEX_SECURITY_GIT")
-    if not executable:
-        names = ("git.exe", "git.com") if os.name == "nt" else ("git",)
-        for entry in os.environ.get("PATH", "").split(os.pathsep):
-            if not entry:
-                continue
-            for name in names:
-                executable_path = (Path(entry) / name).absolute()
-                try:
-                    candidate = executable_path.resolve(strict=True)
-                except OSError:
-                    continue
-                if root is not None and (
-                    candidate == root
-                    or root in candidate.parents
-                    or executable_path == root
-                    or root in executable_path.parents
-                ):
-                    continue
-                if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(executable_path)
-        return None
-    candidate = Path(executable)
-    if not candidate.is_absolute():
-        raise SystemExit("CODEX_SECURITY_GIT must name an absolute trusted executable.")
-    try:
-        canonical = candidate.resolve(strict=True)
-    except OSError as exc:
-        raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.") from exc
-    if not canonical.is_file() or not os.access(canonical, os.X_OK):
-        raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.")
-    if root is not None:
-        if (
-            canonical == root
-            or root in canonical.parents
-            or candidate == root
-            or root in candidate.parents
-        ):
-            raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
-    return str(candidate)
 
 
 def main() -> None:

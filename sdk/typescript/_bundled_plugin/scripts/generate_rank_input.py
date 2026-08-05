@@ -47,8 +47,6 @@ from rank_preview import (
     select_preview_lines,
     structural_outline,
 )
-from workbench_constants import GIT_REPOSITORY_ENVIRONMENT, trusted_git_executable
-from workbench_target import git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -128,13 +126,12 @@ EXCLUDED_FILENAMES = {
 
 SECURITY_RELEVANT_DIFF_FILENAMES = {
     ".dockerignore",
-    ".gitmodules",
     "AGENTS.md",
     "CLAUDE.md",
     "CODEOWNERS",
     "Containerfile",
     "Dockerfile",
-    "Jenkinsfile",
+    "SECURITY.md",
     "compose.yaml",
     "compose.yml",
     "docker-compose.yaml",
@@ -145,37 +142,6 @@ SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES = {
     "actions",
     "scripts",
     "workflows",
-}
-
-SECURITY_RELEVANT_DIFF_EXCLUDED_DIRS = {
-    ".git",
-    "doc",
-    "docs",
-    "example",
-    "examples",
-    "external",
-    "extern",
-    "fixture",
-    "fixtures",
-    "node_modules",
-    "sample",
-    "samples",
-    "third-party",
-    "third_party",
-    "vendor",
-}
-
-SECURITY_RELEVANT_DIFF_EXTENSIONS = {
-    *TEXT_CODE_EXTENSIONS,
-    ".cjs",
-    ".conf",
-    ".env",
-    ".hcl",
-    ".ini",
-    ".properties",
-    ".rego",
-    ".tf",
-    ".tfvars",
 }
 
 SECURITY_RELEVANT_GITHUB_DIFF_FILENAMES = {
@@ -346,6 +312,8 @@ def path_is_excluded(path: Path) -> bool:
 
 
 def diff_path_is_security_relevant(path: Path) -> bool:
+    if path.parts[0] in {".circleci", ".devcontainer"}:
+        return True
     if path.name in SECURITY_RELEVANT_DIFF_FILENAMES:
         return True
     if path.name.startswith(("Dockerfile.", "Containerfile.")):
@@ -357,8 +325,6 @@ def diff_path_is_security_relevant(path: Path) -> bool:
         and path.parts[0] == ".github"
         and (
             path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES
-            or path.parts[1] == "instructions"
-            and path.name.endswith(".instructions.md")
             or len(path.parts) == 2
             and path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_FILENAMES
         )
@@ -366,48 +332,31 @@ def diff_path_is_security_relevant(path: Path) -> bool:
 
 
 def diff_path_is_included(path: Path) -> bool:
-    if path.parts in {(".circleci", "config.yml"), ("docs", "CODEOWNERS")}:
+    if path.parts == ("docs", "CODEOWNERS"):
         return True
-    if (
-        len(path.parts) >= 2
-        and path.parts[0] == ".github"
-        and path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES
-    ):
-        return ".git" not in path.parts
-    if any(part in SECURITY_RELEVANT_DIFF_EXCLUDED_DIRS for part in path.parts):
-        return False
     if diff_path_is_security_relevant(path):
-        return True
-    if path.parts[0] != ".devcontainer" and path_is_excluded(path):
-        return False
-    return (
-        path.suffix.lower() in SECURITY_RELEVANT_DIFF_EXTENSIONS
-        or path.name == ".env"
-        or path.name.startswith(".env.")
-    )
+        return not any(
+            part in EXCLUDED_DIRS and part not in {".github", ".circleci", ".devcontainer"}
+            for part in path.parts
+        )
+    return not path_is_excluded(path)
 
 
 def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[str, bool]:
-    def reject_unsafe_path(cause: BaseException | None = None) -> None:
-        message = f"Unsafe changed repository path cannot be safely reviewed: {path.relative_to(repo)}"
-        if cause is None:
-            raise SystemExit(message)
-        raise SystemExit(message) from cause
-
     try:
         if path.is_symlink():
-            reject_unsafe_path()
+            return "", False
 
         expected = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(expected.st_mode):
-            reject_unsafe_path()
+            return "", False
 
         resolved = path.resolve(strict=True)
         resolved.relative_to(repo)
         resolved_stat = resolved.stat()
         expected_identity = (expected.st_dev, expected.st_ino)
         if (resolved_stat.st_dev, resolved_stat.st_ino) != expected_identity:
-            reject_unsafe_path()
+            return "", False
 
         flags = os.O_RDONLY
         flags |= getattr(os, "O_BINARY", 0)
@@ -421,15 +370,15 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
                 not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino) != expected_identity
             ):
-                reject_unsafe_path()
+                return "", False
 
             sample = source.read(4096)
             if is_binary_sample(sample):
                 return "", True
 
             remaining = source.read(max(0, DIRECT_SCOPE_PREVIEW_READ_BYTES - len(sample)))
-    except (OSError, ValueError) as error:
-        reject_unsafe_path(error)
+    except (OSError, ValueError):
+        return "", False
 
     data = sample + remaining
     if is_binary_sample(data):
@@ -439,192 +388,6 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
     outline = structural_outline(path, text)
     preview_lines = select_preview_lines(outline or text.splitlines())
     return fit_preview_lines(preview_lines, preview_bytes), False
-
-
-def immutable_diff_preview(
-    repo: Path, path: Path, head: str, preview_bytes: int
-) -> tuple[str, bool]:
-    relative = path.relative_to(repo).as_posix()
-    executable = trusted_git_executable(repo)
-    if executable is None:
-        raise SystemExit("Git is unavailable on the trusted executable path.")
-    command = [
-        executable,
-        "--no-replace-objects",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        str(repo),
-    ]
-    environment = os.environ.copy()
-    for name in GIT_REPOSITORY_ENVIRONMENT:
-        environment.pop(name, None)
-    environment["GIT_LITERAL_PATHSPECS"] = "1"
-    listed = subprocess.run(
-        [*command, "ls-tree", "-z", head, "--", relative],
-        check=False,
-        capture_output=True,
-        env=environment,
-    )
-    entries = [entry for entry in listed.stdout.split(b"\0") if entry]
-    if listed.returncode != 0 or len(entries) != 1:
-        raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
-    try:
-        metadata, tree_path = entries[0].split(b"\t", 1)
-        mode, kind, object_id = metadata.split(b" ", 2)
-    except ValueError as error:
-        raise SystemExit(
-            f"Unsafe changed repository path cannot be safely reviewed: {relative}"
-        ) from error
-    if tree_path != os.fsencode(relative):
-        raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
-    if mode == b"160000" and kind == b"commit":
-        return f"Git submodule pinned to commit {object_id.decode('ascii')}", False
-    if mode not in {b"100644", b"100755", b"120000"} or kind != b"blob":
-        raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
-
-    return git_blob_preview(command, environment, path, object_id, preview_bytes)
-
-
-def git_blob_preview(
-    command: list[str],
-    environment: dict[str, str],
-    path: Path,
-    object_id: bytes,
-    preview_bytes: int,
-) -> tuple[str, bool]:
-    relative = path.name
-    process = subprocess.Popen(
-        [*command, "cat-file", "blob", object_id.decode("ascii")],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-    )
-    try:
-        assert process.stdout is not None
-        data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
-        if len(data) < DIRECT_SCOPE_PREVIEW_READ_BYTES:
-            if process.wait() != 0:
-                raise SystemExit(
-                    f"Unsafe changed repository path cannot be safely reviewed: {relative}"
-                )
-    finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait()
-
-    if is_binary_sample(data):
-        return "", True
-    text = data.decode("utf-8", errors="ignore")
-    outline = structural_outline(path, text)
-    preview_lines = select_preview_lines(outline or text.splitlines())
-    return fit_preview_lines(preview_lines, preview_bytes), False
-
-
-def staged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[str, bool]:
-    relative = path.relative_to(repo).as_posix()
-    executable = trusted_git_executable(repo)
-    if executable is None:
-        raise SystemExit("Git is unavailable on the trusted executable path.")
-    command = [
-        executable,
-        "--no-replace-objects",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        str(repo),
-    ]
-    environment = os.environ.copy()
-    for name in GIT_REPOSITORY_ENVIRONMENT:
-        environment.pop(name, None)
-    environment["GIT_LITERAL_PATHSPECS"] = "1"
-    listed = subprocess.run(
-        [*command, "ls-files", "--stage", "-z", "--", relative],
-        check=False,
-        capture_output=True,
-        env=environment,
-    )
-    entries = [entry for entry in listed.stdout.split(b"\0") if entry]
-    if listed.returncode != 0 or not entries:
-        raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
-    previews: list[str] = []
-    seen_stages: set[bytes] = set()
-    for entry in entries:
-        try:
-            metadata, staged_path = entry.split(b"\t", 1)
-            mode, object_id, stage = metadata.split(b" ", 2)
-        except ValueError as error:
-            raise SystemExit(
-                f"Unsafe changed repository path cannot be safely reviewed: {relative}"
-            ) from error
-        if (
-            mode not in {b"100644", b"100755", b"120000", b"160000"}
-            or stage not in {b"0", b"1", b"2", b"3"}
-            or stage in seen_stages
-            or staged_path != os.fsencode(relative)
-            or stage == b"0" and mode in {b"120000", b"160000"}
-        ):
-            raise SystemExit(
-                f"Unsafe changed repository path cannot be safely reviewed: {relative}"
-            )
-        seen_stages.add(stage)
-        if mode == b"160000":
-            try:
-                preview = f"Git submodule pinned to commit {object_id.decode('ascii')}"
-            except UnicodeDecodeError as error:
-                raise SystemExit(
-                    f"Unsafe changed repository path cannot be safely reviewed: {relative}"
-                ) from error
-            binary = False
-        else:
-            preview, binary = git_blob_preview(command, environment, path, object_id, preview_bytes)
-            if mode == b"120000":
-                preview = f"Symlink target: {preview}"
-        if binary:
-            continue
-        if stage == b"0":
-            previews.append(preview)
-        else:
-            label = {b"1": "Merge base", b"2": "Ours", b"3": "Theirs"}[stage]
-            previews.extend([f"{label} (stage {stage.decode('ascii')}):", *preview.splitlines()])
-    if b"0" in seen_stages and len(seen_stages) != 1:
-        raise SystemExit(f"Unsafe changed repository path cannot be safely reviewed: {relative}")
-    if not previews:
-        return "", True
-    return fit_preview_lines(previews, preview_bytes), False
-
-
-def staged_content_differs_from_working_tree(repo: Path, path: Path) -> bool:
-    executable = trusted_git_executable(repo)
-    if executable is None:
-        raise SystemExit("Git is unavailable on the trusted executable path.")
-    environment = os.environ.copy()
-    for name in GIT_REPOSITORY_ENVIRONMENT:
-        environment.pop(name, None)
-    environment["GIT_LITERAL_PATHSPECS"] = "1"
-    result = subprocess.run(
-        [
-            executable,
-            "--no-replace-objects",
-            "-c",
-            "core.fsmonitor=false",
-            "-C",
-            str(repo),
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--quiet",
-            "--",
-            path.relative_to(repo).as_posix(),
-        ],
-        capture_output=True,
-        env=environment,
-    )
-    if result.returncode not in {0, 1}:
-        raise SystemExit(
-            f"Unsafe changed repository path cannot be safely reviewed: {path.relative_to(repo)}"
-        )
-    return result.returncode == 1
 
 
 def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
@@ -841,21 +604,12 @@ def bind_repo_scopes(args: argparse.Namespace) -> None:
 
 
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
-    git = trusted_git_executable(repo)
-    if git is None:
-        raise SystemExit("Git is unavailable on the trusted executable path.")
     result = subprocess.run(
         [
-            git,
-            "--no-replace-objects",
-            "-c",
-            "core.fsmonitor=false",
+            "git",
             "-C",
             str(repo),
             "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
             "--name-status",
             "-z",
             "--diff-filter=ACMRDTU",
@@ -863,8 +617,9 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         ],
         check=True,
         capture_output=True,
+        text=True,
     )
-    fields = [os.fsdecode(field) for field in result.stdout.split(b"\0")]
+    fields = result.stdout.split("\0")
     if fields and not fields[-1]:
         fields.pop()
 
@@ -874,8 +629,6 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         status = fields[index][0]
         index += 1
         if status in {"C", "R"}:
-            if status == "R":
-                changed.append((repo / fields[index], "D"))
             index += 1
         path = repo / fields[index]
         index += 1
@@ -883,70 +636,24 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     return changed
 
 
-def git_untracked_paths(repo: Path) -> list[tuple[Path, str]]:
-    git = trusted_git_executable(repo)
-    if git is None:
-        raise SystemExit("Git is unavailable on the trusted executable path.")
-    environment = os.environ.copy()
-    for name in GIT_REPOSITORY_ENVIRONMENT:
-        environment.pop(name, None)
-    result = subprocess.run(
-        [
-            git,
-            "--no-replace-objects",
-            "-c",
-            "core.fsmonitor=false",
-            "-C",
-            str(repo),
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-        check=True,
-        capture_output=True,
-        env=environment,
-    )
-    paths: list[tuple[Path, str]] = []
-    for value in result.stdout.split(b"\0"):
-        if not value:
-            continue
-        path = repo / os.fsdecode(value)
-        if not path.is_dir() or path.is_symlink():
-            paths.append((path, "A"))
-            continue
-        nested_paths = git_directory_snapshot_paths(path)
-        if nested_paths is not None:
-            paths.extend(
-                (nested_path, "A")
-                for nested_path in nested_paths
-                if not nested_path.is_dir() or nested_path.is_symlink()
-            )
-            continue
-        for directory, children, files in os.walk(path, followlinks=False):
-            children[:] = sorted(child for child in children if child != ".git")
-            paths.extend((Path(directory) / filename, "A") for filename in sorted(files))
-    return paths
-
-
-def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str, bool]]:
+def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return [
-            (path, status, False)
-            for path, status in run_git_changed_paths(repo, [f"{base}..{head}"])
-        ]
+        return run_git_changed_paths(repo, [f"{base}..{head}"])
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
-        combined = {path: (status, True) for path, status in staged}
-        for path, status in unstaged:
-            existing = combined.get(path)
-            if status == "D" and existing is not None and existing[0] == "T":
-                continue
-            combined[path] = (status, existing is not None)
-        for path, status in git_untracked_paths(repo):
-            combined.setdefault(path, (status, False))
-        return [(path, *details) for path, details in sorted(combined.items())]
+        combined = dict(staged)
+        combined.update(unstaged)
+        untracked = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for path in untracked.stdout.split("\0"):
+            if path:
+                combined.setdefault(repo / path, "A")
+        return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
@@ -956,136 +663,15 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         raise SystemExit(f"Repo path not found: {repo}")
 
     rows: list[JsonRow] = []
-    changed_paths = git_changed_paths(repo, args.base, args.head, args.mode)
-    replaced_gitlinks = (
-        {
-            path
-            for path, status, _ in changed_paths
-            if status == "D"
-            and path.is_dir()
-            and is_immutable_gitlink(repo, args.base, path.relative_to(repo))
-        }
-        if args.mode == "local-patch"
-        else set()
-    )
-    for path, status, is_staged in changed_paths:
+    for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
         rel = path.relative_to(repo)
-        gitlink_revision = None
-        index_is_gitlink = False
-        index_has_conflicted_gitlink = False
-        if args.mode == "revisions":
-            revisions = (
-                (args.base, args.head)
-                if status == "T"
-                else (args.base if status == "D" else args.head,)
-            )
-            for revision in revisions:
-                if is_immutable_gitlink(repo, revision, rel):
-                    gitlink_revision = revision
-                    break
-        else:
-            gitlink_revision = index_gitlink_revision(repo, rel)
-            index_is_gitlink = gitlink_revision is not None
-            if gitlink_revision is None and (status == "U" or path.is_dir()):
-                gitlink_revision = index_gitlink_revision(repo, rel, allow_conflicted=True)
-                index_has_conflicted_gitlink = gitlink_revision is not None
-            if (
-                gitlink_revision is None
-                and status in {"D", "T"}
-                and is_immutable_gitlink(repo, args.base, rel)
-            ):
-                gitlink_revision = args.base
-        replacement_source = any(
-            path != root
-            and path.is_relative_to(root)
-            and diff_path_is_included(path.relative_to(root))
-            for root in replaced_gitlinks
-        )
-        if not diff_path_is_included(rel) and gitlink_revision is None and not replacement_source:
+        if not diff_path_is_included(rel):
             continue
 
-        if status == "D":
-            if args.mode == "local-patch" and gitlink_revision is None:
-                preview, is_binary = immutable_diff_preview(
-                    repo, path, args.base, args.preview_bytes
-                )
-                if path.exists() or path.is_symlink():
-                    working_preview, working_binary = confined_diff_preview(
-                        repo, path, args.preview_bytes
-                    )
-                    if not working_binary:
-                        preview = (
-                            working_preview
-                            if is_binary
-                            else fit_preview_lines(
-                                [
-                                    "Deleted Git base:",
-                                    *preview.splitlines(),
-                                    "Recreated working tree:",
-                                    *working_preview.splitlines(),
-                                ],
-                                args.preview_bytes,
-                            )
-                        )
-                        is_binary = False
-                if is_binary:
-                    continue
-            else:
-                preview = ""
+        if status in {"D", "U"}:
+            preview = ""
         else:
-            if args.mode == "revisions":
-                preview, is_binary = immutable_diff_preview(
-                    repo, path, args.head, args.preview_bytes
-                )
-            elif index_is_gitlink:
-                preview, is_binary = (
-                    f"Git submodule pinned to commit {gitlink_revision}",
-                    False,
-                )
-            elif is_staged and (status == "U" or index_has_conflicted_gitlink) and (
-                path.is_symlink() or path.is_dir() or index_has_conflicted_gitlink
-            ):
-                preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
-            elif is_staged and not path.exists() and not path.is_symlink():
-                preview, is_binary = staged_diff_preview(repo, path, args.preview_bytes)
-            elif is_staged:
-                staged_preview, staged_binary = staged_diff_preview(repo, path, args.preview_bytes)
-                working_preview, working_binary = confined_diff_preview(
-                    repo, path, args.preview_bytes
-                )
-                if staged_binary and working_binary:
-                    continue
-                is_binary = False
-                if staged_binary:
-                    preview = fit_preview_lines(
-                        [
-                            "Working tree (staged Git index is binary):",
-                            *working_preview.splitlines(),
-                        ],
-                        args.preview_bytes,
-                    )
-                elif working_binary:
-                    preview = fit_preview_lines(
-                        [
-                            "Staged Git index (working tree is binary):",
-                            *staged_preview.splitlines(),
-                        ],
-                        args.preview_bytes,
-                    )
-                elif staged_content_differs_from_working_tree(repo, path):
-                    preview = fit_preview_lines(
-                        [
-                            "Staged Git index:",
-                            *staged_preview.splitlines(),
-                            "Working tree:",
-                            *working_preview.splitlines(),
-                        ],
-                        args.preview_bytes,
-                    )
-                else:
-                    preview = staged_preview
-            else:
-                preview, is_binary = confined_diff_preview(repo, path, args.preview_bytes)
+            preview, is_binary = confined_diff_preview(repo, path, args.preview_bytes)
             if is_binary:
                 continue
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
@@ -1094,86 +680,6 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     output = Path(args.out).expanduser()
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} rows to {output}")
-
-
-def is_immutable_gitlink(repo: Path, head: str, relative: Path) -> bool:
-    executable = trusted_git_executable(repo)
-    if executable is None:
-        raise SystemExit("Git is unavailable on the trusted executable path.")
-    environment = os.environ.copy()
-    for name in GIT_REPOSITORY_ENVIRONMENT:
-        environment.pop(name, None)
-    environment["GIT_LITERAL_PATHSPECS"] = "1"
-    listed = subprocess.run(
-        [
-            executable,
-            "--no-replace-objects",
-            "-c",
-            "core.fsmonitor=false",
-            "-C",
-            str(repo),
-            "ls-tree",
-            "-z",
-            head,
-            "--",
-            relative.as_posix(),
-        ],
-        check=False,
-        capture_output=True,
-        env=environment,
-    )
-    if listed.returncode != 0:
-        raise SystemExit("Could not inspect the selected Git diff.")
-    entries = [entry for entry in listed.stdout.split(b"\0") if entry]
-    return len(entries) == 1 and entries[0].startswith(b"160000 commit ")
-
-
-def index_gitlink_revision(
-    repo: Path, relative: Path, *, allow_conflicted: bool = False
-) -> str | None:
-    executable = trusted_git_executable(repo)
-    if executable is None:
-        raise SystemExit("Git is unavailable on the trusted executable path.")
-    environment = os.environ.copy()
-    for name in GIT_REPOSITORY_ENVIRONMENT:
-        environment.pop(name, None)
-    environment["GIT_LITERAL_PATHSPECS"] = "1"
-    listed = subprocess.run(
-        [
-            executable,
-            "--no-replace-objects",
-            "-c",
-            "core.fsmonitor=false",
-            "-C",
-            str(repo),
-            "ls-files",
-            "--stage",
-            "-z",
-            "--",
-            relative.as_posix(),
-        ],
-        check=False,
-        capture_output=True,
-        env=environment,
-    )
-    if listed.returncode != 0:
-        raise SystemExit("Could not inspect the selected Git diff.")
-    entries = [entry for entry in listed.stdout.split(b"\0") if entry]
-    if len(entries) != 1 and not allow_conflicted:
-        return None
-    for entry in entries:
-        try:
-            metadata, path = entry.split(b"\t", 1)
-            mode, object_id, stage = metadata.split(b" ", 2)
-        except ValueError:
-            return None
-        if (
-            mode == b"160000"
-            and path == os.fsencode(relative.as_posix())
-            and (stage == b"0" or allow_conflicted)
-        ):
-            return object_id.decode("ascii")
-    return None
 
 
 def make_rank_shards(args: argparse.Namespace) -> None:
