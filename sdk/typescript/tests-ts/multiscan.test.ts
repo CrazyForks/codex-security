@@ -520,6 +520,10 @@ describe("multiscan", () => {
           join(paths.output, ".lock.recovery"),
           JSON.stringify({ pid: 999_999_998, token: "abandoned" }),
         );
+        await writeFile(
+          join(paths.output, ".lock.recovery.takeover"),
+          JSON.stringify({ pid: 999_999_997, token: "abandoned-takeover" }),
+        );
       }
 
       let active = 0;

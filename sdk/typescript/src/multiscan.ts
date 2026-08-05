@@ -421,6 +421,32 @@ async function acquireRecoveryMarker(
     await link(pending, takeover);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const abandoned = await readLockOwner(takeover);
+      if (abandoned?.token !== undefined && !processIsRunning(abandoned.pid)) {
+        const cleanup = `${takeover}.cleanup`;
+        try {
+          await link(pending, cleanup);
+        } catch (failure) {
+          if ((failure as NodeJS.ErrnoException).code === "EEXIST") {
+            throw new Error("A multiscan supervisor is already running.");
+          }
+          throw failure;
+        }
+        try {
+          const current = await readLockOwner(takeover);
+          if (
+            current?.token !== abandoned.token ||
+            current.pid !== abandoned.pid ||
+            processIsRunning(current.pid)
+          ) {
+            throw new Error("A multiscan supervisor is already running.");
+          }
+          await rm(takeover, { force: true });
+          return await acquireRecoveryMarker(path, pending, token);
+        } finally {
+          await releaseLock(cleanup, token);
+        }
+      }
       throw new Error("A multiscan supervisor is already running.");
     }
     throw error;
