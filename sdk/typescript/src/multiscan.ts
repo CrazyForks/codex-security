@@ -341,8 +341,26 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
             throw new Error("A multiscan supervisor is already running.");
           }
           try {
-            await link(pending, path);
-            published = true;
+            for (let attempts = 0; ; attempts += 1) {
+              try {
+                await link(pending, path);
+                published = true;
+                break;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+                  throw error;
+                }
+                const occupant = await readLockOwner(path);
+                if (
+                  attempts >= 32 ||
+                  (occupant !== null && occupant.token === undefined) ||
+                  (await readLockOwner(recovery))?.token !== token
+                ) {
+                  throw error;
+                }
+                await new Promise<void>((resolve) => setTimeout(resolve, 1));
+              }
+            }
             await rm(stale, { recursive: true, force: true });
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code === "EEXIST") {
@@ -439,7 +457,8 @@ async function readLockOwner(path: string): Promise<MultiscanLockOwner | null> {
     try {
       metadata = await lstat(ownerPath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return null;
       throw error;
     }
   }
@@ -452,7 +471,8 @@ async function readLockOwner(path: string): Promise<MultiscanLockOwner | null> {
   } catch (error) {
     if (
       error instanceof SyntaxError ||
-      (error as NodeJS.ErrnoException).code === "ENOENT"
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      (error as NodeJS.ErrnoException).code === "ENOTDIR"
     ) {
       return null;
     }
