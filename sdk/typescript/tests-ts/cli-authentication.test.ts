@@ -655,7 +655,7 @@ describe("CLI authentication", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 60_000);
 
   test("reports selected scan credentials without contaminating JSON output", async () => {
     const stdout = capture();

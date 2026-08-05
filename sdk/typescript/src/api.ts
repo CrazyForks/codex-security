@@ -57,8 +57,11 @@ import {
 } from "./knowledge-base.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import type { SeverityLevel } from "./models.js";
+import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
+  scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
+  type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
@@ -160,14 +163,17 @@ export interface ScanOptions extends DeepScanOptions {
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
+  onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onScanStarted?: () => void;
   onReconnect?: (
     attempt: number,
     maxAttempts: number,
     details?: ScanReconnectDetails,
   ) => void;
+  onActivity?: (activity: ScanActivity) => void;
+  onProgress?: (progress: ScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
-  onWarning?: (warning: string) => void;
+  onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
 }
@@ -186,12 +192,19 @@ export type ScanAuthentication =
     }
   | {
       method: "stored_credentials";
+      credentialType?: "api_key" | "chatgpt";
       verified: false;
     };
+
+export type ScanTrustedAccessStatus = "granted" | "not_granted" | "unknown";
 
 export interface ScanReconnectDetails {
   reason: "rate_limit" | "network" | "authentication" | "authorization";
   retryAfterSeconds?: number;
+}
+
+export interface ScanWarningDetails {
+  kind: "target_changed";
 }
 
 type ScanObserverName =
@@ -200,7 +213,10 @@ type ScanObserverName =
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanStarted"
+  | "onTrustedAccessStatus"
   | "onReconnect"
+  | "onActivity"
+  | "onProgress"
   | "onWorkerStatus"
   | "onWarning";
 
@@ -250,6 +266,9 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
+const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
+  "https://openai.com/form/enterprise-trusted-access-for-cyber/";
 const DEEP_SCAN_SETTINGS = [
   ["workers", "workers", 1],
   ["subagents", "subagents", 0],
@@ -356,6 +375,7 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
+    let preparedTargetWarnings: string[] = [];
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -409,7 +429,7 @@ export class CodexSecurity {
       const externalProvider = isExternalModelProvider(modelProvider)
         ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
         : null;
-      const authentication = scanAuthentication(
+      let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
         modelProvider,
@@ -523,6 +543,12 @@ export class CodexSecurity {
             "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
+      authentication = await runtimeScanAuthentication(
+        this.#dependencies.environment,
+        runtime.codexHome,
+        options.auth,
+        modelProvider,
+      );
       notifyObserver(
         "onAuthentication",
         options.onAuthentication,
@@ -621,10 +647,38 @@ export class CodexSecurity {
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model);
+      let scopeFileCount: number | null = null;
+      let reviewedFileCount = 0;
+      const reportProgress = (progress: ScanProgress): void => {
+        if (
+          scopeFileCount === null ||
+          progress.filesTotal > scopeFileCount ||
+          progress.filesCompleted < reviewedFileCount
+        ) {
+          return;
+        }
+        reviewedFileCount = progress.filesCompleted;
+        notifyObserver(
+          "onProgress",
+          options.onProgress,
+          options.onObserverError,
+          { ...progress, filesTotal: scopeFileCount },
+        );
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
+        repository: repo,
         maxCostUsd: options.maxCostUsd,
+        onActivity: (activity) => {
+          notifyObserver(
+            "onActivity",
+            options.onActivity,
+            options.onObserverError,
+            activity,
+          );
+        },
+        onProgress: reportProgress,
         onCost: (cost) => {
           notifyObserver(
             "onCost",
@@ -731,6 +785,26 @@ export class CodexSecurity {
       }
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
+      const registeredFileCount = registration["scopeFileCount"];
+      scopeFileCount =
+        typeof registeredFileCount === "number" &&
+        Number.isSafeInteger(registeredFileCount) &&
+        registeredFileCount >= 0
+          ? registeredFileCount
+          : null;
+      if (scopeFileCount !== null) {
+        tracker.setExpectedFilesTotal(scopeFileCount);
+        notifyObserver(
+          "onProgress",
+          options.onProgress,
+          options.onObserverError,
+          {
+            phase: "preflight",
+            filesCompleted: 0,
+            filesTotal: scopeFileCount,
+          },
+        );
+      }
       activeScan = { id: scanId, options: workbenchOptions };
       checkOpen();
       const feedback = await workbench(
@@ -871,6 +945,7 @@ export class CodexSecurity {
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
+        authentication,
         workbenchValidated: true,
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
@@ -886,16 +961,36 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
-          await workbench(workbenchOptions, [
+          const preparation = await workbench(workbenchOptions, [
             "prepare-scan-completion",
             "--scan-id",
             scanId,
           ]);
+          preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
+            ? preparation["targetWarnings"].filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : [];
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
+        onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
+        onActivity: options.onActivity,
+        onProgress: (progress) => {
+          if (
+            progress.phase === "discovery" &&
+            progress.filesCompleted === 0 &&
+            reviewedFileCount === 0 &&
+            progress.filesTotal !== scopeFileCount
+          ) {
+            scopeFileCount = progress.filesTotal;
+            tracker.setExpectedFilesTotal(scopeFileCount);
+          }
+          reportProgress(progress);
+        },
         onWorkerStatus: options.onWorkerStatus,
+        onWarning: options.onWarning,
         onObserverError: options.onObserverError,
       });
       checkOpen();
@@ -910,6 +1005,14 @@ export class CodexSecurity {
       activeScan = null;
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
+        const targetWarnings = new Set([
+          ...preparedTargetWarnings,
+          ...(Array.isArray(completion["targetWarnings"])
+            ? completion["targetWarnings"].filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : []),
+        ]);
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string") {
             notifyObserver(
@@ -917,6 +1020,9 @@ export class CodexSecurity {
               options.onWarning,
               options.onObserverError,
               warning,
+              targetWarnings.has(warning)
+                ? { kind: "target_changed" }
+                : undefined,
             );
           }
         }
@@ -1554,17 +1660,23 @@ interface ScanEventRunOptions {
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
+  authentication?: ScanAuthentication;
   workbenchValidated?: boolean;
   model?: string;
+  expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onThreadStarted?: (threadId: string) => void;
   onScanStarted?: () => void;
+  onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onReconnect?: (
     attempt: number,
     maxAttempts: number,
     details?: ScanReconnectDetails,
   ) => void;
+  onActivity?: (activity: ScanActivity) => void;
+  onProgress?: (progress: ScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
 
@@ -1577,8 +1689,54 @@ export async function runScanEvents(
   let finalResponse = "";
   let usage: unknown = null;
   let lastStreamError: string | null = null;
+  let tacStatusReported = false;
   try {
     for await (const event of options.events) {
+      if (!tacStatusReported) {
+        const tacStatus = trustedAccessStatusFromEvent(event);
+        if (tacStatus !== null) {
+          tacStatusReported = true;
+          notifyObserver(
+            "onTrustedAccessStatus",
+            options.onTrustedAccessStatus,
+            options.onObserverError,
+            tacStatus,
+          );
+          if (tacStatus !== "granted") {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              trustedAccessWarning(tacStatus, options.authentication),
+            );
+          }
+        }
+      }
+      for (const activity of scanActivitiesFromEvent(
+        event,
+        options.expectation.repository,
+      )) {
+        notifyObserver(
+          "onActivity",
+          options.onActivity,
+          options.onObserverError,
+          activity,
+        );
+      }
+      for (const progress of scanProgressUpdatesFromEvent(event)) {
+        if (
+          options.expectedFilesTotal !== undefined &&
+          progress.filesTotal !== options.expectedFilesTotal
+        ) {
+          continue;
+        }
+        notifyObserver(
+          "onProgress",
+          options.onProgress,
+          options.onObserverError,
+          progress,
+        );
+      }
       const workerStatus = workerStatusFromEvent(event);
       if (workerStatus !== null) {
         notifyObserver(
@@ -1694,6 +1852,90 @@ export async function runScanEvents(
   }
 }
 
+function trustedAccessStatusFromEvent(
+  event: ScanEvent,
+): ScanTrustedAccessStatus | null {
+  if (event.type !== "item.completed" || !isRecord(event["item"])) {
+    return null;
+  }
+
+  const item = event["item"];
+  if (
+    item["type"] !== "mcp_tool_call" ||
+    item["server"] !== "codex_apps" ||
+    item["tool"] !== "get_tac_status"
+  ) {
+    return null;
+  }
+
+  if (item["status"] !== "completed" || !isRecord(item["result"])) {
+    return "unknown";
+  }
+
+  const result = item["result"]["structured_content"];
+  if (
+    !isRecord(result) ||
+    result["schemaVersion"] !== 1 ||
+    !Array.isArray(result["grants"]) ||
+    typeof result["checkedAt"] !== "string" ||
+    Number.isNaN(Date.parse(result["checkedAt"])) ||
+    result["stale"] !== false
+  ) {
+    return "unknown";
+  }
+
+  const status = result["status"];
+  if (
+    status !== "granted" &&
+    status !== "not_granted" &&
+    status !== "unknown"
+  ) {
+    return "unknown";
+  }
+  if (
+    result["grants"].some((grant) => !isTrustedAccessGrant(grant)) ||
+    (status === "granted") !== result["grants"].length > 0
+  ) {
+    return "unknown";
+  }
+  return status;
+}
+
+function isTrustedAccessGrant(grant: unknown): boolean {
+  if (!isRecord(grant)) return false;
+  const level = grant["level"];
+  const source = grant["source"];
+  return (
+    (source === "user" && (level === "tac1" || level === "tac2")) ||
+    (source === "current_account" &&
+      (level === "tac1" || level === "tac3" || level === "government"))
+  );
+}
+
+function trustedAccessWarning(
+  status: Exclude<ScanTrustedAccessStatus, "granted">,
+  authentication?: ScanAuthentication,
+): string {
+  const apiOrganization =
+    (authentication?.method === "api_key" &&
+      (authentication.source === "OPENAI_API_KEY" ||
+        authentication.source === "CODEX_API_KEY")) ||
+    (authentication?.method === "stored_credentials" &&
+      authentication.credentialType === "api_key");
+  const applicationUrl = apiOrganization
+    ? ORGANIZATIONAL_TRUSTED_ACCESS_URL
+    : PERSONAL_TRUSTED_ACCESS_URL;
+  if (status === "not_granted") {
+    const account = apiOrganization ? "your API organization" : "your account";
+    return `Some cybersecurity requests or findings may be refused because ${account} does not have Trusted Access for Cyber. Apply at ${applicationUrl}.`;
+  }
+  const access = apiOrganization
+    ? "Trusted Access for Cyber for your API organization"
+    : "your Trusted Access for Cyber status";
+  const action = apiOrganization ? "your organization's access" : "your access";
+  return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${action} or apply at ${applicationUrl}.`;
+}
+
 async function scanPrompt(
   pluginRoot: string,
   target: NormalizedTarget,
@@ -1733,6 +1975,8 @@ async function scanPrompt(
     'When "$CODEX_SECURITY_TARGET_REVISION" is set, use its exact value as scan.target.revision.',
     'When "$CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST" is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.',
     'Use exactly "codex-security-plugin" as scan.producer.name.',
+    'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
+    'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',
     ...(hasConfigPath
       ? [
           'For normal config-preflight helper calls, append --config "$CODEX_SECURITY_CONFIG_PATH" so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.',
@@ -1899,6 +2143,35 @@ export function scanAuthentication(
   return key === null
     ? { method: "stored_credentials", verified: false }
     : { method: "api_key", source: key.source, verified: false };
+}
+
+async function runtimeScanAuthentication(
+  environment: ProcessEnvironment,
+  codexHome: string,
+  auth: ScanAuthMode = "auto",
+  modelProvider?: unknown,
+): Promise<ScanAuthentication> {
+  const authentication = scanAuthentication(environment, auth, modelProvider);
+  if (authentication.method !== "stored_credentials") return authentication;
+
+  try {
+    const stored = JSON.parse(
+      await readFile(join(codexHome, "auth.json"), "utf8"),
+    ) as unknown;
+    if (!isRecord(stored)) return authentication;
+
+    const mode = stored["auth_mode"];
+    if (mode === "apikey" || mode === "api_key") {
+      return { ...authentication, credentialType: "api_key" };
+    }
+    if (mode === "chatgpt") {
+      return { ...authentication, credentialType: "chatgpt" };
+    }
+  } catch {
+    return authentication;
+  }
+
+  return authentication;
 }
 
 function selectedScanEnvironment(
