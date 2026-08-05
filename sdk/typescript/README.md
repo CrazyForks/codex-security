@@ -85,10 +85,10 @@ Pass scan configuration to `security.run(repository, options)` or
 | `signal`                | Cancel a scan with an `AbortSignal`.                                                  |
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
-`onOutputArchived`, `onOutputDirReady`, `onScanStarted`, `onReconnect`,
-`onWorkerStatus`, `onWarning`, and `onObserverError`. Preflight does not start
-the runtime, authenticate, resolve Python, inspect the plugin, or run those
-scan-lifecycle callbacks.
+`onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
+`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
+`onObserverError`. Preflight does not start the runtime, authenticate, resolve
+Python, inspect the plugin, or run those scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -141,7 +141,11 @@ Check or remove the stored sign-in with `npx @openai/codex-security login status
 and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
 private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
 `$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
-configured. Login, status, logout, and scans use the same home. Codex manages
+configured. On managed Windows devices, inherited access for `SYSTEM` and local
+`Administrators` is preserved while protecting the home against future changes
+to its parents. Other users and broad groups are rejected, and PowerShell
+Constrained Language Mode is supported. Login,
+status, logout, and scans use the same home. Codex manages
 credentials using its configured file or system-keyring backend and honors
 managed-device policies. An existing file-based Codex sign-in is imported only
 when the dedicated home does not already contain stored credentials. Logging
@@ -179,10 +183,15 @@ When an environment key is configured, ChatGPT login and
 `codex-security login status` identify the effective scan credential source
 without printing its value, including when no stored sign-in exists.
 
+Some cybersecurity requests and protected findings require approval through
+Trusted Access for Cyber. To apply or check your access, visit
+[chatgpt.com/cyber](https://chatgpt.com/cyber).
+
 ## CLI
 
 ```bash
 npx @openai/codex-security scan /path/to/repository
+npx @openai/codex-security scan /path/to/repository --headless
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -304,6 +313,8 @@ defaults:
 cli_auth_credentials_store = "file"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+show_raw_agent_reasoning = true
 
 [features]
 plugins = true
@@ -425,6 +436,8 @@ Use `--provider fireworks` to send inference through Fireworks AI. Set
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
+Interactive terminals show a full-screen view; CI, redirected output, and
+`--headless` use plain timestamped progress lines.
 Completion summarizes findings, severity, coverage, elapsed time, available
 token and worker counts, estimated cost, the results directory, and the next
 useful command.
