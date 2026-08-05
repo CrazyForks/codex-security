@@ -30,7 +30,6 @@ const REQUIRED_ARTIFACTS = [
   "report.md",
 ];
 const MAX_LOCK_OWNER_BYTES = 4 * 1024;
-const MAX_LOCK_OWNER_PID = 2_147_483_647;
 
 interface MultiscanLockOwner {
   pid: number;
@@ -298,13 +297,12 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
         await link(pending, path);
         published = true;
         const recovering = await readLockOwner(recovery);
-        if (
-          recovering !== null &&
-          recovering.token !== token &&
-          processIsRunning(recovering.pid)
-        ) {
-          await releaseLock(path, token);
-          throw new Error("A multiscan supervisor is already running.");
+        if (recovering !== null && recovering.token !== token) {
+          if (processIsRunning(recovering.pid)) {
+            throw new Error("A multiscan supervisor is already running.");
+          }
+          await acquireRecoveryMarker(recovery, pending, token);
+          await releaseLock(recovery, token);
         }
         if ((await readLockOwner(path))?.token !== token) {
           throw new Error("A multiscan supervisor is already running.");
@@ -328,77 +326,35 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
       }
 
       await acquireRecoveryMarker(recovery, pending, token);
-
       try {
-        if ((await readLockOwner(recovery))?.token !== token) {
-          throw new Error("A multiscan supervisor is already running.");
-        }
         const current = await readLockOwner(path);
         if (current !== null && processIsRunning(current.pid)) {
           throw new Error("A multiscan supervisor is already running.");
         }
-        const metadata = await lstat(path).catch((error: unknown) => {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-          throw error;
-        });
-        if (metadata === null) continue;
-        if ((await readLockOwner(recovery))?.token !== token) {
-          throw new Error("A multiscan supervisor is already running.");
-        }
+        const metadata = await lstat(path);
         if (metadata.isDirectory()) {
-          const stale = join(output, `.lock.stale-${randomUUID()}`);
+          const stale = join(output, `.lock.stale-${token}`);
           await rename(path, stale);
-          let removed = false;
+          const moved = await readLockOwner(stale);
+          if (moved !== null && processIsRunning(moved.pid)) {
+            await rename(stale, path);
+            throw new Error("A multiscan supervisor is already running.");
+          }
           try {
-            const moved = await readLockOwner(stale);
-            if (
-              moved?.pid !== current?.pid ||
-              moved?.token !== current?.token ||
-              (moved !== null && processIsRunning(moved.pid))
-            ) {
-              for (;;) {
-                try {
-                  await rename(stale, path);
-                  break;
-                } catch (error) {
-                  const code = (error as NodeJS.ErrnoException).code;
-                  if (
-                    code !== "EEXIST" &&
-                    code !== "ENOTEMPTY" &&
-                    code !== "ENOTDIR" &&
-                    code !== "EISDIR" &&
-                    code !== "EPERM"
-                  ) {
-                    throw error;
-                  }
-                  const occupied = await lstat(path).catch(
-                    (failure: NodeJS.ErrnoException) => {
-                      if (failure.code === "ENOENT") return null;
-                      throw failure;
-                    },
-                  );
-                  if (occupied === null) continue;
-                  const contender = await readLockOwner(path);
-                  if (contender === null) continue;
-                  if (
-                    contender.token === undefined ||
-                    !occupied.isFile() ||
-                    (await readLockOwner(recovery))?.token !== token
-                  ) {
-                    throw error;
-                  }
-                  await releaseLock(path, contender.token);
-                }
-              }
+            await link(pending, path);
+            published = true;
+            await rm(stale, { recursive: true, force: true });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+              await rm(stale, { recursive: true, force: true });
               throw new Error("A multiscan supervisor is already running.");
             }
-            await rename(pending, path);
-            published = true;
-            removed = true;
-          } finally {
-            if (removed) await rm(stale, { recursive: true, force: true });
+            throw error;
           }
         } else {
+          if ((await readLockOwner(recovery))?.token !== token) {
+            throw new Error("A multiscan supervisor is already running.");
+          }
           await rename(pending, path);
           published = true;
         }
@@ -406,7 +362,6 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
           (await readLockOwner(recovery))?.token !== token ||
           (await readLockOwner(path))?.token !== token
         ) {
-          await releaseLock(path, token);
           throw new Error("A multiscan supervisor is already running.");
         }
         published = false;
@@ -439,35 +394,34 @@ async function acquireRecoveryMarker(
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
 
-  const owner = await readLockOwner(path);
-  if (owner?.token === undefined || processIsRunning(owner.pid)) {
+  const previous = await readLockOwner(path);
+  if (previous?.token === undefined || processIsRunning(previous.pid)) {
     throw new Error("A multiscan supervisor is already running.");
   }
-  const observed = await lstat(path);
-  const replacement = join(
-    dirname(path),
-    `.lock.recovery.pending-${owner.pid}`,
-  );
-  if (replacement === path) {
-    throw new Error("A multiscan supervisor is already running.");
+  const takeover = `${path}.takeover`;
+  try {
+    await link(pending, takeover);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("A multiscan supervisor is already running.");
+    }
+    throw error;
   }
-  await acquireRecoveryMarker(replacement, pending, token);
   try {
     const current = await readLockOwner(path);
-    const confirmed = await lstat(path);
     if (
-      current?.token !== owner.token ||
-      current.pid !== owner.pid ||
-      observed.dev !== confirmed.dev ||
-      observed.ino !== confirmed.ino ||
-      processIsRunning(current.pid) ||
-      (await readLockOwner(replacement))?.token !== token
+      current?.token !== previous.token ||
+      current.pid !== previous.pid ||
+      processIsRunning(current.pid)
     ) {
       throw new Error("A multiscan supervisor is already running.");
     }
-    await rename(replacement, path);
+    await rename(takeover, path);
+    if ((await readLockOwner(path))?.token !== token) {
+      throw new Error("A multiscan supervisor is already running.");
+    }
   } finally {
-    await releaseLock(replacement, token);
+    await releaseLock(takeover, token);
   }
 }
 
@@ -510,7 +464,7 @@ async function readLockOwner(path: string): Promise<MultiscanLockOwner | null> {
     !("pid" in value) ||
     !Number.isSafeInteger(value.pid) ||
     (value.pid as number) <= 0 ||
-    (value.pid as number) > MAX_LOCK_OWNER_PID ||
+    (value.pid as number) > 2_147_483_647 ||
     ("token" in value && typeof value.token !== "string")
   ) {
     return null;
@@ -535,27 +489,8 @@ function processIsRunning(pid: number): boolean {
 
 async function releaseLock(path: string, token: string): Promise<void> {
   const owner = await readLockOwner(path);
-  if (owner?.token !== token) return;
-
-  const released = `${path}.released-${randomUUID()}`;
-  try {
-    await rename(path, released);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-
-  try {
-    const moved = await readLockOwner(released);
-    if (moved?.token !== token) {
-      if ((await lstat(released)).isDirectory()) {
-        await rename(released, path);
-      } else {
-        await link(released, path);
-      }
-    }
-  } finally {
-    await rm(released, { force: true });
+  if (owner?.token === token) {
+    await rm(path, { force: true });
   }
 }
 

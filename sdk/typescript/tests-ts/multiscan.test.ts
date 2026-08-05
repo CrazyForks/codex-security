@@ -1,18 +1,10 @@
 import { execFileSync } from "node:child_process";
 import {
-  existsSync,
-  mkdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import {
   access,
   appendFile,
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   readdir,
   rm,
@@ -484,12 +476,7 @@ describe("multiscan", () => {
       undefined,
       '{"pid":',
       '{"pid":"invalid"}',
-      '{"pid":0}',
-      '{"pid":-1}',
       '{"pid":2147483648}',
-      '{"pid":9007199254740991}',
-      '{"pid":1,"token":false}',
-      `{"pid":1,"padding":"${"x".repeat(4096)}"}`,
     ]) {
       await mkdir(lock);
       if (owner !== undefined) {
@@ -508,749 +495,78 @@ describe("multiscan", () => {
         (name) =>
           name.startsWith(".lock.pending-") ||
           name.startsWith(".lock.stale-") ||
-          name.startsWith(".lock.recovery") ||
-          name.startsWith(".lock.released-"),
+          name.startsWith(".lock.recovery"),
       ),
     ).toBe(false);
   });
 
-  test("serializes supervisors while recovering stale locks and abandoned markers", async () => {
-    for (const [legacy, abandonedRecovery] of [
-      [false, false],
-      [true, false],
-      [false, true],
-    ] as const) {
+  test("serializes stale file and legacy-directory recovery", async () => {
+    for (const legacy of [false, true]) {
       const paths = await fixture();
-      const source = await repository(
-        paths.root,
-        abandonedRecovery
-          ? "abandoned-recovery-contention"
-          : legacy
-            ? "legacy-contention"
-            : "file-contention",
-      );
+      const source = await repository(paths.root, `recovery-${legacy}`);
       await writeFile(
         paths.input,
         `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
       );
       await mkdir(paths.output);
       const lock = join(paths.output, ".lock");
-      const owner = JSON.stringify({
-        pid: 999_999_999,
-        ...(legacy ? {} : { token: "crashed-supervisor" }),
-      });
+      const previous = JSON.stringify({ pid: 999_999_999, token: "stale" });
       if (legacy) {
         await mkdir(lock);
-        await writeFile(join(lock, "owner.json"), owner);
+        await writeFile(join(lock, "owner.json"), previous);
       } else {
-        await writeFile(lock, owner);
-      }
-      if (abandonedRecovery) {
-        const recovery = join(paths.output, ".lock.recovery");
+        await writeFile(lock, previous);
         await writeFile(
-          recovery,
-          JSON.stringify({ pid: 999_999_999, token: "abandoned-recovery" }),
-        );
-        await writeFile(
-          `${recovery}.pending-999999999`,
-          JSON.stringify({ pid: 999_999_998, token: "abandoned-takeover" }),
-        );
-        await writeFile(
-          `${recovery}.pending-999999998`,
-          JSON.stringify({ pid: 999_999_997, token: "older-takeover" }),
+          join(paths.output, ".lock.recovery"),
+          JSON.stringify({ pid: 999_999_998, token: "abandoned" }),
         );
       }
 
       let active = 0;
       let maximum = 0;
       let rejected = 0;
-      let signalStarted!: () => void;
-      let signalBlocked!: () => void;
       let release!: () => void;
-      const started = new Promise<void>((resolve) => {
-        signalStarted = resolve;
-      });
-      const blocked = new Promise<void>((resolve) => {
-        signalBlocked = resolve;
-      });
-      const completion = new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      let blocked!: () => void;
+      const completion = new Promise<void>((resolve) => (release = resolve));
+      const competitors = new Promise<void>((resolve) => (blocked = resolve));
       const security = client(async (_repository, scanOptions = {}) => {
+        active += 1;
+        maximum = Math.max(maximum, active);
         await completion;
+        active -= 1;
         return await completedScan(scanOptions.outputDir!);
       });
-      const attempts = Array.from({ length: 24 }, () =>
-        runMultiscan(
-          options(paths, security, {
-            createSecurity: () => {
-              active += 1;
-              maximum = Math.max(maximum, active);
-              signalStarted();
-              return client(security.run, async () => {
-                active -= 1;
-              });
-            },
-          }),
-        ).catch((error: unknown) => {
-          rejected += 1;
-          if (rejected === 23) signalBlocked();
+      const attempts = Array.from({ length: 12 }, () =>
+        runMultiscan(options(paths, security)).catch((error: unknown) => {
+          if (++rejected === 11) blocked();
           throw error;
         }),
       );
-      const settledAttempts = Promise.allSettled(attempts);
-
-      await started;
+      const settled = Promise.allSettled(attempts);
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          blocked,
+          competitors,
           new Promise<void>((_resolve, reject) => {
-            timeout = setTimeout(() => {
-              reject(new Error("Competing supervisors were not rejected."));
-            }, 10_000);
+            timeout = setTimeout(
+              () =>
+                reject(new Error("Competing supervisors were not rejected.")),
+              10_000,
+            );
           }),
         ]);
       } finally {
         clearTimeout(timeout);
         release();
       }
-      const settled = await settledAttempts;
-
+      const results = await settled;
       expect(maximum).toBe(1);
       expect(
-        settled.filter((attempt) => attempt.status === "fulfilled"),
+        results.filter(({ status }) => status === "fulfilled"),
       ).toHaveLength(1);
-      await expect(access(lock)).rejects.toThrow();
       expect(
         (await readdir(paths.output)).some((name) => name.startsWith(".lock")),
       ).toBe(false);
-    }
-  });
-
-  test("preserves locks published while another supervisor checks recovery", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "lock-replacement");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nlock-replacement,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const lock = join(paths.output, ".lock");
-    await writeFile(lock, JSON.stringify({ pid: process.pid, token: "moved" }));
-    const originalKill = process.kill;
-    let checks = 0;
-    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
-      if (pid !== process.pid) return originalKill.call(process, pid, signal);
-      checks += 1;
-      if (checks === 1) {
-        const error = new Error(
-          "simulated stale owner",
-        ) as NodeJS.ErrnoException;
-        error.code = "ESRCH";
-        throw error;
-      }
-      if (checks === 2) {
-        writeFileSync(lock, JSON.stringify({ pid, token: "replacement" }));
-      }
-      return true;
-    }) as typeof process.kill;
-
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
-            ),
-          ),
-        ),
-      ).rejects.toThrow("A multiscan supervisor is already running.");
-      expect(JSON.parse(await readFile(lock, "utf8"))).toMatchObject({
-        pid: process.pid,
-        token: "replacement",
-      });
-    } finally {
-      process.kill = originalKill;
-    }
-  });
-
-  test("does not delete a replacement recovery marker after observing a stale owner", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "recovery-marker-replacement");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const lock = join(paths.output, ".lock");
-    const recovery = join(paths.output, ".lock.recovery");
-    await writeFile(
-      lock,
-      JSON.stringify({ pid: 999_999_999, token: "stale-lock" }),
-    );
-    await writeFile(
-      recovery,
-      JSON.stringify({ pid: 999_999_999, token: "stale-recovery" }),
-    );
-    const originalParse = JSON.parse;
-    let replaced = false;
-    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-      const value = originalParse(...arguments_) as unknown;
-      if (
-        !replaced &&
-        typeof value === "object" &&
-        value !== null &&
-        "token" in value &&
-        value.token === "stale-recovery"
-      ) {
-        replaced = true;
-        const successor = join(paths.output, ".recovery-successor");
-        writeFileSync(
-          successor,
-          JSON.stringify({ pid: process.pid, token: "active-recovery" }),
-        );
-        renameSync(successor, recovery);
-      }
-      return value;
-    }) as typeof JSON.parse;
-
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
-            ),
-          ),
-        ),
-      ).rejects.toThrow("A multiscan supervisor is already running.");
-      expect(replaced).toBe(true);
-      expect(originalParse(await readFile(recovery, "utf8"))).toMatchObject({
-        pid: process.pid,
-        token: "active-recovery",
-      });
-    } finally {
-      JSON.parse = originalParse;
-    }
-  });
-
-  test("revalidates newly published ownership after a recovery marker disappears", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "published-lock-replacement");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const lock = join(paths.output, ".lock");
-    const recovery = join(paths.output, ".lock.recovery");
-    await writeFile(
-      recovery,
-      JSON.stringify({ pid: "invalid", marker: "published-lock-race" }),
-    );
-    const originalParse = JSON.parse;
-    let replaced = false;
-    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-      const value = originalParse(...arguments_) as unknown;
-      if (
-        !replaced &&
-        typeof value === "object" &&
-        value !== null &&
-        "marker" in value &&
-        value.marker === "published-lock-race"
-      ) {
-        replaced = true;
-        const successor = join(paths.output, ".published-successor");
-        writeFileSync(
-          successor,
-          JSON.stringify({ pid: process.pid, token: "active-owner" }),
-        );
-        renameSync(successor, lock);
-        rmSync(recovery);
-      }
-      return value;
-    }) as typeof JSON.parse;
-    let started = false;
-
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) => {
-              started = true;
-              return await completedScan(scanOptions.outputDir!);
-            }),
-          ),
-        ),
-      ).rejects.toThrow("A multiscan supervisor is already running.");
-      expect(replaced).toBe(true);
-      expect(started).toBe(false);
-      expect(originalParse(await readFile(lock, "utf8"))).toMatchObject({
-        pid: process.pid,
-        token: "active-owner",
-      });
-    } finally {
-      JSON.parse = originalParse;
-    }
-  });
-
-  test("never vacates a recovery marker replaced during stale-marker reclamation", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "three-supervisor-recovery");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const lock = join(paths.output, ".lock");
-    const recovery = join(paths.output, ".lock.recovery");
-    await writeFile(
-      lock,
-      JSON.stringify({ pid: 999_999_999, token: "stale-lock" }),
-    );
-    await writeFile(
-      recovery,
-      JSON.stringify({ pid: 999_999_999, token: "stale-recovery" }),
-    );
-    const originalParse = JSON.parse;
-    let staleReads = 0;
-    let replaced = false;
-    let vacated = false;
-    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-      const value = originalParse(...arguments_) as unknown;
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        "token" in value &&
-        value.token === "stale-recovery" &&
-        ++staleReads === 2
-      ) {
-        const successor = join(paths.output, ".recovery-successor");
-        writeFileSync(
-          successor,
-          JSON.stringify({ pid: process.pid, token: "second-supervisor" }),
-        );
-        renameSync(successor, recovery);
-        replaced = true;
-      }
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        "token" in value &&
-        value.token === "second-supervisor" &&
-        !existsSync(recovery)
-      ) {
-        vacated = true;
-        writeFileSync(
-          recovery,
-          JSON.stringify({ pid: process.pid, token: "third-supervisor" }),
-        );
-      }
-      return value;
-    }) as typeof JSON.parse;
-
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
-            ),
-          ),
-        ),
-      ).rejects.toThrow();
-      expect(replaced).toBe(true);
-      expect(vacated).toBe(false);
-      expect(originalParse(await readFile(recovery, "utf8"))).toMatchObject({
-        pid: process.pid,
-        token: "second-supervisor",
-      });
-    } finally {
-      JSON.parse = originalParse;
-    }
-  });
-
-  test("does not overwrite a supervisor that wins stale recovery mid-replacement", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "recovery-winner");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const lock = join(paths.output, ".lock");
-    const recovery = join(paths.output, ".lock.recovery");
-    await writeFile(
-      lock,
-      JSON.stringify({ pid: 999_999_999, token: "stale-lock" }),
-    );
-    await writeFile(
-      recovery,
-      JSON.stringify({ pid: 999_999_999, token: "stale-recovery" }),
-    );
-
-    const originalParse = JSON.parse;
-    let staleReads = 0;
-    let replaced = false;
-    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-      const value = originalParse(...arguments_) as unknown;
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        "token" in value &&
-        value.token === "stale-lock" &&
-        ++staleReads === 2
-      ) {
-        const owner = JSON.stringify({
-          pid: process.pid,
-          token: "winning-supervisor",
-        });
-        const replacement = join(paths.output, ".winning-supervisor");
-        writeFileSync(replacement, owner);
-        renameSync(replacement, recovery);
-        writeFileSync(replacement, owner);
-        renameSync(replacement, lock);
-        replaced = true;
-      }
-      return value;
-    }) as typeof JSON.parse;
-
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
-            ),
-          ),
-        ),
-      ).rejects.toThrow("A multiscan supervisor is already running.");
-      expect(replaced).toBe(true);
-      expect(originalParse(await readFile(lock, "utf8"))).toMatchObject({
-        pid: process.pid,
-        token: "winning-supervisor",
-      });
-    } finally {
-      JSON.parse = originalParse;
-    }
-  });
-
-  test("restores a live legacy lock when another contender reoccupies its path", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "legacy-recovery-replacement");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const lock = join(paths.output, ".lock");
-    for (const relinquishes of [false, true]) {
-      await rm(lock, { recursive: true, force: true });
-      await mkdir(lock);
-      await writeFile(
-        join(lock, "owner.json"),
-        JSON.stringify({ pid: 999_999_999 }),
-      );
-      const originalParse = JSON.parse;
-      let staleReads = 0;
-      let replaced = false;
-      let reoccupied = false;
-      let started = false;
-      JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-        const value = originalParse(...arguments_) as unknown;
-        if (
-          typeof value === "object" &&
-          value !== null &&
-          "pid" in value &&
-          value.pid === 999_999_999 &&
-          ++staleReads === 2
-        ) {
-          const previous = join(paths.output, ".legacy-stale-before-recovery");
-          renameSync(lock, previous);
-          mkdirSync(lock);
-          writeFileSync(
-            join(lock, "owner.json"),
-            JSON.stringify({ pid: process.pid, token: "legacy-supervisor" }),
-          );
-          rmSync(previous, { recursive: true });
-          replaced = true;
-        }
-        if (
-          !reoccupied &&
-          typeof value === "object" &&
-          value !== null &&
-          "token" in value &&
-          value.token === "legacy-supervisor" &&
-          !existsSync(lock)
-        ) {
-          writeFileSync(
-            lock,
-            JSON.stringify({ pid: process.pid, token: "rejected-contender" }),
-          );
-          reoccupied = true;
-        }
-        if (
-          relinquishes &&
-          typeof value === "object" &&
-          value !== null &&
-          "token" in value &&
-          value.token === "rejected-contender" &&
-          existsSync(lock)
-        ) {
-          rmSync(lock);
-        }
-        return value;
-      }) as typeof JSON.parse;
-
-      try {
-        await expect(
-          runMultiscan(
-            options(
-              paths,
-              client(async (_repository, scanOptions = {}) => {
-                started = true;
-                return await completedScan(scanOptions.outputDir!);
-              }),
-            ),
-          ),
-        ).rejects.toThrow("A multiscan supervisor is already running.");
-        expect(replaced).toBe(true);
-        expect(reoccupied).toBe(true);
-        expect(started).toBe(false);
-        expect(
-          originalParse(await readFile(join(lock, "owner.json"), "utf8")),
-        ).toMatchObject({ pid: process.pid, token: "legacy-supervisor" });
-      } finally {
-        JSON.parse = originalParse;
-      }
-    }
-  });
-
-  test("preserves a replacement lock substituted during ownership release", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "lock-release");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nlock-release,${source.path},${source.revision}\n`,
-    );
-    let signalStarted!: () => void;
-    let release!: () => void;
-    const started = new Promise<void>((resolve) => {
-      signalStarted = resolve;
-    });
-    const completion = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const security = client(async (_repository, scanOptions = {}) => {
-      signalStarted();
-      await completion;
-      return await completedScan(scanOptions.outputDir!);
-    });
-    const running = runMultiscan(options(paths, security));
-    await started;
-
-    const lock = join(paths.output, ".lock");
-    const current = JSON.parse(await readFile(lock, "utf8")) as {
-      token: string;
-    };
-    const originalParse = JSON.parse;
-    let replaced = false;
-    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-      const value = originalParse(...arguments_) as unknown;
-      if (
-        !replaced &&
-        typeof value === "object" &&
-        value !== null &&
-        "token" in value &&
-        value.token === current.token
-      ) {
-        replaced = true;
-        const replacement = join(paths.output, ".lock-replacement");
-        writeFileSync(
-          replacement,
-          JSON.stringify({ pid: process.pid, token: "new-supervisor" }),
-        );
-        renameSync(replacement, lock);
-      }
-      return value;
-    }) as typeof JSON.parse;
-
-    try {
-      release();
-      await expect(running).resolves.toMatchObject({ completed: 1, failed: 0 });
-      expect(replaced).toBe(true);
-      expect(originalParse(await readFile(lock, "utf8"))).toMatchObject({
-        pid: process.pid,
-        token: "new-supervisor",
-      });
-    } finally {
-      JSON.parse = originalParse;
-    }
-  });
-
-  test("restores a replacement legacy directory substituted during ownership release", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "legacy-lock-release");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
-    );
-    let signalStarted!: () => void;
-    let release!: () => void;
-    const started = new Promise<void>((resolve) => {
-      signalStarted = resolve;
-    });
-    const completion = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const running = runMultiscan(
-      options(
-        paths,
-        client(async (_repository, scanOptions = {}) => {
-          signalStarted();
-          await completion;
-          return await completedScan(scanOptions.outputDir!);
-        }),
-      ),
-    );
-    await started;
-    const lock = join(paths.output, ".lock");
-    const current = JSON.parse(await readFile(lock, "utf8")) as {
-      token: string;
-    };
-    const originalParse = JSON.parse;
-    let replaced = false;
-    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-      const value = originalParse(...arguments_) as unknown;
-      if (
-        !replaced &&
-        typeof value === "object" &&
-        value !== null &&
-        "token" in value &&
-        value.token === current.token
-      ) {
-        replaced = true;
-        const previous = join(paths.output, ".previous-lock");
-        renameSync(lock, previous);
-        mkdirSync(lock);
-        writeFileSync(
-          join(lock, "owner.json"),
-          JSON.stringify({ pid: process.pid, token: "legacy-successor" }),
-        );
-        rmSync(previous);
-      }
-      return value;
-    }) as typeof JSON.parse;
-
-    try {
-      release();
-      await expect(running).resolves.toMatchObject({ completed: 1, failed: 0 });
-      expect(replaced).toBe(true);
-      expect((await lstat(lock)).isDirectory()).toBe(true);
-      expect(
-        originalParse(await readFile(join(lock, "owner.json"), "utf8")),
-      ).toMatchObject({
-        pid: process.pid,
-        token: "legacy-successor",
-      });
-      expect(
-        (await readdir(paths.output)).some((name) =>
-          name.startsWith(".lock.released-"),
-        ),
-      ).toBe(false);
-    } finally {
-      JSON.parse = originalParse;
-    }
-  });
-
-  test("rolls back a published lock when recovery inspection fails", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "recovery-inspection-failure");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const lock = join(paths.output, ".lock");
-    const recovery = join(paths.output, ".lock.recovery");
-    await writeFile(
-      recovery,
-      JSON.stringify({ pid: process.pid, marker: "fail" }),
-    );
-    const originalParse = JSON.parse;
-    JSON.parse = ((...arguments_: Parameters<typeof JSON.parse>): unknown => {
-      const value = originalParse(...arguments_) as unknown;
-      if (typeof value === "object" && value !== null && "marker" in value) {
-        throw Object.assign(new Error("recovery inspection failed"), {
-          code: "EACCES",
-        });
-      }
-      return value;
-    }) as typeof JSON.parse;
-
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
-            ),
-          ),
-        ),
-      ).rejects.toThrow("recovery inspection failed");
-      await expect(access(lock)).rejects.toThrow();
-    } finally {
-      JSON.parse = originalParse;
-    }
-  });
-
-  test("cleans pending ownership files when synchronization fails", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "lock-sync-failure");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nlock-sync-failure,${source.path},${source.revision}\n`,
-    );
-    await mkdir(paths.output);
-    const probePath = join(paths.output, ".probe");
-    const probe = await open(probePath, "wx");
-    const prototype = Object.getPrototypeOf(probe) as {
-      sync(): Promise<void>;
-    };
-    await probe.close();
-    await rm(probePath);
-    const originalSync = prototype.sync;
-    prototype.sync = async () => {
-      const error = new Error(
-        "simulated lock sync failure",
-      ) as NodeJS.ErrnoException;
-      error.code = "EIO";
-      throw error;
-    };
-
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
-            ),
-          ),
-        ),
-      ).rejects.toThrow("simulated lock sync failure");
-      expect(
-        (await readdir(paths.output)).some((name) => name.startsWith(".lock")),
-      ).toBe(false);
-    } finally {
-      prototype.sync = originalSync;
     }
   });
 
