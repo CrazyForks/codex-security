@@ -336,6 +336,161 @@ describe("multiscan", () => {
   );
 
   test.each(["partial", "unknown"] as const)(
+    "resumes legacy sealed %s coverage without rerunning or duplicating cost",
+    async (completeness) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, `legacy-${completeness}`);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nlegacy,${source.path},${source.revision}\n`,
+      );
+      const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
+      await completedScan(outputDir, completeness);
+      await writeFile(
+        join(outputDir, "coverage.json"),
+        `${JSON.stringify({ completeness })}\n`,
+      );
+      const cost = {
+        model: "gpt-5.6-sol",
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        cacheWriteInputTokens: 0,
+        outputTokens: 30,
+        estimatedUsd: 231.73,
+      };
+      const receipt = {
+        id: "legacy",
+        repository: source.path,
+        revision: source.revision,
+        mode: "standard",
+        status: "failed",
+        attempt: 1,
+        outputDir,
+        cost,
+        error: "Multiscan repository coverage is incomplete.",
+      };
+      await writeFile(
+        join(paths.output, "results.jsonl"),
+        `${JSON.stringify(receipt)}\n`,
+      );
+      const progress: Parameters<
+        NonNullable<MultiscanOptions["onProgress"]>
+      >[0][] = [];
+      let attempts = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        attempts += 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+
+      const summary = await runMultiscan(
+        options(paths, security, {
+          maxAttempts: 3,
+          onProgress: (event) => progress.push(event),
+        }),
+      );
+
+      expect(summary).toMatchObject({
+        total: 1,
+        completed: 0,
+        incomplete: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(attempts).toBe(0);
+      expect(progress).toEqual([
+        {
+          repository: "legacy",
+          status: "completed_with_incomplete_coverage",
+          attempt: 1,
+          warning: `Scan coverage is ${completeness}; results may be incomplete.`,
+        },
+      ]);
+      expect(await results(summary.resultsPath)).toEqual([receipt]);
+
+      await runMultiscan(options(paths, security, { maxAttempts: 3 }));
+      expect(attempts).toBe(0);
+      expect(await results(summary.resultsPath)).toEqual([receipt]);
+    },
+  );
+
+  test.each([
+    ["operational failures", "partial", "Worker exited unexpectedly.", false],
+    [
+      "complete coverage",
+      "complete",
+      "Multiscan repository coverage is incomplete.",
+      false,
+    ],
+    [
+      "malformed coverage",
+      "malformed",
+      "Multiscan repository coverage is incomplete.",
+      false,
+    ],
+    [
+      "missing artifacts",
+      "partial",
+      "Multiscan repository coverage is incomplete.",
+      true,
+    ],
+  ] as const)(
+    "continues retrying legacy %s",
+    async (_scenario, completeness, error, missingArtifact) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "legacy-retry");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nlegacy,${source.path},${source.revision}\n`,
+      );
+      const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
+      await completedScan(outputDir);
+      await writeFile(
+        join(outputDir, "coverage.json"),
+        completeness === "malformed"
+          ? "{\n"
+          : `${JSON.stringify({ completeness })}\n`,
+      );
+      if (missingArtifact) await rm(join(outputDir, "report.md"));
+      await writeFile(
+        join(paths.output, "results.jsonl"),
+        `${JSON.stringify({
+          id: "legacy",
+          repository: source.path,
+          revision: source.revision,
+          mode: "standard",
+          status: "failed",
+          attempt: 1,
+          outputDir,
+          error,
+        })}\n`,
+      );
+      let attempts = 0;
+
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            attempts += 1;
+            return await completedScan(scanOptions.outputDir!);
+          }),
+        ),
+      );
+
+      expect(summary).toMatchObject({
+        completed: 1,
+        incomplete: 0,
+        failed: 0,
+        skipped: 0,
+      });
+      expect(attempts).toBe(1);
+      expect(await results(summary.resultsPath)).toMatchObject([
+        { status: "failed", attempt: 1, error },
+        { status: "completed", attempt: 2, coverage: "complete" },
+      ]);
+    },
+  );
+
+  test.each(["partial", "unknown"] as const)(
     "keeps sealed %s-coverage CLI runs fail-closed without retrying",
     async (completeness) => {
       const paths = await fixture();

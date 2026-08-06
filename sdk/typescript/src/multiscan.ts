@@ -124,28 +124,33 @@ async function runCampaign(
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
     if (
-      (receipt?.status === "completed" ||
-        receipt?.status === "completed_with_incomplete_coverage") &&
+      receipt !== undefined &&
       receipt.outputDir ===
         join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
       (await hasArtifacts(receipt.outputDir))
     ) {
       if (receipt.status === "completed") {
         completed += 1;
-      } else {
+        continue;
+      }
+      const coverage =
+        receipt.status === "completed_with_incomplete_coverage"
+          ? receipt.coverage ?? "unknown"
+          : await legacyIncompleteCoverage(receipt);
+      if (coverage !== undefined) {
         incomplete += 1;
         options.onProgress?.({
           repository: task.id,
-          status: receipt.status,
+          status: "completed_with_incomplete_coverage",
           attempt: receipt.attempt,
           warning:
             receipt.warning ??
-            `Scan coverage is ${receipt.coverage ?? "unknown"}; results may be incomplete.`,
+            `Scan coverage is ${coverage}; results may be incomplete.`,
         });
+        continue;
       }
-    } else {
-      pending.push(task);
     }
+    pending.push(task);
   }
   const skipped = completed + incomplete;
   if (pending.length === 0) {
@@ -391,6 +396,28 @@ async function hasArtifacts(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function legacyIncompleteCoverage(
+  receipt: MultiscanReceipt,
+): Promise<Exclude<CoverageDocument["completeness"], "complete"> | undefined> {
+  if (
+    receipt.status !== "failed" ||
+    receipt.error !== "Multiscan repository coverage is incomplete."
+  ) {
+    return undefined;
+  }
+  try {
+    const coverage = JSON.parse(
+      await readFile(join(receipt.outputDir, "coverage.json"), "utf8"),
+    ) as { completeness?: unknown };
+    return coverage.completeness === "partial" ||
+      coverage.completeness === "unknown"
+      ? coverage.completeness
+      : undefined;
+  } catch {
+    return undefined;
   }
 }
 
