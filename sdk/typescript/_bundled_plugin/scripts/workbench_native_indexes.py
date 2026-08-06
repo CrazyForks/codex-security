@@ -125,6 +125,23 @@ def _active_findings(
         "SELECT 1 FROM security_targets AS path_owner "
         "WHERE path_owner.current_path = scans.target_path))"
     )
+    scan_columns = {
+        column["name"] for column in connection.execute("PRAGMA table_info(scans)")
+    }
+    if {"target_device", "target_inode"}.issubset(scan_columns):
+        latest_identity = (
+            "FROM scans AS ownership_scan "
+            "WHERE ownership_scan.target_id = scans.target_id "
+            "AND ownership_scan.target_device IS NOT NULL "
+            "AND ownership_scan.target_inode IS NOT NULL "
+            "ORDER BY ownership_scan.started_at DESC, ownership_scan.id DESC LIMIT 1"
+        )
+        current_owner_only += (
+            " AND (scans.target_id IS NULL OR ("
+            f"scans.target_device IS (SELECT ownership_scan.target_device {latest_identity}) "
+            f"AND scans.target_inode IS (SELECT ownership_scan.target_inode {latest_identity})"
+            "))"
+        )
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""

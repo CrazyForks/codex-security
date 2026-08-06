@@ -84,7 +84,7 @@ def _requested_repository(
         SELECT target_device, target_inode
         FROM scans
         WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, id DESC
         LIMIT 1
         """,
         (target_id,),
@@ -106,6 +106,32 @@ def _requested_repository(
         ).fetchone(),
         target_id,
     )
+
+
+def _verified_target_metadata(
+    connection: sqlite3.Connection, target_id: str, repository: Path
+) -> tuple[os.stat_result | None, bool] | None:
+    requested, _ = _requested_repository(connection, repository)
+    if requested["target_id"] != target_id:
+        return None
+    try:
+        metadata = repository.stat()
+    except OSError:
+        return None, False
+    recorded = connection.execute(
+        """
+        SELECT 1
+        FROM scans
+        WHERE target_id = ? AND target_device = ? AND target_inode = ?
+        LIMIT 1
+        """,
+        (
+            target_id,
+            serialize_filesystem_identity(metadata.st_dev),
+            serialize_filesystem_identity(metadata.st_ino),
+        ),
+    ).fetchone()
+    return metadata, recorded is not None
 
 
 def list_workspace_scans(
@@ -171,7 +197,21 @@ def list_scans(
         repository = Path(args.repository).expanduser().resolve()
         requested_repository, replaced_target_id = _requested_repository(connection, repository)
         requested_target_id = requested_repository["target_id"]
-        related_target_ids = [requested_target_id] if requested_target_id else []
+        related_target_ids: list[str] = []
+        verified_targets: dict[str, tuple[os.stat_result | None, bool]] = {}
+        if requested_target_id:
+            requested_metadata = _verified_target_metadata(
+                connection, requested_target_id, repository
+            )
+            if requested_metadata is None:
+                replaced_target_id = requested_target_id
+                requested_repository = connection.execute(
+                    "SELECT '' AS target_id, ? AS target_path", (str(repository),)
+                ).fetchone()
+                requested_target_id = ""
+            else:
+                related_target_ids.append(requested_target_id)
+                verified_targets[requested_target_id] = requested_metadata
         repository_root = git_output(repository, "rev-parse", "--show-toplevel")
         checkout_boundary = (
             Path(repository_root).resolve() if repository_root is not None else None
@@ -213,13 +253,21 @@ def list_scans(
                 ).fetchone()
                 if registered_parent is not None:
                     if registered_parent["target_id"] is not None:
-                        related_target_ids.append(registered_parent["target_id"])
+                        parent_target_id = registered_parent["target_id"]
+                        parent_metadata = _verified_target_metadata(
+                            connection, parent_target_id, parent
+                        )
+                        if parent_metadata is None:
+                            repository_paths.pop()
+                            registered_parent = None
+                            continue
+                        related_target_ids.append(parent_target_id)
+                        verified_targets[parent_target_id] = parent_metadata
                     break
         if registered_repository is None and registered_parent is None:
             requested_git_directory = git_output(
                 repository, "rev-parse", "--path-format=absolute", "--git-common-dir"
             )
-            descendant_found = False
             repository_prefix = str(repository).rstrip(os.sep) + os.sep
             for scan in connection.execute(
                 "SELECT target_id, target_path FROM scans WHERE substr(target_path, 1, ?) = ?",
@@ -236,6 +284,19 @@ def list_scans(
                 elif checkout_boundary is not None:
                     continue
                 else:
+                    if scan["target_id"] is not None:
+                        owner = connection.execute(
+                            "SELECT current_path FROM security_targets WHERE id = ?",
+                            (scan["target_id"],),
+                        ).fetchone()
+                        if owner is None or Path(owner["current_path"]).resolve() != target_path:
+                            continue
+                        descendant_metadata = _verified_target_metadata(
+                            connection, scan["target_id"], target_path
+                        )
+                        if descendant_metadata is None:
+                            continue
+                        verified_targets[scan["target_id"]] = descendant_metadata
                     candidate = target_path
                     while candidate != repository:
                         marker = candidate / ".git"
@@ -245,21 +306,25 @@ def list_scans(
                     if candidate != repository:
                         continue
                 repository_paths.append(str(target_path))
-                descendant_found = True
-            if not descendant_found and requested_git_directory is not None:
-                related_target_ids.extend(
-                    target["target_id"]
-                    for target in connection.execute(
-                        "SELECT id AS target_id, current_path AS target_path FROM security_targets"
-                    )
-                    if target["target_id"] != requested_target_id
-                    and _same_repository(
+            if requested_git_directory is not None:
+                for target in connection.execute(
+                    "SELECT id AS target_id, current_path AS target_path FROM security_targets"
+                ):
+                    if target["target_id"] == requested_target_id or not _same_repository(
                         target,
                         requested_repository,
                         after_git_directory=requested_git_directory,
+                    ):
+                        continue
+                    target_metadata = _verified_target_metadata(
+                        connection, target["target_id"], Path(target["target_path"])
                     )
-                )
+                    if target_metadata is None:
+                        continue
+                    related_target_ids.append(target["target_id"])
+                    verified_targets[target["target_id"]] = target_metadata
         repository_paths = list(dict.fromkeys(repository_paths))
+        related_target_ids = list(dict.fromkeys(related_target_ids))
         repository_placeholders = ", ".join("?" for _ in repository_paths)
         repository_clauses = [
             f"scans.target_path IN ({repository_placeholders}) "
@@ -277,16 +342,16 @@ def list_scans(
             repository_clauses.append(f"scans.target_id IN ({placeholders})")
             values.extend(related_target_ids)
         clauses.append(f"({' OR '.join(repository_clauses)})")
-        if requested_target_id:
-            metadata = repository.stat()
+        for target_id, (metadata, recorded) in verified_targets.items():
+            if metadata is None or not recorded:
+                continue
             clauses.append(
-                "(scans.target_id IS NOT ? OR scans.target_device IS NULL "
-                "OR scans.target_inode IS NULL "
+                "(scans.target_id IS NOT ? "
                 "OR (scans.target_device = ? AND scans.target_inode = ?))"
             )
             values.extend(
                 (
-                    requested_target_id,
+                    target_id,
                     serialize_filesystem_identity(metadata.st_dev),
                     serialize_filesystem_identity(metadata.st_ino),
                 )
@@ -428,22 +493,58 @@ def list_unmatched_scan_pairs(
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
     requested, _replaced_target_id = _requested_repository(connection, repository)
-    metadata = repository.stat()
+    try:
+        metadata = repository.stat()
+    except OSError:
+        metadata = None
+    verified_targets: dict[str, tuple[os.stat_result | None, bool] | None] = {}
+
+    def belongs_to_current_owner(scan: sqlite3.Row) -> bool:
+        target_id = scan["target_id"]
+        if not target_id:
+            if scan["target_device"] is None and scan["target_inode"] is None:
+                return True
+            try:
+                target_metadata = Path(scan["target_path"]).stat()
+            except OSError:
+                return False
+            return (
+                stored_filesystem_identity_matches(scan["target_device"], target_metadata.st_dev)
+                and stored_filesystem_identity_matches(
+                    scan["target_inode"], target_metadata.st_ino
+                )
+            )
+        if target_id not in verified_targets:
+            target = connection.execute(
+                "SELECT current_path FROM security_targets WHERE id = ?", (target_id,)
+            ).fetchone()
+            verified_targets[target_id] = (
+                None
+                if target is None
+                else _verified_target_metadata(
+                    connection, target_id, Path(target["current_path"])
+                )
+            )
+        target_metadata = verified_targets[target_id]
+        if target_metadata is None or target_metadata[0] is None:
+            return False
+        if not target_metadata[1]:
+            return scan["target_device"] is None and scan["target_inode"] is None
+        return (
+            stored_filesystem_identity_matches(scan["target_device"], target_metadata[0].st_dev)
+            and stored_filesystem_identity_matches(
+                scan["target_inode"], target_metadata[0].st_ino
+            )
+        )
+
     selected = [
         scan
         for scan in connection.execute(
             "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
-        if _same_repository(scan, requested)
-        and (
-            scan["target_id"] != requested["target_id"]
-            or scan["target_device"] is None
-            or scan["target_inode"] is None
-            or (
-                stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev)
-                and stored_filesystem_identity_matches(scan["target_inode"], metadata.st_ino)
-            )
-        )
+        if metadata is not None
+        and _same_repository(scan, requested)
+        and belongs_to_current_owner(scan)
     ]
 
     available = []
