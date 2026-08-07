@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -29,6 +29,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
@@ -1937,6 +1938,94 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(attempts).toBe(2);
   });
 
+  test("retries Windows credential verification when a descendant disappears", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const temporary = join(home, ".auth-temporary");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    await writeFile(temporary, "temporary credential\n");
+    const originalLstat = fsPromises.lstat;
+    let removed = false;
+    let inspections = 0;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (path: Parameters<typeof lstat>[0]) => {
+        if (path === temporary && !removed) {
+          removed = true;
+          await rm(temporary);
+        }
+        return originalLstat(path);
+      },
+    }));
+
+    try {
+      await verifyStableWindowsCredentialDescendants(home, async () => {
+        inspections += 1;
+        return 1;
+      });
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+      }));
+    }
+
+    expect(removed).toBe(true);
+    expect(inspections).toBe(1);
+  });
+
+  test("rejects Windows credential descendants that repeatedly disappear", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const credential = join(home, "auth.json");
+    await mkdir(home);
+    await writeFile(credential, "credential\n");
+    const originalLstat = fsPromises.lstat;
+    let attempts = 0;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (path: Parameters<typeof lstat>[0]) => {
+        if (path === credential) {
+          attempts += 1;
+          throw Object.assign(new Error("credential disappeared"), {
+            code: "ENOENT",
+            path,
+          });
+        }
+        return originalLstat(path);
+      },
+    }));
+
+    try {
+      await expect(
+        verifyStableWindowsCredentialDescendants(home, async () => 1),
+      ).rejects.toThrow("Windows credential descendants could not be verified");
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+      }));
+    }
+
+    expect(attempts).toBe(3);
+  });
+
+  test("does not retry a missing Windows credential home", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "missing-home");
+    let inspections = 0;
+
+    await expect(
+      verifyStableWindowsCredentialDescendants(home, async () => {
+        inspections += 1;
+        return 0;
+      }),
+    ).rejects.toMatchObject({ code: "ENOENT", path: home });
+
+    expect(inspections).toBe(0);
+  });
+
   test("rejects Windows credential descendants that never stabilize", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -2477,7 +2566,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "$unexpected = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
         "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
       ].join("; ");
-      const result = spawnSync(
+      const result = await promisify(execFile)(
         powershell,
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
         {
@@ -2488,7 +2577,6 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       );
 
-      expect(result.status).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({ unexpected: 0 });
     },
   );
